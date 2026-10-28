@@ -44,6 +44,7 @@ def test_create_task_and_read_events(tmp_path):
     assert response.status_code == 201
     task = response.json()
     assert task["status"] == "queued"
+    assert task["permission_mode"] == "plan"
     assert task["queue_wait_ms"] is not None
     assert task["execution_ms"] is None
     events = client.get(f"/tasks/{task['id']}/events")
@@ -91,3 +92,28 @@ def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch
     events = client.get(f"/tasks/{task_id}/events").json()
     assert events[-1]["event_type"] == "executor.finished"
     assert events[-1]["payload"]["status"] == "failed"
+
+
+def test_permission_modes_are_persisted_and_applied():
+    from ai_work_os.worker import build_command
+
+    plan = client.post("/tasks", json={
+        "title": "Default plan mode",
+        "prompt": "Inspect without modifying",
+        "workspace_path": ".",
+    })
+    assert plan.status_code == 201
+    assert plan.json()["permission_mode"] == "plan"
+    plan_command = build_command("inspect", "plan")
+    assert plan_command[-2:] == ["--permission-mode", "plan"]
+
+    configured = client.post("/tasks", json={
+        "title": "Local configured mode",
+        "prompt": "Use configured CLI permissions",
+        "workspace_path": ".",
+        "permission_mode": "configured",
+    })
+    assert configured.status_code == 201
+    assert configured.json()["permission_mode"] == "configured"
+    configured_command = build_command("inspect", "configured")
+    assert "--permission-mode" not in configured_command

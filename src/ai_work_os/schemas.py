@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -6,6 +7,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     prompt: str = Field(min_length=1, max_length=100_000)
     workspace_path: str = Field(min_length=1, max_length=4096)
+    permission_mode: Literal["plan", "configured"] = "plan"
 
 
 class TaskRead(BaseModel):
@@ -14,6 +16,7 @@ class TaskRead(BaseModel):
     prompt: str
     workspace_path: str
     status: str
+    permission_mode: str = "plan"
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

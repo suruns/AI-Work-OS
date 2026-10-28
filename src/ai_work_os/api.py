@@ -1,4 +1,5 @@
 from pathlib import Path
+from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import select
 from .db import Base, SessionLocal, engine
@@ -6,7 +7,22 @@ from .models import Task, TaskEvent
 from .schemas import TaskCreate, TaskRead, TaskEventRead
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="AI Work OS API", version="0.1.0")
+app = FastAPI(title="AI Work OS API", version="0.2.0")
+
+WEB_DIR = Path(__file__).resolve().parent / "web"
+
+
+@app.get("/", include_in_schema=False)
+def dashboard():
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/stats")
+def task_stats() -> dict:
+    with SessionLocal() as db:
+        rows = db.execute(select(Task.status, __import__("sqlalchemy").func.count()).group_by(Task.status)).all()
+        counts = {status: count for status, count in rows}
+        return {"total": sum(counts.values()), "by_status": counts}
 
 
 @app.get("/health")

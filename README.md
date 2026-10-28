@@ -30,7 +30,7 @@ Create a task:
 curl -X POST http://127.0.0.1:8000/tasks -H 'content-type: application/json' -d '{"title":"Inspect project","prompt":"Only list files and summarize the project. Do not modify files.","workspace_path":"/absolute/path/to/a/trusted/project"}'
 ~~~
 
-Browse /docs for the API.
+Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 
 ## Safety
 - Never run this service against untrusted workspaces.
@@ -40,7 +40,7 @@ Browse /docs for the API.
 - Review changes produced by an agent before accepting them.
 
 ## Initial API
-- GET /health
+- GET / (task console)\n- GET /stats\n- GET /health
 - POST /tasks
 - GET /tasks
 - GET /tasks/{task_id}

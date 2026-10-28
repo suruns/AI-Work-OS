@@ -81,16 +81,33 @@ async def execute_task(task_id: str) -> None:
                     err.flush()
 
             readers = [asyncio.create_task(read_stdout()), asyncio.create_task(read_stderr())]
+            deadline = asyncio.get_running_loop().time() + MAX_TASK_SECONDS
             try:
-                await asyncio.wait_for(proc.wait(), timeout=MAX_TASK_SECONDS)
-            except asyncio.TimeoutError:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                error_summary = f"Task timed out after {MAX_TASK_SECONDS} seconds"
+                while proc.returncode is None:
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        with SessionLocal() as db:
+                            current = db.get(Task, task_id)
+                            cancel_requested = bool(current and current.cancel_requested)
+                        if cancel_requested:
+                            proc.terminate()
+                            try:
+                                await asyncio.wait_for(proc.wait(), timeout=5)
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                                await proc.wait()
+                            error_summary = "Cancelled by request"
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            proc.terminate()
+                            try:
+                                await asyncio.wait_for(proc.wait(), timeout=5)
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                                await proc.wait()
+                            error_summary = f"Task timed out after {MAX_TASK_SECONDS} seconds"
+                            break
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
             exit_code = proc.returncode

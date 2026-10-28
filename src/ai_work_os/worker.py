@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import select, update
@@ -26,6 +27,32 @@ def build_command(prompt: str, permission_mode: str) -> list[str]:
         command.extend(["--permission-mode", "plan"])
     return command
 
+
+async def terminate_process_tree(proc: asyncio.subprocess.Process, grace_seconds: float = 5.0) -> None:
+    """Stop the agent and any subprocesses it spawned, escalating if needed."""
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError):
+        if proc.returncode is None:
+            proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+    except asyncio.TimeoutError:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
 
 def add_event(task_id: str, event_type: str, payload: dict) -> None:
     with SessionLocal() as db:
@@ -83,10 +110,17 @@ async def execute_task(task_id: str) -> None:
         "permission_mode": permission_mode,
     })
     exit_code, error_summary, session_id = None, None, None
+    terminal_reason = None
 
     try:
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await asyncio.create_subprocess_exec(*command, cwd=str(workspace), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
 
             async def read_stdout() -> None:
                 nonlocal session_id
@@ -115,28 +149,25 @@ async def execute_task(task_id: str) -> None:
             try:
                 while proc.returncode is None:
                     try:
-                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                        await asyncio.wait_for(proc.wait(), timeout=0.25)
                     except asyncio.TimeoutError:
                         with SessionLocal() as db:
                             current = db.get(Task, task_id)
                             cancel_requested = bool(current and current.cancel_requested)
                         if cancel_requested:
-                            proc.terminate()
-                            try:
-                                await asyncio.wait_for(proc.wait(), timeout=5)
-                            except asyncio.TimeoutError:
-                                proc.kill()
-                                await proc.wait()
+                            await terminate_process_tree(proc)
+                            terminal_reason = "cancelled"
                             error_summary = "Cancelled by request"
+                            add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
                             break
                         if asyncio.get_running_loop().time() >= deadline:
-                            proc.terminate()
-                            try:
-                                await asyncio.wait_for(proc.wait(), timeout=5)
-                            except asyncio.TimeoutError:
-                                proc.kill()
-                                await proc.wait()
+                            await terminate_process_tree(proc)
+                            terminal_reason = "timeout"
                             error_summary = f"Task timed out after {MAX_TASK_SECONDS} seconds"
+                            add_event(task_id, "executor.timed_out", {
+                                "timeout_seconds": MAX_TASK_SECONDS,
+                                "exit_code": proc.returncode,
+                            })
                             break
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
@@ -151,14 +182,22 @@ async def execute_task(task_id: str) -> None:
         if task is None:
             return
         task.exit_code, task.session_id, task.finished_at = exit_code, session_id, now()
-        if task.cancel_requested:
+        if task.cancel_requested or terminal_reason == "cancelled":
             task.status = "cancelled"
         elif exit_code == 0 and error_summary is None:
             task.status = "succeeded"
         else:
             task.status = "failed"
             task.error_summary = error_summary or f"Claude Code exited with status {exit_code}"
-        db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={"status": task.status, "exit_code": exit_code, "session_id": session_id, "error_summary": task.error_summary, "stdout_path": str(stdout_path), "stderr_path": str(stderr_path)}))
+        db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
+            "status": task.status,
+            "exit_code": exit_code,
+            "session_id": session_id,
+            "error_summary": task.error_summary,
+            "terminal_reason": terminal_reason or ("success" if task.status == "succeeded" else "error"),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }))
         db.commit()
 
 

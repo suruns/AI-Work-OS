@@ -234,3 +234,43 @@ def test_running_task_cancellation_terminates_process_and_closes_lifecycle(tmp_p
     assert any(event["event_type"] == "executor.cancelled" for event in events)
     assert events[-1]["event_type"] == "executor.finished"
     assert events[-1]["payload"]["terminal_reason"] == "cancelled"
+
+
+
+def test_worker_interruption_terminates_subprocess_and_records_failure(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexec sleep 10\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    created = client.post("/tasks", json={
+        "title": "Worker interruption test",
+        "prompt": "Sleep until worker stops",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        db.commit()
+
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    monkeypatch.setattr(worker, "MAX_TASK_SECONDS", 30)
+
+    async def interrupt_worker():
+        execution = asyncio.create_task(worker.execute_task(task_id))
+        await asyncio.sleep(0.15)
+        execution.cancel()
+        await asyncio.wait_for(execution, timeout=5)
+
+    asyncio.run(interrupt_worker())
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert "interrupted" in task["error_summary"].lower()
+    events = client.get(f"/tasks/{task_id}/events").json()
+    assert any(event["event_type"] == "executor.interrupted" for event in events)
+    assert events[-1]["payload"]["terminal_reason"] == "worker_interrupted"

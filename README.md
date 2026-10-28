@@ -48,7 +48,7 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - GET /tasks/{task_id}/events
 - POST /tasks/{task_id}/cancel
 
-Task responses expose `queue_wait_ms` and `execution_ms` separately. The worker records an `executor.claimed` event with queue-wait timing, so delayed dispatch can be distinguished from slow agent execution. The dashboard folds repeated `thinking_tokens` updates into one timeline summary; the raw JSONL output and raw API events remain available for debugging.
+Task responses expose `queue_wait_ms` and `execution_ms` separately. The worker records an `executor.claimed` event with queue-wait timing, so delayed dispatch can be distinguished from slow agent execution. The dashboard requests a compact timeline that folds repeated `thinking_tokens` updates into one summary, reducing payload size while preserving raw JSONL output. Use `/tasks/{task_id}/events?include_thinking_tokens=true` to retrieve every raw event for debugging.
 
 Cancelling a queued task immediately marks it cancelled and records a terminal event. Running-task cancellation is cooperative at the control-plane level: the worker polls the cancellation flag and terminates the Claude Code subprocess.
 

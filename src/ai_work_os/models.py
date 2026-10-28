@@ -29,6 +29,7 @@ class Task(Base):
     prompt: Mapped[str] = mapped_column(Text)
     workspace_path: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    permission_mode: Mapped[str] = mapped_column(String(32), default="plan", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

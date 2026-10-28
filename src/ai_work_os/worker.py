@@ -5,10 +5,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import select, update
-from .db import Base, SessionLocal, engine
+from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, elapsed_ms
 
 Base.metadata.create_all(bind=engine)
+ensure_schema_compatibility()
 STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
 CLAUDE_BIN = os.getenv("AI_WORK_OS_CLAUDE_BIN", "claude")
 POLL_SECONDS = float(os.getenv("AI_WORK_OS_POLL_SECONDS", "1"))
@@ -17,6 +18,13 @@ MAX_TASK_SECONDS = int(os.getenv("AI_WORK_OS_MAX_TASK_SECONDS", "3600"))
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def build_command(prompt: str, permission_mode: str) -> list[str]:
+    command = [CLAUDE_BIN, "-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
+    if permission_mode == "plan":
+        command.extend(["--permission-mode", "plan"])
+    return command
 
 
 def add_event(task_id: str, event_type: str, payload: dict) -> None:
@@ -60,12 +68,20 @@ async def execute_task(task_id: str) -> None:
             return
         workspace = Path(task.workspace_path)
         prompt = task.prompt
+        permission_mode = task.permission_mode
 
     task_dir = STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = task_dir / "stdout.jsonl", task_dir / "stderr.log"
-    command = [CLAUDE_BIN, "-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
-    add_event(task_id, "executor.started", {"command": [CLAUDE_BIN, "-p", "<prompt>", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"], "workspace": str(workspace)})
+    command = build_command(prompt, permission_mode)
+    logged_command = [CLAUDE_BIN, "-p", "<prompt>", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
+    if permission_mode == "plan":
+        logged_command.extend(["--permission-mode", "plan"])
+    add_event(task_id, "executor.started", {
+        "command": logged_command,
+        "workspace": str(workspace),
+        "permission_mode": permission_mode,
+    })
     exit_code, error_summary, session_id = None, None, None
 
     try:

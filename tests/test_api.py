@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from ai_work_os.api import app
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
-from ai_work_os.models import TaskEvent
+from ai_work_os.models import Task, TaskEvent, utcnow
 
 client = TestClient(app)
 
@@ -155,3 +155,40 @@ def test_event_timeline_compacts_thinking_tokens_but_preserves_raw_access(tmp_pa
         event["payload"].get("subtype") == "thinking_tokens"
         for event in raw
     ) == 3
+
+
+
+def test_worker_timeout_is_explicit_and_finishes_task(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexec sleep 10\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+
+    created = client.post("/tasks", json={
+        "title": "Timeout test",
+        "prompt": "Sleep for too long",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        db.commit()
+
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    monkeypatch.setattr(worker, "MAX_TASK_SECONDS", 0.1)
+
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert "timed out" in task["error_summary"]
+    events = client.get(f"/tasks/{task_id}/events").json()
+    timeout_events = [event for event in events if event["event_type"] == "executor.timed_out"]
+    assert len(timeout_events) == 1
+    assert timeout_events[0]["payload"]["timeout_seconds"] == 0.1
+    assert events[-1]["event_type"] == "executor.finished"
+    assert events[-1]["payload"]["terminal_reason"] == "timeout"

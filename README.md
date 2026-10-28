@@ -37,7 +37,8 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - The worker does not add --dangerously-skip-permissions or bypassPermissions.
 - CLI output is stored under storage/tasks/<task-id>/; it may contain source code or secrets. Protect this directory.
 - Bind the API to localhost unless authentication and network controls have been configured.
-- Review changes produced by an agent before accepting them.
+- New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use local Claude Code settings" only when the task is expected to edit files; that mode deliberately leaves permission behavior to the CLI's local configuration.
+- Plan mode is a Claude Code permission control, not an OS-level sandbox. Continue to use trusted workspaces and review agent activity.
 
 ## Initial API
 - GET / (task console)\n- GET /stats\n- GET /health

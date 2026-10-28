@@ -2,11 +2,12 @@ from pathlib import Path
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import select
-from .db import Base, SessionLocal, engine
+from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, utcnow
 from .schemas import TaskCreate, TaskRead, TaskEventRead
 
 Base.metadata.create_all(bind=engine)
+ensure_schema_compatibility()
 app = FastAPI(title="AI Work OS API", version="0.2.0")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -35,7 +36,7 @@ def create_task(body: TaskCreate) -> Task:
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
-    task = Task(title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace))
+    task = Task(title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace), permission_mode=body.permission_mode)
     with SessionLocal() as db:
         db.add(task)
         db.commit()

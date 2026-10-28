@@ -3,7 +3,7 @@ from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import select
 from .db import Base, SessionLocal, engine
-from .models import Task, TaskEvent
+from .models import Task, TaskEvent, utcnow
 from .schemas import TaskCreate, TaskRead, TaskEventRead
 
 Base.metadata.create_all(bind=engine)
@@ -78,8 +78,20 @@ def cancel_task(task_id: str) -> Task:
         if task.status in {"queued", "running"}:
             task.cancel_requested = 1
             if task.status == "queued":
+                # A queued task has no worker to observe the cancellation flag.
                 task.status = "cancelled"
-            db.add(TaskEvent(task_id=task.id, event_type="task.cancel_requested", payload={"status": task.status}))
+                task.finished_at = utcnow()
+                db.add(TaskEvent(
+                    task_id=task.id,
+                    event_type="task.cancelled",
+                    payload={"status": "cancelled", "cancelled_before_start": True},
+                ))
+            else:
+                db.add(TaskEvent(
+                    task_id=task.id,
+                    event_type="task.cancel_requested",
+                    payload={"status": "running"},
+                ))
             db.commit()
             db.refresh(task)
         return task

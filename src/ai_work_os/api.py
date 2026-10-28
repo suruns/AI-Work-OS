@@ -1,7 +1,7 @@
 from pathlib import Path
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, utcnow
 from .schemas import TaskCreate, TaskRead, TaskEventRead
@@ -67,50 +67,47 @@ def get_task_events(
     task_id: str,
     include_thinking_tokens: bool = Query(default=True),
 ) -> list[TaskEvent | dict]:
+    thinking_filter = (
+        (TaskEvent.event_type == "claude.system")
+        & (TaskEvent.payload["subtype"].as_string() == "thinking_tokens")
+    )
     with SessionLocal() as db:
         if not db.get(Task, task_id):
             raise HTTPException(status_code=404, detail="task not found")
-        events = list(db.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.id)
+        base_query = select(TaskEvent).where(TaskEvent.task_id == task_id)
+        if include_thinking_tokens:
+            return list(db.scalars(base_query.order_by(TaskEvent.id)))
+
+        # Exclude noisy token updates in SQL rather than loading every raw event.
+        visible = list(db.scalars(
+            base_query.where(~thinking_filter).order_by(TaskEvent.id)
         ))
-
-    if include_thinking_tokens:
-        return events
-
-    thinking = [
-        event for event in events
-        if event.event_type == "claude.system"
-        and event.payload.get("subtype") == "thinking_tokens"
-    ]
-    visible = [
-        event for event in events
-        if not (
-            event.event_type == "claude.system"
-            and event.payload.get("subtype") == "thinking_tokens"
+        token_query = select(TaskEvent).where(
+            TaskEvent.task_id == task_id, thinking_filter
         )
-    ]
-    if thinking:
-        latest = thinking[-1]
-        estimates = [
-            event.payload.get("estimated_tokens")
-            for event in thinking
-            if isinstance(event.payload.get("estimated_tokens"), (int, float))
-        ]
-        visible.append({
-            "id": latest.id,
-            "task_id": latest.task_id,
-            "occurred_at": latest.occurred_at,
-            "event_type": "claude.system.thinking_tokens_summary",
-            "payload": {
-                "sample_count": len(thinking),
-                "first_seen": thinking[0].occurred_at.isoformat(),
-                "last_seen": latest.occurred_at.isoformat(),
-                "latest_estimated_tokens": estimates[-1] if estimates else None,
-            },
-        })
+        sample_count = db.scalar(
+            select(func.count(TaskEvent.id)).where(
+                TaskEvent.task_id == task_id, thinking_filter
+            )
+        ) or 0
+        if sample_count:
+            first = db.scalar(token_query.order_by(TaskEvent.id.asc()).limit(1))
+            latest = db.scalar(token_query.order_by(TaskEvent.id.desc()).limit(1))
+            assert first is not None and latest is not None
+            visible.append({
+                "id": latest.id,
+                "task_id": latest.task_id,
+                "occurred_at": latest.occurred_at,
+                "event_type": "claude.system.thinking_tokens_summary",
+                "payload": {
+                    "sample_count": sample_count,
+                    "first_seen": first.occurred_at.isoformat(),
+                    "last_seen": latest.occurred_at.isoformat(),
+                    "latest_estimated_tokens": latest.payload.get("estimated_tokens"),
+                },
+            })
     visible.sort(key=lambda event: event.id if isinstance(event, TaskEvent) else event["id"])
     return visible
-
 
 @app.post("/tasks/{task_id}/cancel", response_model=TaskRead)
 def cancel_task(task_id: str) -> Task:

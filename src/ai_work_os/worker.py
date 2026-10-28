@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import select, update
 from .db import Base, SessionLocal, engine
-from .models import Task, TaskEvent
+from .models import Task, TaskEvent, elapsed_ms
 
 Base.metadata.create_all(bind=engine)
 STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
@@ -30,11 +30,25 @@ def claim_task() -> str | None:
         task = db.scalar(select(Task).where(Task.status == "queued").order_by(Task.created_at).limit(1))
         if task is None:
             return None
-        result = db.execute(update(Task).where(Task.id == task.id, Task.status == "queued").values(status="running", started_at=now()))
+        started_at = now()
+        result = db.execute(
+            update(Task)
+            .where(Task.id == task.id, Task.status == "queued")
+            .values(status="running", started_at=started_at)
+        )
         if result.rowcount != 1:
             db.rollback()
             return None
         task_id = task.id
+        db.add(TaskEvent(
+            task_id=task_id,
+            event_type="executor.claimed",
+            payload={
+                "queue_wait_ms": elapsed_ms(task.created_at, started_at),
+                "queued_at": task.created_at.isoformat(),
+                "claimed_at": started_at.isoformat(),
+            },
+        ))
         db.commit()
         return task_id
 

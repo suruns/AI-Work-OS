@@ -169,6 +169,11 @@ async def execute_task(task_id: str) -> None:
                                 "exit_code": proc.returncode,
                             })
                             break
+            except asyncio.CancelledError:
+                await terminate_process_tree(proc)
+                terminal_reason = "worker_interrupted"
+                error_summary = "Worker interrupted; Claude subprocess tree terminated"
+                add_event(task_id, "executor.interrupted", {"reason": "worker_shutdown"})
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
             exit_code = proc.returncode

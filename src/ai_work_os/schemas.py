@@ -21,6 +21,8 @@ class TaskRead(BaseModel):
     session_id: str | None
     error_summary: str | None
     cancel_requested: int
+    queue_wait_ms: int | None = None
+    execution_ms: int | None = None
     model_config = {"from_attributes": True}
 
 

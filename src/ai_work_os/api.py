@@ -63,11 +63,53 @@ def get_task(task_id: str) -> Task:
 
 
 @app.get("/tasks/{task_id}/events", response_model=list[TaskEventRead])
-def get_task_events(task_id: str) -> list[TaskEvent]:
+def get_task_events(
+    task_id: str,
+    include_thinking_tokens: bool = Query(default=True),
+) -> list[TaskEvent | dict]:
     with SessionLocal() as db:
         if not db.get(Task, task_id):
             raise HTTPException(status_code=404, detail="task not found")
-        return list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.id)))
+        events = list(db.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.id)
+        ))
+
+    if include_thinking_tokens:
+        return events
+
+    thinking = [
+        event for event in events
+        if event.event_type == "claude.system"
+        and event.payload.get("subtype") == "thinking_tokens"
+    ]
+    visible = [
+        event for event in events
+        if not (
+            event.event_type == "claude.system"
+            and event.payload.get("subtype") == "thinking_tokens"
+        )
+    ]
+    if thinking:
+        latest = thinking[-1]
+        estimates = [
+            event.payload.get("estimated_tokens")
+            for event in thinking
+            if isinstance(event.payload.get("estimated_tokens"), (int, float))
+        ]
+        visible.append({
+            "id": latest.id,
+            "task_id": latest.task_id,
+            "occurred_at": latest.occurred_at,
+            "event_type": "claude.system.thinking_tokens_summary",
+            "payload": {
+                "sample_count": len(thinking),
+                "first_seen": thinking[0].occurred_at.isoformat(),
+                "last_seen": latest.occurred_at.isoformat(),
+                "latest_estimated_tokens": estimates[-1] if estimates else None,
+            },
+        })
+    visible.sort(key=lambda event: event.id if isinstance(event, TaskEvent) else event["id"])
+    return visible
 
 
 @app.post("/tasks/{task_id}/cancel", response_model=TaskRead)

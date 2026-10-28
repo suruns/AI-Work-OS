@@ -2,6 +2,8 @@ import asyncio
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
 from ai_work_os import worker
+from ai_work_os.db import SessionLocal
+from ai_work_os.models import TaskEvent
 
 client = TestClient(app)
 
@@ -117,3 +119,39 @@ def test_permission_modes_are_persisted_and_applied():
     assert configured.json()["permission_mode"] == "configured"
     configured_command = build_command("inspect", "configured")
     assert "--permission-mode" not in configured_command
+
+
+def test_event_timeline_compacts_thinking_tokens_but_preserves_raw_access(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Compact event timeline",
+        "prompt": "Inspect events",
+        "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        db.add_all([
+            TaskEvent(task_id=task_id, event_type="claude.system", payload={
+                "subtype": "thinking_tokens", "estimated_tokens": estimate,
+            })
+            for estimate in (3, 7, 12)
+        ])
+        db.commit()
+
+    compact = client.get(
+        f"/tasks/{task_id}/events?include_thinking_tokens=false"
+    ).json()
+    summaries = [
+        event for event in compact
+        if event["event_type"] == "claude.system.thinking_tokens_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["payload"]["sample_count"] == 3
+    assert summaries[0]["payload"]["latest_estimated_tokens"] == 12
+
+    raw = client.get(
+        f"/tasks/{task_id}/events?include_thinking_tokens=true"
+    ).json()
+    assert sum(
+        event["payload"].get("subtype") == "thinking_tokens"
+        for event in raw
+    ) == 3

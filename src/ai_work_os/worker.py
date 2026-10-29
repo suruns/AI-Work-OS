@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import signal
+import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from sqlalchemy import select, update
@@ -195,7 +196,9 @@ async def execute_task(task_id: str) -> None:
 
     task_dir = STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path, stderr_path = task_dir / "stdout.jsonl", task_dir / "stderr.log"
+    attempt_number = max(1, int(task.attempt_count or 1))
+    stdout_path = task_dir / f"stdout.attempt-{attempt_number:03d}.jsonl"
+    stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
     workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
     command = build_command(prompt, permission_mode)
     logged_command = [CLAUDE_BIN, "-p", "<prompt>", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
@@ -205,6 +208,10 @@ async def execute_task(task_id: str) -> None:
         "command": logged_command,
         "workspace": str(workspace),
         "permission_mode": permission_mode,
+        "attempt": attempt_number,
+        "max_attempts": task.max_attempts,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
     })
     exit_code, error_summary, session_id = None, None, None
     terminal_reason = None
@@ -279,6 +286,16 @@ async def execute_task(task_id: str) -> None:
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
 
+    # Preserve compatibility aliases for existing clients while retaining immutable per-attempt logs.
+    try:
+        shutil.copyfile(stdout_path, task_dir / "stdout.jsonl")
+    except OSError:
+        pass
+    try:
+        shutil.copyfile(stderr_path, task_dir / "stderr.log")
+    except OSError:
+        pass
+
     workspace_after = await capture_workspace_snapshot(workspace, [task_dir])
     workspace_changes = compare_workspace_snapshots(workspace_before, workspace_after)
     workspace_report_path = task_dir / "workspace_changes.json"
@@ -343,6 +360,8 @@ async def execute_task(task_id: str) -> None:
             "max_attempts": task.max_attempts,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
+            "latest_stdout_alias": str(task_dir / "stdout.jsonl"),
+            "latest_stderr_alias": str(task_dir / "stderr.log"),
         }))
         db.commit()
 

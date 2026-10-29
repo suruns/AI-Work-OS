@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TaskCreate(BaseModel):
@@ -10,6 +10,21 @@ class TaskCreate(BaseModel):
     permission_mode: Literal["plan", "configured"] = "plan"
     priority: int = Field(default=0, ge=0, le=100)
     max_attempts: int = Field(default=1, ge=1, le=3)
+    acceptance_criteria: str | None = Field(default=None, max_length=10_000)
+    verification_commands: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("verification_commands")
+    @classmethod
+    def validate_verification_commands(cls, commands: list[str]) -> list[str]:
+        normalized = []
+        for command in commands:
+            command = command.strip()
+            if not command:
+                continue
+            if len(command) > 2000 or "\\x00" in command:
+                raise ValueError("each verification command must be at most 2000 characters and contain no NUL")
+            normalized.append(command)
+        return normalized
 
 
 class TaskRead(BaseModel):
@@ -22,6 +37,9 @@ class TaskRead(BaseModel):
     priority: int = 0
     max_attempts: int = 1
     attempt_count: int = 0
+    acceptance_criteria: str | None = None
+    verification_commands: list[str] = Field(default_factory=list)
+    verification_status: str = "not_configured"
     available_at: datetime | None = None
     created_at: datetime
     started_at: datetime | None

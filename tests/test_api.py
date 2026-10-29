@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
 from ai_work_os import worker
@@ -274,3 +275,39 @@ def test_worker_interruption_terminates_subprocess_and_records_failure(tmp_path,
     events = client.get(f"/tasks/{task_id}/events").json()
     assert any(event["event_type"] == "executor.interrupted" for event in events)
     assert events[-1]["payload"]["terminal_reason"] == "worker_interrupted"
+
+
+
+def test_workspace_snapshot_distinguishes_preexisting_and_new_changes(tmp_path):
+    workspace = tmp_path / "git-workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.name", "AI Work OS tests"], check=True)
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("committed\\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "initial"], check=True)
+
+    # This modification predates the task and must be clearly labelled as such.
+    tracked.write_text("pre-existing edit\\n", encoding="utf-8")
+    before = asyncio.run(worker.capture_workspace_snapshot(workspace))
+    assert before["available"] is True
+    assert "tracked.txt" in before["tracked"]
+
+    tracked.write_text("changed by task\\n", encoding="utf-8")
+    (workspace / "new-output.txt").write_text("created during task\\n", encoding="utf-8")
+    after = asyncio.run(worker.capture_workspace_snapshot(workspace))
+    report = worker.compare_workspace_snapshots(before, after)
+
+    assert report["available"] is True
+    assert report["changed_during_task"] == ["new-output.txt", "tracked.txt"]
+    assert report["preexisting_changes"] == ["tracked.txt"]
+    assert report["final_changes"] == ["new-output.txt", "tracked.txt"]
+
+
+def test_workspace_snapshot_reports_non_git_workspace_as_unavailable(tmp_path):
+    snapshot = asyncio.run(worker.capture_workspace_snapshot(tmp_path))
+    report = worker.compare_workspace_snapshots(snapshot, snapshot)
+    assert snapshot["available"] is False
+    assert report["available"] is False

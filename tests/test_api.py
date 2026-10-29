@@ -103,6 +103,79 @@ def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch
     assert events[-1]["payload"]["status"] == "failed"
 
 
+def test_priority_and_retry_options_are_validated_and_persisted(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Prioritized task", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "priority": 75, "max_attempts": 3,
+    })
+    assert created.status_code == 201
+    task = created.json()
+    assert task["priority"] == 75
+    assert task["max_attempts"] == 3
+    assert task["attempt_count"] == 0
+    assert task["available_at"] is not None
+
+    invalid = client.post("/tasks", json={
+        "title": "Invalid priority", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "priority": 101,
+    })
+    assert invalid.status_code == 422
+    invalid_attempts = client.post("/tasks", json={
+        "title": "Too many attempts", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "max_attempts": 4,
+    })
+    assert invalid_attempts.status_code == 422
+
+
+def test_priority_queue_claims_highest_priority_first(tmp_path):
+    from ai_work_os.worker import claim_task
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued").update({Task.status: "cancelled"})
+        db.commit()
+    low = client.post("/tasks", json={
+        "title": "Low priority", "prompt": "Inspect", "workspace_path": str(tmp_path), "priority": 1,
+    }).json()
+    high = client.post("/tasks", json={
+        "title": "High priority", "prompt": "Inspect", "workspace_path": str(tmp_path), "priority": 90,
+    }).json()
+    assert claim_task() == high["id"]
+    with SessionLocal() as db:
+        low_task = db.get(Task, low["id"])
+        assert low_task.status == "queued"
+        claimed = db.get(Task, high["id"])
+        assert claimed.attempt_count == 1
+        low_task.status = "cancelled"
+        claimed.status = "cancelled"
+        db.commit()
+
+
+def test_retry_is_scheduled_after_a_failed_attempt(tmp_path, monkeypatch):
+    from ai_work_os.worker import claim_task
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued").update({Task.status: "cancelled"})
+        db.commit()
+    created = client.post("/tasks", json={
+        "title": "Retry test", "prompt": "Retry if failed", "workspace_path": str(tmp_path),
+        "max_attempts": 2,
+    })
+    task_id = created.json()["id"]
+    assert claim_task() == task_id
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(tmp_path / "missing-claude"))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    monkeypatch.setattr(worker, "RETRY_BASE_DELAY_SECONDS", 0)
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "queued"
+    assert task["attempt_count"] == 1
+    assert task["finished_at"] is None
+    events = client.get(f"/tasks/{task_id}/events").json()
+    assert any(event["event_type"] == "executor.retry_scheduled" for event in events)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "cancelled"
+        db.commit()
+
+
 def test_permission_modes_are_persisted_and_applied():
     from ai_work_os.worker import build_command
 

@@ -158,6 +158,7 @@ def claim_task() -> str | None:
         )
         if task is None:
             return None
+        attempt_number = int(task.attempt_count or 0) + 1
         result = db.execute(
             update(Task)
             .where(Task.id == task.id, Task.status == "queued")
@@ -175,7 +176,7 @@ def claim_task() -> str | None:
                 "queued_at": task.created_at.isoformat(),
                 "claimed_at": started_at.isoformat(),
                 "priority": task.priority,
-                "attempt": task.attempt_count + 1,
+                "attempt": attempt_number,
                 "max_attempts": task.max_attempts,
             },
         ))

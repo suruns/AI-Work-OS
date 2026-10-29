@@ -8,6 +8,8 @@ class TaskCreate(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000)
     workspace_path: str = Field(min_length=1, max_length=4096)
     permission_mode: Literal["plan", "configured"] = "plan"
+    priority: int = Field(default=0, ge=0, le=100)
+    max_attempts: int = Field(default=1, ge=1, le=3)
 
 
 class TaskRead(BaseModel):
@@ -17,6 +19,10 @@ class TaskRead(BaseModel):
     workspace_path: str
     status: str
     permission_mode: str = "plan"
+    priority: int = 0
+    max_attempts: int = 1
+    attempt_count: int = 0
+    available_at: datetime | None = None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

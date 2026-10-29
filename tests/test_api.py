@@ -23,6 +23,8 @@ def test_dashboard_is_served():
     assert "AI Work OS" in response.text
     assert "function renderTaskResult(events)" in response.text
     assert "Agent result" in response.text
+    assert "function renderArtifacts(data)" in response.text
+    assert "Workspace files changed during task" in response.text
 
 
 def test_stats_shape():

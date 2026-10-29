@@ -76,7 +76,7 @@ async def _git_output(workspace: Path, *args: str) -> bytes:
 def _hash_path(path: Path) -> str:
     digest = hashlib.sha256()
     if path.is_symlink():
-        digest.update(b"symlink\\0")
+        digest.update(b"symlink\0")
         digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
     else:
         with path.open("rb") as stream:
@@ -89,8 +89,8 @@ async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] 
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
         root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
-        tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\\0")
-        untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\\0")
+        tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\0")
+        untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\0")
         tracked = {}
         for raw_path in filter(None, tracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")

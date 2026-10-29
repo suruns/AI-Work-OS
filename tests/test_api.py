@@ -200,10 +200,17 @@ def test_retry_is_scheduled_after_a_failed_attempt(tmp_path, monkeypatch):
     assert task["finished_at"] is None
     events = client.get(f"/tasks/{task_id}/events").json()
     assert any(event["event_type"] == "executor.retry_scheduled" for event in events)
-    with SessionLocal() as db:
-        task = db.get(Task, task_id)
-        task.status = "cancelled"
-        db.commit()
+    assert (tmp_path / "storage" / "tasks" / task_id / "stdout.attempt-001.jsonl").is_file()
+
+    assert claim_task() == task_id
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["attempt_count"] == 2
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    assert (task_dir / "stdout.attempt-001.jsonl").is_file()
+    assert (task_dir / "stdout.attempt-002.jsonl").is_file()
+    assert (task_dir / "stdout.jsonl").read_text(encoding="utf-8") == (task_dir / "stdout.attempt-002.jsonl").read_text(encoding="utf-8")
 
 
 def test_permission_modes_are_persisted_and_applied():

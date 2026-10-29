@@ -215,6 +215,147 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
     }
 
 
+@app.get("/tasks/{task_id}/artifacts")
+def list_task_artifacts(task_id: str) -> dict:
+    """List task-owned logs/reports and workspace files changed during execution."""
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        workspace = Path(task.workspace_path).resolve()
+
+    task_dir = (STORAGE / "tasks" / task_id).resolve()
+    artifacts = []
+    for name, kind in (
+        ("stdout.jsonl", "execution_log"),
+        ("stderr.log", "error_log"),
+        ("workspace_changes.json", "workspace_change_report"),
+    ):
+        candidate = task_dir / name
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        artifacts.append({
+            "name": name,
+            "kind": kind,
+            "size_bytes": candidate.stat().st_size,
+            "download_url": f"/tasks/{task_id}/artifacts/{name}",
+        })
+
+    report_path = task_dir / "workspace_changes.json"
+    workspace_files = []
+    report_available = False
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report_available = bool(report.get("available"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        report = {}
+
+    if report_available:
+        try:
+            root_result = subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                capture_output=True, timeout=10, check=True,
+            )
+            root = Path(os.fsdecode(root_result.stdout).strip()).resolve()
+            for rel in sorted(set(report.get("changed_during_task", []))):
+                rel_path = PurePosixPath(rel)
+                if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts or "\x00" in rel:
+                    continue
+                lexical = root / Path(*rel_path.parts)
+                # Refuse symlinks anywhere in the path, not only at the leaf.
+                chain = [lexical, *lexical.parents]
+                if any(item.is_symlink() for item in chain if item == root or root in item.parents):
+                    continue
+                try:
+                    candidate = lexical.resolve(strict=True)
+                except (FileNotFoundError, OSError):
+                    continue
+                if candidate == root or root not in candidate.parents or not candidate.is_file():
+                    continue
+                workspace_files.append({
+                    "path": rel,
+                    "size_bytes": candidate.stat().st_size,
+                    "download_url": f"/tasks/{task_id}/workspace-file?path={rel}",
+                })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            # Artifact logs remain available even if the workspace can no longer be inspected.
+            pass
+
+    return {
+        "task_id": task_id,
+        "artifacts": artifacts,
+        "workspace_files": workspace_files,
+        "workspace_files_available": report_available,
+    }
+
+
+@app.get("/tasks/{task_id}/artifacts/{name}")
+def download_task_artifact(task_id: str, name: str):
+    allowed = {
+        "stdout.jsonl": "application/x-ndjson",
+        "stderr.log": "text/plain; charset=utf-8",
+        "workspace_changes.json": "application/json",
+    }
+    if name not in allowed:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    with SessionLocal() as db:
+        if not db.get(Task, task_id):
+            raise HTTPException(status_code=404, detail="task not found")
+    task_dir = (STORAGE / "tasks" / task_id).resolve()
+    candidate = task_dir / name
+    if candidate.is_symlink() or not candidate.is_file() or task_dir not in candidate.resolve().parents:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return FileResponse(candidate, media_type=allowed[name], filename=name)
+
+
+@app.get("/tasks/{task_id}/workspace-file")
+def download_workspace_file(task_id: str, path: str = Query(min_length=1, max_length=1000)):
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        workspace = Path(task.workspace_path).resolve()
+
+    rel_path = PurePosixPath(path)
+    if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts or "\x00" in path:
+        raise HTTPException(status_code=400, detail="path must be a safe relative workspace path")
+
+    report_path = (STORAGE / "tasks" / task_id / "workspace_changes.json").resolve()
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Workspace change report is not available yet.") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="Could not read workspace change report.") from exc
+    if not report.get("available"):
+        raise HTTPException(status_code=409, detail=report.get("reason", "Workspace file downloads are unavailable."))
+    if path not in report.get("changed_during_task", []):
+        raise HTTPException(status_code=404, detail="path was not changed during this task")
+
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+            capture_output=True, timeout=10, check=True,
+        )
+        root = Path(os.fsdecode(root_result.stdout).strip()).resolve()
+        lexical = root / Path(*rel_path.parts)
+        chain = [lexical, *lexical.parents]
+        if any(item.is_symlink() for item in chain if item == root or root in item.parents):
+            raise HTTPException(status_code=400, detail="symlink downloads are not supported")
+        candidate = lexical.resolve(strict=True)
+        if candidate == root or root not in candidate.parents or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="workspace file not found")
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Git workspace lookup timed out.") from exc
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=422, detail="Workspace is not a readable Git repository.") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="workspace file not found") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail="Could not inspect workspace file.") from exc
+    return FileResponse(candidate, media_type="application/octet-stream", filename=candidate.name)
+
+
 @app.post("/tasks/{task_id}/cancel", response_model=TaskRead)
 def cancel_task(task_id: str) -> Task:
     with SessionLocal() as db:

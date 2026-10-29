@@ -46,6 +46,9 @@ def create_task(body: TaskCreate) -> Task:
         title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
         permission_mode=body.permission_mode, priority=body.priority,
         max_attempts=body.max_attempts,
+        acceptance_criteria=body.acceptance_criteria,
+        verification_commands=body.verification_commands,
+        verification_status="pending" if body.verification_commands else "not_configured",
     )
     with SessionLocal() as db:
         db.add(task)
@@ -238,6 +241,7 @@ def list_task_artifacts(task_id: str) -> dict:
         ("stdout.jsonl", "execution_log"),
         ("stderr.log", "error_log"),
         ("workspace_changes.json", "workspace_change_report"),
+        ("verification.json", "verification_report"),
     ):
         candidate = task_dir / name
         if not storage_path_safe or candidate.is_symlink() or not candidate.is_file():
@@ -318,6 +322,7 @@ def download_task_artifact(task_id: str, name: str):
         "stdout.jsonl": "application/x-ndjson",
         "stderr.log": "text/plain; charset=utf-8",
         "workspace_changes.json": "application/json",
+        "verification.json": "application/json",
     }
     if name not in allowed:
         match = re.fullmatch(r"(stdout|stderr)\.attempt-(\d{3})\.(jsonl|log)", name)

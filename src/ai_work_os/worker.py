@@ -266,15 +266,22 @@ async def execute_task(task_id: str) -> None:
     workspace_after = await capture_workspace_snapshot(workspace)
     workspace_changes = compare_workspace_snapshots(workspace_before, workspace_after)
     workspace_report_path = task_dir / "workspace_changes.json"
-    workspace_report_path.write_text(
-        json.dumps(workspace_changes, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    report_written = False
+    try:
+        workspace_report_path.write_text(
+            json.dumps(workspace_changes, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        report_written = True
+    except OSError as exc:
+        workspace_changes["report_write_error"] = f"{type(exc).__name__}: {exc}"
     add_event(task_id, "workspace.changes_reported", {
         "available": workspace_changes["available"],
         "changed_file_count": len(workspace_changes.get("changed_during_task", [])),
-        "report_path": str(workspace_report_path),
+        "report_path": str(workspace_report_path) if report_written else None,
+        "report_written": report_written,
         "preexisting_file_count": len(workspace_changes.get("preexisting_changes", [])),
+        "report_write_error": workspace_changes.get("report_write_error"),
     })
 
     with SessionLocal() as db:

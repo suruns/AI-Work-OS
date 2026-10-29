@@ -3,7 +3,7 @@
 A control plane around existing coding agents. The first vertical slice targets Claude Code CLI and focuses on durable task records, execution events, logs, and a small HTTP API.
 
 ## Status
-Early MVP scaffold. The API and worker are separate processes; SQLite is intended for local single-machine development. This is not yet a production multi-user deployment.
+Local MVP for a single trusted developer machine. The API and worker are separate processes; SQLite is the task store. Authentication, multi-user isolation, and production deployment hardening are out of scope.
 
 ## Requirements
 - Python 3.11+
@@ -56,4 +56,6 @@ Cancelling a queued task immediately marks it cancelled and records a terminal e
 
 For Git workspaces, the worker snapshots tracked diffs and non-ignored untracked files before and after execution and writes `storage/tasks/<task-id>/workspace_changes.json`. The report separates paths that were already changed before the task from net changes observed during it, and the event timeline includes a `workspace.changes_reported` summary. The report is available through `GET /tasks/{task_id}/workspace-changes` and is shown directly in the dashboard task detail. Click a listed file to inspect its text diff through `GET /tasks/{task_id}/workspace-diff?path=...`; the endpoint only serves paths listed in that task's report, rejects traversal and symlink paths, and caps displayed diffs. The diff compares the current workspace with `HEAD`, so pre-existing edits can appear in it and are labelled separately. It stores file paths and hashes, not source contents. When Claude Code emits its final `result` event, the dashboard also shows the final response separately from the raw execution timeline, along with duration, cost, and usage fields when provided by the CLI. It is a before/after snapshot rather than a full filesystem audit: changes made and reverted during execution may not be visible, ignored files are excluded, and non-Git workspaces are reported as unavailable. Review the report alongside task logs before attributing changes to the agent.
 
+
+The task detail page includes an **Artifacts** section with links to the execution JSONL, stderr log, workspace-change report, and current workspace files observed as changed during that task. Downloads are restricted to a fixed set of task-owned artifacts or file paths explicitly listed in the task's change report; path traversal and symlink downloads are rejected. Workspace file downloads are current files, not a historical copy, so review the diff and logs before using them. Treat all downloaded logs and workspace files as sensitive data.
 The initial worker claims queued tasks from SQLite and invokes Claude Code with --print --output-format stream-json --verbose. Unknown event types are retained as raw JSON so the parser can evolve with CLI versions.

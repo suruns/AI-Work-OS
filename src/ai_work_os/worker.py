@@ -193,10 +193,11 @@ async def execute_task(task_id: str) -> None:
         workspace = Path(task.workspace_path)
         prompt = task.prompt
         permission_mode = task.permission_mode
+        attempt_number = max(1, int(task.attempt_count or 1))
+        max_attempts = task.max_attempts
 
     task_dir = STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
-    attempt_number = max(1, int(task.attempt_count or 1))
     stdout_path = task_dir / f"stdout.attempt-{attempt_number:03d}.jsonl"
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
     workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
@@ -209,7 +210,7 @@ async def execute_task(task_id: str) -> None:
         "workspace": str(workspace),
         "permission_mode": permission_mode,
         "attempt": attempt_number,
-        "max_attempts": task.max_attempts,
+        "max_attempts": max_attempts,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     })

@@ -419,12 +419,12 @@ def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_p
     subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(workspace), "config", "user.name", "AI Work OS tests"], check=True)
     tracked = workspace / "tracked.txt"
-    tracked.write_text("before\\n", encoding="utf-8")
+    tracked.write_text("before\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "initial"], check=True)
-    tracked.write_text("after\\n", encoding="utf-8")
+    tracked.write_text("after\n", encoding="utf-8")
     generated = workspace / "generated.txt"
-    generated.write_text("generated output\\n", encoding="utf-8")
+    generated.write_text("generated output\n", encoding="utf-8")
 
     monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
     created = client.post("/tasks", json={
@@ -436,8 +436,8 @@ def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_p
     task_id = created.json()["id"]
     task_dir = api_module.STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True)
-    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
-    (task_dir / "stderr.log").write_text("warning\\n", encoding="utf-8")
+    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\n', encoding="utf-8")
+    (task_dir / "stderr.log").write_text("warning\n", encoding="utf-8")
     (task_dir / "workspace_changes.json").write_text(json.dumps({
         "available": True,
         "repository_root": str(workspace),
@@ -466,7 +466,7 @@ def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_p
         params={"path": "generated.txt"},
     )
     assert downloaded.status_code == 200
-    assert downloaded.text == "generated output\\n"
+    assert downloaded.text == "generated output\n"
 
     traversal = client.get(
         f"/tasks/{task_id}/workspace-file",

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select
@@ -224,15 +225,17 @@ def list_task_artifacts(task_id: str) -> dict:
             raise HTTPException(status_code=404, detail="task not found")
         workspace = Path(task.workspace_path).resolve()
 
-    task_dir = (STORAGE / "tasks" / task_id).resolve()
+    task_storage_root = STORAGE / "tasks"
+    task_dir = task_storage_root / task_id
     artifacts = []
+    storage_path_safe = not task_storage_root.is_symlink() and not task_dir.is_symlink()
     for name, kind in (
         ("stdout.jsonl", "execution_log"),
         ("stderr.log", "error_log"),
         ("workspace_changes.json", "workspace_change_report"),
     ):
         candidate = task_dir / name
-        if candidate.is_symlink() or not candidate.is_file():
+        if not storage_path_safe or candidate.is_symlink() or not candidate.is_file():
             continue
         artifacts.append({
             "name": name,
@@ -245,6 +248,8 @@ def list_task_artifacts(task_id: str) -> dict:
     workspace_files = []
     report_available = False
     try:
+        if not storage_path_safe or report_path.is_symlink():
+            raise OSError("task artifact storage path is not safe")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         report_available = bool(report.get("available"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -275,7 +280,7 @@ def list_task_artifacts(task_id: str) -> dict:
                 workspace_files.append({
                     "path": rel,
                     "size_bytes": candidate.stat().st_size,
-                    "download_url": f"/tasks/{task_id}/workspace-file?path={rel}",
+                    "download_url": f"/tasks/{task_id}/workspace-file?path={quote(rel, safe='/')}",
                 })
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             # Artifact logs remain available even if the workspace can no longer be inspected.
@@ -301,9 +306,10 @@ def download_task_artifact(task_id: str, name: str):
     with SessionLocal() as db:
         if not db.get(Task, task_id):
             raise HTTPException(status_code=404, detail="task not found")
-    task_dir = (STORAGE / "tasks" / task_id).resolve()
+    task_storage_root = STORAGE / "tasks"
+    task_dir = task_storage_root / task_id
     candidate = task_dir / name
-    if candidate.is_symlink() or not candidate.is_file() or task_dir not in candidate.resolve().parents:
+    if task_storage_root.is_symlink() or task_dir.is_symlink() or candidate.is_symlink() or not candidate.is_file() or task_dir.resolve() not in candidate.resolve().parents:
         raise HTTPException(status_code=404, detail="artifact not found")
     return FileResponse(candidate, media_type=allowed[name], filename=name)
 
@@ -320,8 +326,12 @@ def download_workspace_file(task_id: str, path: str = Query(min_length=1, max_le
     if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts or "\x00" in path:
         raise HTTPException(status_code=400, detail="path must be a safe relative workspace path")
 
-    report_path = (STORAGE / "tasks" / task_id / "workspace_changes.json").resolve()
+    task_storage_root = STORAGE / "tasks"
+    task_dir = task_storage_root / task_id
+    report_path = task_dir / "workspace_changes.json"
     try:
+        if task_storage_root.is_symlink() or task_dir.is_symlink() or report_path.is_symlink():
+            raise OSError("task artifact storage path is not safe")
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Workspace change report is not available yet.") from exc

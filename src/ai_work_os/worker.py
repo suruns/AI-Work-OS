@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -54,6 +55,85 @@ async def terminate_process_tree(proc: asyncio.subprocess.Process, grace_seconds
             pass
         await proc.wait()
 
+
+async def _git_output(workspace: Path, *args: str) -> bytes:
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(workspace), *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed with exit code {proc.returncode}")
+    return stdout
+
+
+def _hash_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    if path.is_symlink():
+        digest.update(b"symlink\\0")
+        digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+    else:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def capture_workspace_snapshot(workspace: Path) -> dict:
+    """Capture a Git workspace's net diff state without storing source contents."""
+    try:
+        root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
+        tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\\0")
+        untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\\0")
+        tracked = {}
+        for raw_path in filter(None, tracked_paths):
+            rel = raw_path.decode("utf-8", errors="surrogateescape")
+            patch = await _git_output(root, "diff", "--binary", "HEAD", "--", rel)
+            tracked[rel] = hashlib.sha256(patch).hexdigest()
+        untracked = {}
+        for raw_path in filter(None, untracked_paths):
+            rel = raw_path.decode("utf-8", errors="surrogateescape")
+            try:
+                untracked[rel] = _hash_path(root / rel)
+            except (FileNotFoundError, PermissionError, OSError):
+                untracked[rel] = "unreadable"
+        return {"available": True, "repository_root": str(root), "tracked": tracked, "untracked": untracked}
+    except (FileNotFoundError, RuntimeError, asyncio.TimeoutError, OSError) as exc:
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def compare_workspace_snapshots(before: dict, after: dict) -> dict:
+    """Report net changes between snapshots and flag changes that predated the task."""
+    if not before.get("available") or not after.get("available"):
+        return {
+            "available": False,
+            "reason": "Workspace change tracking requires a Git repository and successful snapshots.",
+            "before_reason": before.get("reason"),
+            "after_reason": after.get("reason"),
+        }
+    before_files = {**before["tracked"], **before["untracked"]}
+    after_files = {**after["tracked"], **after["untracked"]}
+    changed = sorted(
+        path for path in before_files.keys() | after_files.keys()
+        if before_files.get(path) != after_files.get(path)
+    )
+    return {
+        "available": True,
+        "repository_root": after["repository_root"],
+        "changed_during_task": changed,
+        "preexisting_changes": sorted(before_files),
+        "final_changes": sorted(after_files),
+        "changes_reverted_or_removed": sorted(set(before_files) - set(after_files)),
+        "note": "Snapshot comparison shows net changes only; edits that were made and then reverted during execution are not detectable. Pre-existing changes are listed separately.",
+    }
+
+
 def add_event(task_id: str, event_type: str, payload: dict) -> None:
     with SessionLocal() as db:
         db.add(TaskEvent(task_id=task_id, event_type=event_type, payload=payload))
@@ -100,6 +180,7 @@ async def execute_task(task_id: str) -> None:
     task_dir = STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = task_dir / "stdout.jsonl", task_dir / "stderr.log"
+    workspace_before = await capture_workspace_snapshot(workspace)
     command = build_command(prompt, permission_mode)
     logged_command = [CLAUDE_BIN, "-p", "<prompt>", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
     if permission_mode == "plan":
@@ -181,6 +262,20 @@ async def execute_task(task_id: str) -> None:
         error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
+
+    workspace_after = await capture_workspace_snapshot(workspace)
+    workspace_changes = compare_workspace_snapshots(workspace_before, workspace_after)
+    workspace_report_path = task_dir / "workspace_changes.json"
+    workspace_report_path.write_text(
+        json.dumps(workspace_changes, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    add_event(task_id, "workspace.changes_reported", {
+        "available": workspace_changes["available"],
+        "changed_file_count": len(workspace_changes.get("changed_during_task", [])),
+        "report_path": str(workspace_report_path),
+        "preexisting_file_count": len(workspace_changes.get("preexisting_changes", [])),
+    })
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)

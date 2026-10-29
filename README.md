@@ -41,14 +41,20 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - Plan mode is a Claude Code permission control, not an OS-level sandbox. Continue to use trusted workspaces and review agent activity.
 
 ## Initial API
-- GET / (task console)\n- GET /stats\n- GET /health
-- POST /tasks
-- GET /tasks
-- GET /tasks/{task_id}
-- GET /tasks/{task_id}/events
-- GET /tasks/{task_id}/workspace-changes
-- GET /tasks/{task_id}/workspace-diff?path=relative/file/path
-- POST /tasks/{task_id}/cancel
+
+- `GET /` — task console
+- `GET /health`
+- `GET /stats`
+- `POST /tasks`
+- `GET /tasks`
+- `GET /tasks/{task_id}`
+- `GET /tasks/{task_id}/events`
+- `GET /tasks/{task_id}/workspace-changes`
+- `GET /tasks/{task_id}/workspace-diff?path=relative/file/path`
+- `GET /tasks/{task_id}/artifacts`
+- `GET /tasks/{task_id}/artifacts/{name}`
+- `GET /tasks/{task_id}/workspace-file?path=relative/file/path`
+- `POST /tasks/{task_id}/cancel`
 
 Task responses expose `queue_wait_ms` and `execution_ms` separately. The worker records an `executor.claimed` event with queue-wait timing, so delayed dispatch can be distinguished from slow agent execution. The dashboard requests a compact timeline that folds repeated `thinking_tokens` updates into one summary, reducing payload size while preserving raw JSONL output. Use `/tasks/{task_id}/events?include_thinking_tokens=true` to retrieve every raw event for debugging.
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
@@ -341,6 +342,69 @@ def test_workspace_changes_endpoint_returns_report_and_handles_pending_report(tm
     assert response.status_code == 200
     assert response.json()["changed_during_task"] == ["src/app.py"]
     assert response.json()["preexisting_changes"] == ["README.md"]
+
+
+
+def test_workspace_diff_endpoint_returns_tracked_and_untracked_diffs(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.name", "AI Work OS tests"], check=True)
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "initial"], check=True)
+    tracked.write_text("after\n", encoding="utf-8")
+    (workspace / "new-file.txt").write_text("new file\n", encoding="utf-8")
+
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Workspace diff API",
+        "prompt": "Inspect file changes",
+        "workspace_path": str(workspace),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    report_path = api_module.STORAGE / "tasks" / task_id / "workspace_changes.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(json.dumps({
+        "available": True,
+        "repository_root": str(workspace),
+        "changed_during_task": ["tracked.txt", "new-file.txt"],
+        "preexisting_changes": ["tracked.txt"],
+        "final_changes": ["tracked.txt", "new-file.txt"],
+        "changes_reverted_or_removed": [],
+    }), encoding="utf-8")
+
+    tracked_response = client.get(f"/tasks/{task_id}/workspace-diff", params={"path": "tracked.txt"})
+    assert tracked_response.status_code == 200
+    assert "-before" in tracked_response.json()["diff"]
+    assert "+after" in tracked_response.json()["diff"]
+    assert "preexisting_changes" in tracked_response.json()["categories"]
+
+    untracked_response = client.get(f"/tasks/{task_id}/workspace-diff", params={"path": "new-file.txt"})
+    assert untracked_response.status_code == 200
+    assert "+new file" in untracked_response.json()["diff"]
+
+    traversal = client.get(f"/tasks/{task_id}/workspace-diff", params={"path": "../outside.txt"})
+    assert traversal.status_code == 400
+    unknown = client.get(f"/tasks/{task_id}/workspace-diff", params={"path": "secret.txt"})
+    assert unknown.status_code == 404
+
+
+def test_workspace_diff_endpoint_reports_pending_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Pending workspace diff",
+        "prompt": "Wait for report",
+        "workspace_path": str(tmp_path),
+    })
+    response = client.get(
+        f"/tasks/{created.json()['id']}/workspace-diff",
+        params={"path": "main.py"},
+    )
+    assert response.status_code == 409
 
 
 def test_workspace_changes_endpoint_rejects_unknown_task():

@@ -410,3 +410,93 @@ def test_workspace_diff_endpoint_reports_pending_snapshot(tmp_path, monkeypatch)
 def test_workspace_changes_endpoint_rejects_unknown_task():
     response = client.get("/tasks/not-a-real-task/workspace-changes")
     assert response.status_code == 404
+
+
+def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.name", "AI Work OS tests"], check=True)
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("before\\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "initial"], check=True)
+    tracked.write_text("after\\n", encoding="utf-8")
+    generated = workspace / "generated.txt"
+    generated.write_text("generated output\\n", encoding="utf-8")
+
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Artifact downloads",
+        "prompt": "Create a file",
+        "workspace_path": str(workspace),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    task_dir = api_module.STORAGE / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
+    (task_dir / "stderr.log").write_text("warning\\n", encoding="utf-8")
+    (task_dir / "workspace_changes.json").write_text(json.dumps({
+        "available": True,
+        "repository_root": str(workspace),
+        "changed_during_task": ["tracked.txt", "generated.txt"],
+        "preexisting_changes": [],
+        "final_changes": ["tracked.txt", "generated.txt"],
+        "changes_reverted_or_removed": [],
+    }), encoding="utf-8")
+
+    listing = client.get(f"/tasks/{task_id}/artifacts")
+    assert listing.status_code == 200
+    payload = listing.json()
+    names = {item["name"] for item in payload["artifacts"]}
+    assert names == {"stdout.jsonl", "stderr.log", "workspace_changes.json"}
+    assert {item["path"] for item in payload["workspace_files"]} == {"tracked.txt", "generated.txt"}
+
+    log = client.get(f"/tasks/{task_id}/artifacts/stdout.jsonl")
+    assert log.status_code == 200
+    assert '"type":"result"' in log.text
+    report = client.get(f"/tasks/{task_id}/artifacts/workspace_changes.json")
+    assert report.status_code == 200
+    assert report.json()["available"] is True
+
+    downloaded = client.get(
+        f"/tasks/{task_id}/workspace-file",
+        params={"path": "generated.txt"},
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.text == "generated output\\n"
+
+    traversal = client.get(
+        f"/tasks/{task_id}/workspace-file",
+        params={"path": "../outside.txt"},
+    )
+    assert traversal.status_code == 400
+    unlisted = client.get(
+        f"/tasks/{task_id}/workspace-file",
+        params={"path": "tracked-secret.txt"},
+    )
+    assert unlisted.status_code == 404
+
+
+def test_task_artifact_download_rejects_unknown_names_and_symlinks(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Artifact path validation",
+        "prompt": "Test artifact path safety",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = api_module.STORAGE / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.log"
+    outside.write_text("secret", encoding="utf-8")
+    (task_dir / "stderr.log").symlink_to(outside)
+
+    unknown = client.get(f"/tasks/{task_id}/artifacts/../../outside.log")
+    assert unknown.status_code == 404
+    symlink = client.get(f"/tasks/{task_id}/artifacts/stderr.log")
+    assert symlink.status_code == 404

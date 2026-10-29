@@ -163,11 +163,12 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
             capture_output=True, timeout=10, check=True,
         )
         root = Path(os.fsdecode(root_result.stdout).strip()).resolve()
-        candidate = (root / Path(*rel_path.parts)).resolve(strict=False)
+        lexical_candidate = root / Path(*rel_path.parts)
+        if lexical_candidate.is_symlink():
+            raise HTTPException(status_code=400, detail="symlink diffs are not supported")
+        candidate = lexical_candidate.resolve(strict=False)
         if candidate != root and root not in candidate.parents:
             raise HTTPException(status_code=400, detail="path resolves outside the Git workspace")
-        if candidate.is_symlink():
-            raise HTTPException(status_code=400, detail="symlink diffs are not supported")
         tracked_check = subprocess.run(
             ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", path],
             capture_output=True, timeout=10,

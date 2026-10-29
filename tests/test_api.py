@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
+from ai_work_os import api as api_module
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
 from ai_work_os.models import Task, TaskEvent, utcnow
@@ -311,3 +312,35 @@ def test_workspace_snapshot_reports_non_git_workspace_as_unavailable(tmp_path):
     report = worker.compare_workspace_snapshots(snapshot, snapshot)
     assert snapshot["available"] is False
     assert report["available"] is False
+
+
+
+def test_workspace_changes_endpoint_returns_report_and_handles_pending_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Workspace report API",
+        "prompt": "Inspect changes",
+        "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+
+    pending = client.get(f"/tasks/{task_id}/workspace-changes")
+    assert pending.status_code == 200
+    assert pending.json()["available"] is False
+
+    report_path = api_module.STORAGE / "tasks" / task_id / "workspace_changes.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(
+        '{"available": true, "changed_during_task": ["src/app.py"], '
+        '"preexisting_changes": ["README.md"], "final_changes": ["README.md", "src/app.py"]}',
+        encoding="utf-8",
+    )
+    response = client.get(f"/tasks/{task_id}/workspace-changes")
+    assert response.status_code == 200
+    assert response.json()["changed_during_task"] == ["src/app.py"]
+    assert response.json()["preexisting_changes"] == ["README.md"]
+
+
+def test_workspace_changes_endpoint_rejects_unknown_task():
+    response = client.get("/tasks/not-a-real-task/workspace-changes")
+    assert response.status_code == 404

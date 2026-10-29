@@ -198,11 +198,11 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    binary = b"\\x00" in diff_bytes
+    binary = b"\x00" in diff_bytes
     diff_text = "" if binary else diff_bytes.decode("utf-8", errors="replace")
     truncated = len(diff_text) > 200_000
     if truncated:
-        diff_text = diff_text[:200_000] + "\\n… diff truncated at 200,000 characters …"
+        diff_text = diff_text[:200_000] + "\n… diff truncated at 200,000 characters …"
     categories = [name for name, values in allowed_groups.items() if path in values]
     return {
         "path": path,

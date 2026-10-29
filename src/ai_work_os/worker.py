@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import shutil
+import shlex
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from sqlalchemy import select, update
@@ -193,6 +194,8 @@ async def execute_task(task_id: str) -> None:
         workspace = Path(task.workspace_path)
         prompt = task.prompt
         permission_mode = task.permission_mode
+        acceptance_criteria = task.acceptance_criteria
+        verification_commands = list(task.verification_commands or [])
         attempt_number = max(1, int(task.attempt_count or 1))
         max_attempts = task.max_attempts
 
@@ -287,6 +290,79 @@ async def execute_task(task_id: str) -> None:
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
 
+    verification_status = "pending" if verification_commands else "not_configured"
+    verification_results = []
+    if exit_code == 0 and error_summary is None and verification_commands and terminal_reason is None:
+        add_event(task_id, "verification.started", {
+            "command_count": len(verification_commands),
+            "timeout_seconds_per_command": 120,
+            "acceptance_criteria": acceptance_criteria,
+        })
+        for index, command_text in enumerate(verification_commands, start=1):
+            try:
+                argv = shlex.split(command_text)
+                if not argv:
+                    raise ValueError("command is empty")
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, cwd=str(workspace),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name == "posix"),
+                )
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)
+                except asyncio.TimeoutError:
+                    await terminate_process_tree(proc)
+                    stdout_bytes, stderr_bytes = await proc.communicate()
+                    verification_results.append({
+                        "index": index, "command": command_text, "exit_code": proc.returncode,
+                        "timed_out": True,
+                        "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
+                        "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
+                    })
+                    break
+                verification_results.append({
+                    "index": index, "command": command_text, "exit_code": proc.returncode,
+                    "timed_out": False,
+                    "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
+                    "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
+                })
+                if proc.returncode != 0:
+                    break
+            except (OSError, ValueError) as exc:
+                verification_results.append({
+                    "index": index, "command": command_text, "exit_code": None,
+                    "timed_out": False, "stdout": "",
+                    "stderr": f"{type(exc).__name__}: {exc}",
+                })
+                break
+        passed = len(verification_results) == len(verification_commands) and all(
+            result.get("exit_code") == 0 and not result.get("timed_out")
+            for result in verification_results
+        )
+        verification_status = "passed" if passed else "failed"
+        verification_payload = {
+            "status": verification_status,
+            "acceptance_criteria": acceptance_criteria,
+            "commands": verification_results,
+        }
+        try:
+            (task_dir / "verification.json").write_text(
+                json.dumps(verification_payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            verification_payload["artifact_write_error"] = f"{type(exc).__name__}: {exc}"
+        add_event(task_id, "verification.finished", verification_payload)
+        if not passed:
+            terminal_reason = "verification_failed"
+            failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
+            error_summary = (
+                f"Verification failed for command: {failed.get('command', 'unknown command')}"
+                + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
+                + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
+            )
+
     # Preserve compatibility aliases for existing clients while retaining immutable per-attempt logs.
     try:
         shutil.copyfile(stdout_path, task_dir / "stdout.jsonl")
@@ -329,11 +405,11 @@ async def execute_task(task_id: str) -> None:
             task.status = "cancelled"
             task.finished_at = now()
             task.error_summary = attempt_error or "Cancelled by request"
-        elif exit_code == 0 and error_summary is None:
+        elif exit_code == 0 and error_summary is None and verification_status != "failed":
             task.status = "succeeded"
             task.finished_at = now()
             task.error_summary = None
-        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason not in {"timeout", "worker_interrupted"}:
+        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason not in {"timeout", "worker_interrupted", "verification_failed"}:
             delay = RETRY_BASE_DELAY_SECONDS * (2 ** max(0, task.attempt_count - 1))
             task.status = "queued"
             task.finished_at = None
@@ -351,11 +427,15 @@ async def execute_task(task_id: str) -> None:
             task.status = "failed"
             task.finished_at = now()
             task.error_summary = attempt_error or "Task failed"
+            if verification_status == "pending":
+                verification_status = "not_run"
+        task.verification_status = verification_status
         db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
             "status": task.status,
             "exit_code": exit_code,
             "session_id": session_id,
             "error_summary": task.error_summary,
+            "verification_status": task.verification_status,
             "terminal_reason": "retry_scheduled" if retry_scheduled else (terminal_reason or ("success" if task.status == "succeeded" else "error")),
             "attempt": task.attempt_count,
             "max_attempts": task.max_attempts,

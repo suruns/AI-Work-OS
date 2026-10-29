@@ -27,8 +27,17 @@ def ensure_schema_compatibility() -> None:
     if not inspector.has_table("tasks"):
         return
     columns = {column["name"] for column in inspector.get_columns("tasks")}
-    if "permission_mode" not in columns:
-        with engine.begin() as connection:
+    with engine.begin() as connection:
+        if "permission_mode" not in columns:
             connection.execute(text(
                 "ALTER TABLE tasks ADD COLUMN permission_mode VARCHAR(32) NOT NULL DEFAULT 'plan'"
             ))
+        if "priority" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"))
+        if "max_attempts" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1"))
+        if "attempt_count" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"))
+        if "available_at" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN available_at DATETIME"))
+        connection.execute(text("UPDATE tasks SET available_at = created_at WHERE available_at IS NULL"))

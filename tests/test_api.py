@@ -98,9 +98,119 @@ def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch
     assert task["status"] == "failed"
     assert task["exit_code"] == 127
     assert "executable not found" in task["error_summary"]
+    attempt_log = tmp_path / "storage" / "tasks" / task_id / "stdout.attempt-001.jsonl"
+    assert attempt_log.is_file()
+    assert (attempt_log.parent / "stdout.jsonl").is_file()
     events = client.get(f"/tasks/{task_id}/events").json()
     assert events[-1]["event_type"] == "executor.finished"
     assert events[-1]["payload"]["status"] == "failed"
+
+
+def test_worker_restart_marks_orphaned_running_tasks_failed_without_retry(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Orphan recovery test", "prompt": "Do not replay automatically",
+        "workspace_path": str(tmp_path), "max_attempts": 3,
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.attempt_count = 1
+        task.started_at = utcnow()
+        db.commit()
+
+    recovered = worker.recover_orphaned_running_tasks()
+    assert recovered >= 1
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["finished_at"] is not None
+    assert task["exit_code"] == 125
+    assert "not retried automatically" in task["error_summary"]
+
+    events = client.get(f"/tasks/{task_id}/events").json()
+    recovery = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
+    assert len(recovery) == 1
+    assert recovery[0]["payload"]["automatic_retry"] is False
+
+
+def test_priority_and_retry_options_are_validated_and_persisted(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Prioritized task", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "priority": 75, "max_attempts": 3,
+    })
+    assert created.status_code == 201
+    task = created.json()
+    assert task["priority"] == 75
+    assert task["max_attempts"] == 3
+    assert task["attempt_count"] == 0
+    assert task["available_at"] is not None
+
+    invalid = client.post("/tasks", json={
+        "title": "Invalid priority", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "priority": 101,
+    })
+    assert invalid.status_code == 422
+    invalid_attempts = client.post("/tasks", json={
+        "title": "Too many attempts", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "max_attempts": 4,
+    })
+    assert invalid_attempts.status_code == 422
+
+
+def test_priority_queue_claims_highest_priority_first(tmp_path):
+    from ai_work_os.worker import claim_task
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued").update({Task.status: "cancelled"})
+        db.commit()
+    low = client.post("/tasks", json={
+        "title": "Low priority", "prompt": "Inspect", "workspace_path": str(tmp_path), "priority": 1,
+    }).json()
+    high = client.post("/tasks", json={
+        "title": "High priority", "prompt": "Inspect", "workspace_path": str(tmp_path), "priority": 90,
+    }).json()
+    assert claim_task() == high["id"]
+    with SessionLocal() as db:
+        low_task = db.get(Task, low["id"])
+        assert low_task.status == "queued"
+        claimed = db.get(Task, high["id"])
+        assert claimed.attempt_count == 1
+        low_task.status = "cancelled"
+        claimed.status = "cancelled"
+        db.commit()
+
+
+def test_retry_is_scheduled_after_a_failed_attempt(tmp_path, monkeypatch):
+    from ai_work_os.worker import claim_task
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued").update({Task.status: "cancelled"})
+        db.commit()
+    created = client.post("/tasks", json={
+        "title": "Retry test", "prompt": "Retry if failed", "workspace_path": str(tmp_path),
+        "max_attempts": 2,
+    })
+    task_id = created.json()["id"]
+    assert claim_task() == task_id
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(tmp_path / "missing-claude"))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    monkeypatch.setattr(worker, "RETRY_BASE_DELAY_SECONDS", 0)
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "queued"
+    assert task["attempt_count"] == 1
+    assert task["finished_at"] is None
+    events = client.get(f"/tasks/{task_id}/events").json()
+    assert any(event["event_type"] == "executor.retry_scheduled" for event in events)
+    assert (tmp_path / "storage" / "tasks" / task_id / "stdout.attempt-001.jsonl").is_file()
+
+    assert claim_task() == task_id
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["attempt_count"] == 2
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    assert (task_dir / "stdout.attempt-001.jsonl").is_file()
+    assert (task_dir / "stdout.attempt-002.jsonl").is_file()
+    assert (task_dir / "stdout.jsonl").read_text(encoding="utf-8") == (task_dir / "stdout.attempt-002.jsonl").read_text(encoding="utf-8")
 
 
 def test_permission_modes_are_persisted_and_applied():
@@ -455,6 +565,15 @@ def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_p
     names = {item["name"] for item in payload["artifacts"]}
     assert names == {"stdout.jsonl", "stderr.log", "workspace_changes.json"}
     assert {item["path"] for item in payload["workspace_files"]} == {"tracked.txt", "generated.txt"}
+
+    attempt_log_path = task_dir / "stdout.attempt-001.jsonl"
+    attempt_log_path.write_text('{"type":"result","attempt":1}\\n', encoding="utf-8")
+    listing = client.get(f"/tasks/{task_id}/artifacts")
+    names = {item["name"] for item in listing.json()["artifacts"]}
+    assert "stdout.attempt-001.jsonl" in names
+    attempt_download = client.get(f"/tasks/{task_id}/artifacts/stdout.attempt-001.jsonl")
+    assert attempt_download.status_code == 200
+    assert '"attempt":1' in attempt_download.text
 
     log = client.get(f"/tasks/{task_id}/artifacts/stdout.jsonl")
     assert log.status_code == 200

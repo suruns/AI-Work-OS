@@ -1,6 +1,7 @@
 import json
 import os
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select
@@ -124,6 +125,93 @@ def get_workspace_changes(task_id: str) -> dict:
         return {"available": False, "reason": "Workspace change report is not available yet."}
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail=f"Could not read workspace change report: {type(exc).__name__}") from exc
+
+
+@app.get("/tasks/{task_id}/workspace-diff")
+def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=1000)) -> dict:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        workspace = Path(task.workspace_path).resolve()
+
+    report_path = STORAGE / "tasks" / task_id / "workspace_changes.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(status_code=409, detail="Workspace change report is not available yet.")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read workspace change report: {type(exc).__name__}") from exc
+    if not report.get("available"):
+        raise HTTPException(status_code=409, detail=report.get("reason", "Workspace diff is unavailable."))
+
+    rel_path = PurePosixPath(path)
+    if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts or "\x00" in path:
+        raise HTTPException(status_code=400, detail="path must be a safe relative workspace path")
+    allowed_groups = {
+        "changed_during_task": report.get("changed_during_task", []),
+        "preexisting_changes": report.get("preexisting_changes", []),
+        "final_changes": report.get("final_changes", []),
+        "changes_reverted_or_removed": report.get("changes_reverted_or_removed", []),
+    }
+    if not any(path in values for values in allowed_groups.values()):
+        raise HTTPException(status_code=404, detail="path is not included in this task's workspace report")
+
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+            capture_output=True, timeout=10, check=True,
+        )
+        root = Path(os.fsdecode(root_result.stdout).strip()).resolve()
+        candidate = (root / Path(*rel_path.parts)).resolve(strict=False)
+        if candidate != root and root not in candidate.parents:
+            raise HTTPException(status_code=400, detail="path resolves outside the Git workspace")
+        if candidate.is_symlink():
+            raise HTTPException(status_code=400, detail="symlink diffs are not supported")
+        tracked_check = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", path],
+            capture_output=True, timeout=10,
+        )
+        if tracked_check.returncode == 0:
+            diff_result = subprocess.run(
+                ["git", "-C", str(root), "diff", "--no-ext-diff", "--unified=4", "HEAD", "--", path],
+                capture_output=True, timeout=10,
+            )
+            diff_bytes = diff_result.stdout
+        elif candidate.is_file():
+            diff_result = subprocess.run(
+                ["git", "-C", str(root), "diff", "--no-index", "--no-ext-diff", "--unified=4", "--", os.devnull, str(candidate)],
+                capture_output=True, timeout=10,
+            )
+            # git diff --no-index returns 1 when differences exist.
+            if diff_result.returncode not in (0, 1):
+                raise RuntimeError("git could not generate the file diff")
+            diff_bytes = diff_result.stdout
+        else:
+            diff_bytes = b""
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Git diff timed out.") from exc
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=422, detail="Workspace is not a readable Git repository.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail="Could not execute Git to read this diff.") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    binary = b"\\x00" in diff_bytes
+    diff_text = "" if binary else diff_bytes.decode("utf-8", errors="replace")
+    truncated = len(diff_text) > 200_000
+    if truncated:
+        diff_text = diff_text[:200_000] + "\\n… diff truncated at 200,000 characters …"
+    categories = [name for name, values in allowed_groups.items() if path in values]
+    return {
+        "path": path,
+        "categories": categories,
+        "diff": diff_text,
+        "binary": binary,
+        "truncated": truncated,
+        "note": "Diff is the current workspace compared with HEAD; it can include edits that existed before the task.",
+    }
 
 
 @app.post("/tasks/{task_id}/cancel", response_model=TaskRead)

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
@@ -248,6 +249,19 @@ def list_task_artifacts(task_id: str) -> dict:
             "download_url": f"/tasks/{task_id}/artifacts/{name}",
         })
 
+    if storage_path_safe and task_dir.is_dir():
+        for candidate in sorted(task_dir.iterdir()):
+            match = re.fullmatch(r"(stdout|stderr)\.attempt-(\d{3})\.(jsonl|log)", candidate.name)
+            if not match or candidate.is_symlink() or not candidate.is_file():
+                continue
+            artifacts.append({
+                "name": candidate.name,
+                "kind": "execution_log" if match.group(1) == "stdout" else "error_log",
+                "attempt": int(match.group(2)),
+                "size_bytes": candidate.stat().st_size,
+                "download_url": f"/tasks/{task_id}/artifacts/{candidate.name}",
+            })
+
     report_path = task_dir / "workspace_changes.json"
     workspace_files = []
     report_available = False
@@ -306,7 +320,10 @@ def download_task_artifact(task_id: str, name: str):
         "workspace_changes.json": "application/json",
     }
     if name not in allowed:
-        raise HTTPException(status_code=404, detail="artifact not found")
+        match = re.fullmatch(r"(stdout|stderr)\.attempt-(\d{3})\.(jsonl|log)", name)
+        if not match or (match.group(1) == "stdout" and match.group(3) != "jsonl") or (match.group(1) == "stderr" and match.group(3) != "log"):
+            raise HTTPException(status_code=404, detail="artifact not found")
+        allowed[name] = "application/x-ndjson" if match.group(1) == "stdout" else "text/plain; charset=utf-8"
     with SessionLocal() as db:
         if not db.get(Task, task_id):
             raise HTTPException(status_code=404, detail="task not found")

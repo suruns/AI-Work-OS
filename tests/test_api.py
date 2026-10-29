@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+import sys
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
 from ai_work_os import api as api_module
@@ -621,3 +622,85 @@ def test_task_artifact_download_rejects_unknown_names_and_symlinks(tmp_path, mon
     assert unknown.status_code == 404
     symlink = client.get(f"/tasks/{task_id}/artifacts/stderr.log")
     assert symlink.status_code == 404
+
+
+def test_task_verification_passes_and_records_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Verification passes",
+        "prompt": "Do work",
+        "workspace_path": str(workspace),
+        "acceptance_criteria": "The smoke check exits successfully",
+        "verification_commands": [f'{sys.executable} -c "print(42)"'],
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    assert created.json()["verification_status"] == "pending"
+
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    assert task["verification_status"] == "passed"
+    events = client.get(f"/tasks/{task_id}/events").json()
+    verification = [event for event in events if event["event_type"] == "verification.finished"]
+    assert len(verification) == 1
+    assert verification[0]["payload"]["status"] == "passed"
+    artifact = tmp_path / "storage" / "tasks" / task_id / "verification.json"
+    assert artifact.is_file()
+    assert json.loads(artifact.read_text(encoding="utf-8"))["commands"][0]["exit_code"] == 0
+
+
+def test_task_verification_failure_fails_task_without_retrying_agent(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Verification fails",
+        "prompt": "Do work",
+        "workspace_path": str(workspace),
+        "max_attempts": 3,
+        "verification_commands": [f'{sys.executable} -c "raise SystemExit(7)"'],
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["exit_code"] == 0
+    assert task["verification_status"] == "failed"
+    assert "Verification failed" in task["error_summary"]
+    events = client.get(f"/tasks/{task_id}/events").json()
+    finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
+    assert finished["payload"]["terminal_reason"] == "verification_failed"
+    assert finished["payload"]["verification_status"] == "failed"
+    assert not any(event["event_type"] == "executor.retry_scheduled" for event in events)
+
+
+def test_verification_command_validation_and_default_status(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "No verifier",
+        "prompt": "Read only",
+        "workspace_path": str(tmp_path),
+    })
+    assert created.status_code == 201
+    assert created.json()["verification_status"] == "not_configured"
+    invalid = client.post("/tasks", json={
+        "title": "Too many checks",
+        "prompt": "Read only",
+        "workspace_path": str(tmp_path),
+        "verification_commands": ["true"] * 6,
+    })
+    assert invalid.status_code == 422

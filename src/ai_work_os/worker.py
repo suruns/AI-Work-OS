@@ -333,7 +333,7 @@ async def execute_task(task_id: str) -> None:
             task.status = "succeeded"
             task.finished_at = now()
             task.error_summary = None
-        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason != "timeout":
+        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason not in {"timeout", "worker_interrupted"}:
             delay = RETRY_BASE_DELAY_SECONDS * (2 ** max(0, task.attempt_count - 1))
             task.status = "queued"
             task.finished_at = None

@@ -98,9 +98,39 @@ def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch
     assert task["status"] == "failed"
     assert task["exit_code"] == 127
     assert "executable not found" in task["error_summary"]
+    attempt_log = tmp_path / "storage" / "tasks" / task_id / "stdout.attempt-001.jsonl"
+    assert attempt_log.is_file()
+    assert (attempt_log.parent / "stdout.jsonl").is_file()
     events = client.get(f"/tasks/{task_id}/events").json()
     assert events[-1]["event_type"] == "executor.finished"
     assert events[-1]["payload"]["status"] == "failed"
+
+
+def test_worker_restart_marks_orphaned_running_tasks_failed_without_retry(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Orphan recovery test", "prompt": "Do not replay automatically",
+        "workspace_path": str(tmp_path), "max_attempts": 3,
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.attempt_count = 1
+        task.started_at = utcnow()
+        db.commit()
+
+    recovered = worker.recover_orphaned_running_tasks()
+    assert recovered >= 1
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["finished_at"] is not None
+    assert task["exit_code"] == 125
+    assert "not retried automatically" in task["error_summary"]
+
+    events = client.get(f"/tasks/{task_id}/events").json()
+    recovery = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
+    assert len(recovery) == 1
+    assert recovery[0]["payload"]["automatic_retry"] is False
 
 
 def test_priority_and_retry_options_are_validated_and_persisted(tmp_path):

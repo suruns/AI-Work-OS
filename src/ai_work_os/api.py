@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
@@ -11,6 +13,7 @@ ensure_schema_compatibility()
 app = FastAPI(title="AI Work OS API", version="0.2.0")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
 
 
 @app.get("/", include_in_schema=False)
@@ -108,6 +111,20 @@ def get_task_events(
             })
     visible.sort(key=lambda event: event.id if isinstance(event, TaskEvent) else event["id"])
     return visible
+
+@app.get("/tasks/{task_id}/workspace-changes")
+def get_workspace_changes(task_id: str) -> dict:
+    with SessionLocal() as db:
+        if not db.get(Task, task_id):
+            raise HTTPException(status_code=404, detail="task not found")
+    report_path = STORAGE / "tasks" / task_id / "workspace_changes.json"
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"available": False, "reason": "Workspace change report is not available yet."}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read workspace change report: {type(exc).__name__}") from exc
+
 
 @app.post("/tasks/{task_id}/cancel", response_model=TaskRead)
 def cancel_task(task_id: str) -> Task:

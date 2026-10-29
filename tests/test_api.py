@@ -20,6 +20,8 @@ def test_dashboard_is_served():
     response = client.get("/")
     assert response.status_code == 200
     assert "AI Work OS" in response.text
+    assert "function renderTaskResult(events)" in response.text
+    assert "Agent result" in response.text
 
 
 def test_stats_shape():

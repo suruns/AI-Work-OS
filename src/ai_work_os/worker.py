@@ -85,7 +85,7 @@ def _hash_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def capture_workspace_snapshot(workspace: Path) -> dict:
+async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] | None = None) -> dict:
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
         root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
@@ -97,10 +97,15 @@ async def capture_workspace_snapshot(workspace: Path) -> dict:
             patch = await _git_output(root, "diff", "--binary", "HEAD", "--", rel)
             tracked[rel] = hashlib.sha256(patch).hexdigest()
         untracked = {}
+        excluded = [path.resolve() for path in (exclude_paths or [])]
         for raw_path in filter(None, untracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            candidate = root / rel
+            resolved_candidate = candidate.resolve()
+            if any(resolved_candidate == item or item in resolved_candidate.parents for item in excluded):
+                continue
             try:
-                untracked[rel] = _hash_path(root / rel)
+                untracked[rel] = _hash_path(candidate)
             except (FileNotFoundError, PermissionError, OSError):
                 untracked[rel] = "unreadable"
         return {"available": True, "repository_root": str(root), "tracked": tracked, "untracked": untracked}
@@ -180,7 +185,7 @@ async def execute_task(task_id: str) -> None:
     task_dir = STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = task_dir / "stdout.jsonl", task_dir / "stderr.log"
-    workspace_before = await capture_workspace_snapshot(workspace)
+    workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
     command = build_command(prompt, permission_mode)
     logged_command = [CLAUDE_BIN, "-p", "<prompt>", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
     if permission_mode == "plan":
@@ -263,7 +268,7 @@ async def execute_task(task_id: str) -> None:
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
 
-    workspace_after = await capture_workspace_snapshot(workspace)
+    workspace_after = await capture_workspace_snapshot(workspace, [task_dir])
     workspace_changes = compare_workspace_snapshots(workspace_before, workspace_after)
     workspace_report_path = task_dir / "workspace_changes.json"
     report_written = False

@@ -367,9 +367,42 @@ async def execute_task(task_id: str) -> None:
         db.commit()
 
 
+def recover_orphaned_running_tasks() -> int:
+    """Fail tasks left running by a previous worker process; never replay them automatically."""
+    recovered_at = now()
+    with SessionLocal() as db:
+        orphaned = list(db.scalars(select(Task).where(Task.status == "running")))
+        for task in orphaned:
+            previous_started_at = task.started_at.isoformat() if task.started_at else None
+            task.status = "failed"
+            task.finished_at = recovered_at
+            task.exit_code = 125
+            task.error_summary = (
+                "Worker restarted while this task was running. It was marked failed and was not "
+                "retried automatically because the previous agent process may have produced side effects. "
+                "Inspect the workspace and process state before manually retrying."
+            )
+            db.add(TaskEvent(
+                task_id=task.id,
+                event_type="worker.orphaned_task_recovered",
+                payload={
+                    "recovered_at": recovered_at.isoformat(),
+                    "previous_started_at": previous_started_at,
+                    "attempt": task.attempt_count,
+                    "max_attempts": task.max_attempts,
+                    "automatic_retry": False,
+                    "reason": "worker_restart",
+                },
+            ))
+        db.commit()
+        return len(orphaned)
+
+
 async def run_worker() -> None:
+    recovered = recover_orphaned_running_tasks()
     print(
-        f"AI Work OS worker started; concurrency={MAX_CONCURRENT_TASKS}.",
+        f"AI Work OS worker started; concurrency={MAX_CONCURRENT_TASKS}; "
+        f"recovered_orphaned_tasks={recovered}.",
         flush=True,
     )
     active: set[asyncio.Task] = set()

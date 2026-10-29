@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from sqlalchemy import select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
@@ -16,6 +16,8 @@ STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
 CLAUDE_BIN = os.getenv("AI_WORK_OS_CLAUDE_BIN", "claude")
 POLL_SECONDS = float(os.getenv("AI_WORK_OS_POLL_SECONDS", "1"))
 MAX_TASK_SECONDS = int(os.getenv("AI_WORK_OS_MAX_TASK_SECONDS", "3600"))
+MAX_CONCURRENT_TASKS = max(1, int(os.getenv("AI_WORK_OS_MAX_CONCURRENT_TASKS", "1")))
+RETRY_BASE_DELAY_SECONDS = max(0.0, float(os.getenv("AI_WORK_OS_RETRY_BASE_DELAY_SECONDS", "2")))
 
 
 def now() -> datetime:
@@ -147,14 +149,19 @@ def add_event(task_id: str, event_type: str, payload: dict) -> None:
 
 def claim_task() -> str | None:
     with SessionLocal() as db:
-        task = db.scalar(select(Task).where(Task.status == "queued").order_by(Task.created_at).limit(1))
+        started_at = now()
+        task = db.scalar(
+            select(Task)
+            .where(Task.status == "queued", Task.available_at <= started_at)
+            .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
+            .limit(1)
+        )
         if task is None:
             return None
-        started_at = now()
         result = db.execute(
             update(Task)
             .where(Task.id == task.id, Task.status == "queued")
-            .values(status="running", started_at=started_at)
+            .values(status="running", started_at=started_at, attempt_count=Task.attempt_count + 1)
         )
         if result.rowcount != 1:
             db.rollback()
@@ -167,6 +174,9 @@ def claim_task() -> str | None:
                 "queue_wait_ms": elapsed_ms(task.created_at, started_at),
                 "queued_at": task.created_at.isoformat(),
                 "claimed_at": started_at.isoformat(),
+                "priority": task.priority,
+                "attempt": task.attempt_count + 1,
+                "max_attempts": task.max_attempts,
             },
         ))
         db.commit()
@@ -293,20 +303,43 @@ async def execute_task(task_id: str) -> None:
         task = db.get(Task, task_id)
         if task is None:
             return
-        task.exit_code, task.session_id, task.finished_at = exit_code, session_id, now()
+        task.exit_code, task.session_id = exit_code, session_id
+        attempt_error = error_summary or (None if exit_code == 0 else f"Claude Code exited with status {exit_code}")
+        retry_scheduled = False
         if task.cancel_requested or terminal_reason == "cancelled":
             task.status = "cancelled"
+            task.finished_at = now()
+            task.error_summary = attempt_error or "Cancelled by request"
         elif exit_code == 0 and error_summary is None:
             task.status = "succeeded"
+            task.finished_at = now()
+            task.error_summary = None
+        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason != "timeout":
+            delay = RETRY_BASE_DELAY_SECONDS * (2 ** max(0, task.attempt_count - 1))
+            task.status = "queued"
+            task.finished_at = None
+            task.available_at = now() + timedelta(seconds=delay)
+            task.error_summary = attempt_error
+            retry_scheduled = True
+            db.add(TaskEvent(task_id=task_id, event_type="executor.retry_scheduled", payload={
+                "attempt": task.attempt_count,
+                "max_attempts": task.max_attempts,
+                "retry_delay_seconds": delay,
+                "available_at": task.available_at.isoformat(),
+                "error_summary": attempt_error,
+            }))
         else:
             task.status = "failed"
-            task.error_summary = error_summary or f"Claude Code exited with status {exit_code}"
+            task.finished_at = now()
+            task.error_summary = attempt_error or "Task failed"
         db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
             "status": task.status,
             "exit_code": exit_code,
             "session_id": session_id,
             "error_summary": task.error_summary,
-            "terminal_reason": terminal_reason or ("success" if task.status == "succeeded" else "error"),
+            "terminal_reason": "retry_scheduled" if retry_scheduled else (terminal_reason or ("success" if task.status == "succeeded" else "error")),
+            "attempt": task.attempt_count,
+            "max_attempts": task.max_attempts,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
         }))
@@ -314,13 +347,22 @@ async def execute_task(task_id: str) -> None:
 
 
 async def run_worker() -> None:
-    print("AI Work OS worker started; waiting for queued tasks.", flush=True)
+    print(
+        f"AI Work OS worker started; concurrency={MAX_CONCURRENT_TASKS}.",
+        flush=True,
+    )
+    active: set[asyncio.Task] = set()
     while True:
-        task_id = claim_task()
-        if task_id is None:
-            await asyncio.sleep(POLL_SECONDS)
+        active = {job for job in active if not job.done()}
+        while len(active) < MAX_CONCURRENT_TASKS:
+            task_id = claim_task()
+            if task_id is None:
+                break
+            active.add(asyncio.create_task(execute_task(task_id)))
+        if active:
+            await asyncio.wait(active, timeout=POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         else:
-            await execute_task(task_id)
+            await asyncio.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":

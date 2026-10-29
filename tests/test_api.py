@@ -559,6 +559,15 @@ def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_p
     assert names == {"stdout.jsonl", "stderr.log", "workspace_changes.json"}
     assert {item["path"] for item in payload["workspace_files"]} == {"tracked.txt", "generated.txt"}
 
+    attempt_log_path = task_dir / "stdout.attempt-001.jsonl"
+    attempt_log_path.write_text('{"type":"result","attempt":1}\\n', encoding="utf-8")
+    listing = client.get(f"/tasks/{task_id}/artifacts")
+    names = {item["name"] for item in listing.json()["artifacts"]}
+    assert "stdout.attempt-001.jsonl" in names
+    attempt_download = client.get(f"/tasks/{task_id}/artifacts/stdout.attempt-001.jsonl")
+    assert attempt_download.status_code == 200
+    assert '"attempt":1' in attempt_download.text
+
     log = client.get(f"/tasks/{task_id}/artifacts/stdout.jsonl")
     assert log.status_code == 200
     assert '"type":"result"' in log.text

@@ -40,4 +40,10 @@ def ensure_schema_compatibility() -> None:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"))
         if "available_at" not in columns:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN available_at DATETIME"))
+        if "acceptance_criteria" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT"))
+        if "verification_commands" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN verification_commands JSON NOT NULL DEFAULT '[]'"))
+        if "verification_status" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN verification_status VARCHAR(32) NOT NULL DEFAULT 'not_configured'"))
         connection.execute(text("UPDATE tasks SET available_at = created_at WHERE available_at IS NULL"))

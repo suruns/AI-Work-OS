@@ -46,12 +46,13 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - GET /tasks
 - GET /tasks/{task_id}
 - GET /tasks/{task_id}/events
+- GET /tasks/{task_id}/workspace-changes
 - POST /tasks/{task_id}/cancel
 
 Task responses expose `queue_wait_ms` and `execution_ms` separately. The worker records an `executor.claimed` event with queue-wait timing, so delayed dispatch can be distinguished from slow agent execution. The dashboard requests a compact timeline that folds repeated `thinking_tokens` updates into one summary, reducing payload size while preserving raw JSONL output. Use `/tasks/{task_id}/events?include_thinking_tokens=true` to retrieve every raw event for debugging.
 
 Cancelling a queued task immediately marks it cancelled and records a terminal event. Running-task cancellation is observed by the worker within its polling interval; on POSIX systems the worker starts Claude Code in a separate process session and terminates its process group on cancellation or timeout, escalating from SIGTERM to SIGKILL if needed. Worker coroutine interruption also attempts to stop the subprocess tree and records a distinct event. These lifecycle paths are covered by regression tests.
 
-For Git workspaces, the worker snapshots tracked diffs and non-ignored untracked files before and after execution and writes `storage/tasks/<task-id>/workspace_changes.json`. The report separates paths that were already changed before the task from net changes observed during it, and the event timeline includes a `workspace.changes_reported` summary. The report stores file paths and hashes, not source contents. It is a before/after snapshot rather than a full filesystem audit: changes made and reverted during execution may not be visible, ignored files are excluded, and non-Git workspaces are reported as unavailable. Review the report alongside task logs before attributing changes to the agent.
+For Git workspaces, the worker snapshots tracked diffs and non-ignored untracked files before and after execution and writes `storage/tasks/<task-id>/workspace_changes.json`. The report separates paths that were already changed before the task from net changes observed during it, and the event timeline includes a `workspace.changes_reported` summary. The report is available through `GET /tasks/{task_id}/workspace-changes` and is shown directly in the dashboard task detail. It stores file paths and hashes, not source contents. It is a before/after snapshot rather than a full filesystem audit: changes made and reverted during execution may not be visible, ignored files are excluded, and non-Git workspaces are reported as unavailable. Review the report alongside task logs before attributing changes to the agent.
 
 The initial worker claims queued tasks from SQLite and invokes Claude Code with --print --output-format stream-json --verbose. Unknown event types are retained as raw JSON so the parser can evolve with CLI versions.

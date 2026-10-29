@@ -41,7 +41,11 @@ def create_task(body: TaskCreate) -> Task:
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
-    task = Task(title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace), permission_mode=body.permission_mode)
+    task = Task(
+        title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
+        permission_mode=body.permission_mode, priority=body.priority,
+        max_attempts=body.max_attempts,
+    )
     with SessionLocal() as db:
         db.add(task)
         db.commit()

@@ -21,7 +21,7 @@ class TaskCreate(BaseModel):
             command = command.strip()
             if not command:
                 continue
-            if len(command) > 2000 or "\\x00" in command:
+            if len(command) > 2000 or "\x00" in command:
                 raise ValueError("each verification command must be at most 2000 characters and contain no NUL")
             normalized.append(command)
         return normalized

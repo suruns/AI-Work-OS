@@ -628,7 +628,7 @@ def test_task_verification_passes_and_records_artifact(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     fake_claude.chmod(0o755)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
@@ -662,7 +662,7 @@ def test_task_verification_failure_fails_task_without_retrying_agent(tmp_path, m
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     fake_claude.chmod(0o755)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")

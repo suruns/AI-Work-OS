@@ -359,6 +359,9 @@ async def run_repair_attempt(
                             reason = "timeout"
                             await terminate_process_tree(proc)
                             break
+            except asyncio.CancelledError:
+                await terminate_process_tree(proc)
+                raise
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
         if reason or proc.returncode != 0:
@@ -406,6 +409,10 @@ async def run_repair_attempt(
             while not communicate_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(communicate_task), timeout=0.25)
+                except asyncio.CancelledError:
+                    await terminate_process_tree(check)
+                    await asyncio.gather(communicate_task, return_exceptions=True)
+                    raise
                 except asyncio.TimeoutError:
                     with SessionLocal() as db:
                         current = db.get(Task, task_id)

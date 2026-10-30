@@ -402,18 +402,18 @@ def test_workspace_snapshot_distinguishes_preexisting_and_new_changes(tmp_path):
     subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(workspace), "config", "user.name", "AI Work OS tests"], check=True)
     tracked = workspace / "tracked.txt"
-    tracked.write_text("committed\\n", encoding="utf-8")
+    tracked.write_text("committed\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "initial"], check=True)
 
     # This modification predates the task and must be clearly labelled as such.
-    tracked.write_text("pre-existing edit\\n", encoding="utf-8")
+    tracked.write_text("pre-existing edit\n", encoding="utf-8")
     before = asyncio.run(worker.capture_workspace_snapshot(workspace))
     assert before["available"] is True
     assert "tracked.txt" in before["tracked"]
 
-    tracked.write_text("changed by task\\n", encoding="utf-8")
-    (workspace / "new-output.txt").write_text("created during task\\n", encoding="utf-8")
+    tracked.write_text("changed by task\n", encoding="utf-8")
+    (workspace / "new-output.txt").write_text("created during task\n", encoding="utf-8")
     after = asyncio.run(worker.capture_workspace_snapshot(workspace))
     report = worker.compare_workspace_snapshots(before, after)
 
@@ -568,7 +568,7 @@ def test_task_artifacts_list_and_download_logs_and_changed_workspace_files(tmp_p
     assert {item["path"] for item in payload["workspace_files"]} == {"tracked.txt", "generated.txt"}
 
     attempt_log_path = task_dir / "stdout.attempt-001.jsonl"
-    attempt_log_path.write_text('{"type":"result","attempt":1}\\n', encoding="utf-8")
+    attempt_log_path.write_text('{"type":"result","attempt":1}\n', encoding="utf-8")
     listing = client.get(f"/tasks/{task_id}/artifacts")
     names = {item["name"] for item in listing.json()["artifacts"]}
     assert "stdout.attempt-001.jsonl" in names
@@ -708,9 +708,9 @@ def test_verification_command_validation_and_default_status(tmp_path):
 
 def _write_fake_claude(path):
     path.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json\\n"
-        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'fake-session'}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'fake-session'}))\n",
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -846,8 +846,8 @@ def test_repair_logs_are_listed_and_downloadable(tmp_path, monkeypatch):
     task_id = created.json()["id"]
     task_dir = api_module.STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True)
-    (task_dir / "repair-01.stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
-    (task_dir / "repair-01.stderr.log").write_text("diagnostic\\n", encoding="utf-8")
+    (task_dir / "repair-01.stdout.jsonl").write_text('{"type":"result"}\n', encoding="utf-8")
+    (task_dir / "repair-01.stderr.log").write_text("diagnostic\n", encoding="utf-8")
 
     artifacts = client.get(f"/tasks/{task_id}/artifacts").json()["artifacts"]
     names = {item["name"] for item in artifacts}

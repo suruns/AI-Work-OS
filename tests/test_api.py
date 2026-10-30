@@ -1380,3 +1380,36 @@ def test_expired_lease_recovery_is_idempotent(tmp_path):
     events = client.get(f"/tasks/{task_id}/events").json()
     recovered = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
     assert len(recovered) == 1
+
+
+def test_worker_cannot_resurrect_expired_lease(tmp_path, monkeypatch):
+    created = client.post("/tasks", json={
+        "title": "Expired heartbeat", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+    worker_id = "worker-expired"
+    assert worker.claim_task(worker_id) == task_id
+    monkeypatch.setattr(worker, "WORKER_HEARTBEAT_SECONDS", 0.01)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+
+    async def exercise():
+        try:
+            await worker._renew_worker_lease(task_id, worker_id)
+        except RuntimeError as exc:
+            assert "lease lost" in str(exc)
+        else:
+            raise AssertionError("expired lease must not be renewed")
+
+    asyncio.run(exercise())
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.lease_expires_at.timestamp() < utcnow().timestamp()

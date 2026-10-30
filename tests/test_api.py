@@ -1251,7 +1251,7 @@ def test_worker_claim_records_owner_and_lease(tmp_path):
         task = db.get(Task, task_id)
         assert task.worker_id == worker_id
         assert task.lease_expires_at is not None
-        assert task.lease_expires_at > utcnow()
+        assert task.lease_expires_at.timestamp() > utcnow().timestamp()
 
 
 def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):
@@ -1280,7 +1280,7 @@ def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):
     asyncio.run(exercise())
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        assert task.lease_expires_at > utcnow() + timedelta(seconds=30)
+        assert task.lease_expires_at.timestamp() > utcnow().timestamp() + timedelta(seconds=30)
 
 
 def test_recovery_only_fails_expired_leases_and_legacy_after_grace(tmp_path, monkeypatch):

@@ -95,15 +95,23 @@ async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] 
         root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
         tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\0")
         untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\0")
+        def is_generated_python_cache(rel: str) -> bool:
+            parts = Path(rel).parts
+            return "__pycache__" in parts or rel.endswith(".pyc")
+
         tracked = {}
         for raw_path in filter(None, tracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            if is_generated_python_cache(rel):
+                continue
             patch = await _git_output(root, "diff", "--binary", "HEAD", "--", rel)
             tracked[rel] = hashlib.sha256(patch).hexdigest()
         untracked = {}
         excluded = [path.resolve() for path in (exclude_paths or [])]
         for raw_path in filter(None, untracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            if is_generated_python_cache(rel):
+                continue
             candidate = root / rel
             resolved_candidate = candidate.resolve()
             if any(resolved_candidate == item or item in resolved_candidate.parents for item in excluded):
@@ -194,6 +202,7 @@ async def run_repair_attempt(
     repair_prompt: str,
     task_dir: Path,
     repair_number: int,
+    max_repair_attempts: int,
     verification_commands: list[str],
 ) -> tuple[bool, list[dict], str | None]:
     """Run one bounded repair and re-check the original, already-validated commands."""
@@ -201,7 +210,7 @@ async def run_repair_attempt(
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
     add_event(task_id, "repair.started", {
         "repair_attempt": repair_number,
-        "max_repair_attempts": 2,
+        "max_repair_attempts": max_repair_attempts,
     })
     command = build_command(repair_prompt, permission_mode)
     try:
@@ -519,6 +528,7 @@ async def execute_task(task_id: str) -> None:
                 + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
             )
 
+    initial_verification_results = list(verification_results)
     repair_attempt_count = 0
     if verification_status == "failed" and auto_repair and max_repair_attempts > 0 and terminal_reason == "verification_failed":
         for repair_number in range(1, max_repair_attempts + 1):
@@ -541,7 +551,7 @@ async def execute_task(task_id: str) -> None:
             repair_attempt_count = repair_number
             passed, repair_results, repair_error = await run_repair_attempt(
                 task_id, workspace, permission_mode, repair_prompt, task_dir,
-                repair_number, verification_commands,
+                repair_number, max_repair_attempts, verification_commands,
             )
             verification_results = repair_results
             if passed:
@@ -563,6 +573,17 @@ async def execute_task(task_id: str) -> None:
                 error_summary = f"Automatic repair attempt {repair_number} failed: {repair_error}"
             if repair_error == "cancelled":
                 terminal_reason = "cancelled"
+                verification_status = "not_run"
+                try:
+                    (task_dir / "verification.json").write_text(json.dumps({
+                        "status": "cancelled",
+                        "acceptance_criteria": acceptance_criteria,
+                        "commands": initial_verification_results,
+                        "repair_attempt_count": repair_attempt_count,
+                        "repair_cancelled": True,
+                    }, ensure_ascii=True, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
                 break
             if repair_error == "timeout":
                 terminal_reason = "timeout"

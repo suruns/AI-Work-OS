@@ -27,8 +27,6 @@ class Task(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True)
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    worker_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     workflow: Mapped["Workflow | None"] = relationship(back_populates="tasks")
     title: Mapped[str] = mapped_column(String(240))
     prompt: Mapped[str] = mapped_column(Text)

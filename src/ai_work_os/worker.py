@@ -95,15 +95,23 @@ async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] 
         root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
         tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\0")
         untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\0")
+        def is_generated_python_cache(rel: str) -> bool:
+            parts = Path(rel).parts
+            return "__pycache__" in parts or rel.endswith(".pyc")
+
         tracked = {}
         for raw_path in filter(None, tracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            if is_generated_python_cache(rel):
+                continue
             patch = await _git_output(root, "diff", "--binary", "HEAD", "--", rel)
             tracked[rel] = hashlib.sha256(patch).hexdigest()
         untracked = {}
         excluded = [path.resolve() for path in (exclude_paths or [])]
         for raw_path in filter(None, untracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            if is_generated_python_cache(rel):
+                continue
             candidate = root / rel
             resolved_candidate = candidate.resolve()
             if any(resolved_candidate == item or item in resolved_candidate.parents for item in excluded):
@@ -186,6 +194,161 @@ def claim_task() -> str | None:
         return task_id
 
 
+
+async def run_repair_attempt(
+    task_id: str,
+    workspace: Path,
+    permission_mode: str,
+    repair_prompt: str,
+    task_dir: Path,
+    repair_number: int,
+    max_repair_attempts: int,
+    verification_commands: list[str],
+) -> tuple[bool, list[dict], str | None]:
+    """Run one bounded repair and re-check the original, already-validated commands."""
+    stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
+    stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
+    add_event(task_id, "repair.started", {
+        "repair_attempt": repair_number,
+        "max_repair_attempts": max_repair_attempts,
+    })
+    command = build_command(repair_prompt, permission_mode)
+    try:
+        with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
+
+            async def drain(stream, target):
+                while chunk := await stream.read(4096):
+                    target.write(chunk.decode("utf-8", errors="replace"))
+                    target.flush()
+
+            readers = [
+                asyncio.create_task(drain(proc.stdout, out)),
+                asyncio.create_task(drain(proc.stderr, err)),
+            ]
+            deadline = asyncio.get_running_loop().time() + min(MAX_TASK_SECONDS, 600)
+            reason = None
+            try:
+                while proc.returncode is None:
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        with SessionLocal() as db:
+                            current = db.get(Task, task_id)
+                            cancelled = bool(current and current.cancel_requested)
+                        if cancelled:
+                            reason = "cancelled"
+                            await terminate_process_tree(proc)
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            reason = "timeout"
+                            await terminate_process_tree(proc)
+                            break
+            finally:
+                await asyncio.gather(*readers, return_exceptions=True)
+        if reason or proc.returncode != 0:
+            status = reason or "agent_failed"
+            add_event(task_id, "repair.finished", {
+                "repair_attempt": repair_number,
+                "status": status,
+                "exit_code": proc.returncode,
+            })
+            return False, [], reason or f"repair agent exited with {proc.returncode}"
+    except Exception as exc:
+        add_event(task_id, "repair.finished", {
+            "repair_attempt": repair_number,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        return False, [], f"{type(exc).__name__}: {exc}"
+
+    results = []
+    for index, command_text in enumerate(verification_commands, start=1):
+        with SessionLocal() as db:
+            current = db.get(Task, task_id)
+            if current is None or current.cancel_requested:
+                add_event(task_id, "repair.finished", {
+                    "repair_attempt": repair_number,
+                    "status": "cancelled",
+                    "verification": results,
+                })
+                return False, results, "cancelled"
+        try:
+            argv = shlex.split(command_text)
+            if not argv:
+                raise ValueError("command is empty")
+            check = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
+            communicate_task = asyncio.create_task(check.communicate())
+            timed_out = False
+            cancelled = False
+            deadline = asyncio.get_running_loop().time() + 120
+            while not communicate_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(communicate_task), timeout=0.25)
+                except asyncio.TimeoutError:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        cancelled = bool(current is None or current.cancel_requested)
+                    if cancelled:
+                        await terminate_process_tree(check)
+                        break
+                    if asyncio.get_running_loop().time() >= deadline:
+                        timed_out = True
+                        await terminate_process_tree(check)
+                        break
+            out_bytes, err_bytes = await communicate_task
+            if cancelled:
+                add_event(task_id, "repair.finished", {
+                    "repair_attempt": repair_number,
+                    "status": "cancelled",
+                    "verification": results,
+                })
+                return False, results, "cancelled"
+            results.append({
+                "index": index,
+                "command": command_text,
+                "exit_code": check.returncode,
+                "timed_out": timed_out,
+                "stdout": out_bytes.decode("utf-8", errors="replace")[-20000:],
+                "stderr": err_bytes.decode("utf-8", errors="replace")[-20000:],
+            })
+            if timed_out or check.returncode != 0:
+                break
+        except (OSError, ValueError) as exc:
+            results.append({
+                "index": index,
+                "command": command_text,
+                "exit_code": None,
+                "timed_out": False,
+                "stdout": "",
+                "stderr": f"{type(exc).__name__}: {exc}",
+            })
+            break
+    passed = (
+        bool(verification_commands)
+        and len(results) == len(verification_commands)
+        and all(item.get("exit_code") == 0 and not item.get("timed_out") for item in results)
+    )
+    add_event(task_id, "repair.finished", {
+        "repair_attempt": repair_number,
+        "status": "passed" if passed else "verification_failed",
+        "verification": results,
+    })
+    return passed, results, None
+
+
 async def execute_task(task_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
@@ -196,6 +359,8 @@ async def execute_task(task_id: str) -> None:
         permission_mode = task.permission_mode
         acceptance_criteria = task.acceptance_criteria
         verification_commands = list(task.verification_commands or [])
+        auto_repair = bool(task.auto_repair)
+        max_repair_attempts = min(2, int(task.max_repair_attempts or 0)) if auto_repair else 0
         attempt_number = max(1, int(task.attempt_count or 1))
         max_attempts = task.max_attempts
 
@@ -363,6 +528,78 @@ async def execute_task(task_id: str) -> None:
                 + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
             )
 
+    initial_verification_results = list(verification_results)
+    repair_attempt_count = 0
+    if verification_status == "failed" and auto_repair and max_repair_attempts > 0 and terminal_reason == "verification_failed":
+        for repair_number in range(1, max_repair_attempts + 1):
+            with SessionLocal() as db:
+                current = db.get(Task, task_id)
+                if current is None or current.cancel_requested:
+                    terminal_reason = "cancelled"
+                    break
+            failed_details = json.dumps(verification_results, ensure_ascii=True, indent=2)[-12000:]
+            repair_prompt = (
+                "A bounded automatic repair was explicitly enabled for this task.\n"
+                "Fix only the cause of the failed acceptance checks in the existing workspace. "
+                "Do not broaden scope, remove or weaken tests, alter verification commands, "
+                "or claim success without making the checks pass. Preserve the original task intent.\n\n"
+                f"Original task instructions:\n{prompt[:12000]}\n\n"
+                f"Acceptance criteria:\n{acceptance_criteria or '(not provided)'}\n\n"
+                f"Failed verification results:\n{failed_details}\n\n"
+                "Make the smallest safe correction. Then stop; the control plane will rerun the checks."
+            )
+            repair_attempt_count = repair_number
+            passed, repair_results, repair_error = await run_repair_attempt(
+                task_id, workspace, permission_mode, repair_prompt, task_dir,
+                repair_number, max_repair_attempts, verification_commands,
+            )
+            verification_results = repair_results
+            if passed:
+                verification_status = "passed"
+                terminal_reason = None
+                error_summary = None
+                (task_dir / "verification.json").write_text(json.dumps({
+                    "status": "passed", "acceptance_criteria": acceptance_criteria,
+                    "commands": verification_results, "repaired": True,
+                    "repair_attempt_count": repair_attempt_count,
+                }, ensure_ascii=True, indent=2), encoding="utf-8")
+                add_event(task_id, "verification.finished", {
+                    "status": "passed", "repaired": True,
+                    "repair_attempt_count": repair_attempt_count,
+                    "commands": verification_results,
+                })
+                break
+            if repair_error:
+                error_summary = f"Automatic repair attempt {repair_number} failed: {repair_error}"
+            if repair_error == "cancelled":
+                terminal_reason = "cancelled"
+                verification_status = "not_run"
+                try:
+                    (task_dir / "verification.json").write_text(json.dumps({
+                        "status": "cancelled",
+                        "acceptance_criteria": acceptance_criteria,
+                        "commands": initial_verification_results,
+                        "repair_attempt_count": repair_attempt_count,
+                        "repair_cancelled": True,
+                    }, ensure_ascii=True, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
+                break
+            if repair_error == "timeout":
+                terminal_reason = "timeout"
+                break
+            verification_status = "failed"
+            terminal_reason = "verification_failed"
+        if verification_status == "failed":
+            try:
+                (task_dir / "verification.json").write_text(json.dumps({
+                    "status": "failed", "acceptance_criteria": acceptance_criteria,
+                    "commands": verification_results, "repaired": False,
+                    "repair_attempt_count": repair_attempt_count,
+                }, ensure_ascii=True, indent=2), encoding="utf-8")
+            except OSError:
+                pass
+
     # Preserve compatibility aliases for existing clients while retaining immutable per-attempt logs.
     try:
         shutil.copyfile(stdout_path, task_dir / "stdout.jsonl")
@@ -399,6 +636,7 @@ async def execute_task(task_id: str) -> None:
         if task is None:
             return
         task.exit_code, task.session_id = exit_code, session_id
+        task.repair_attempt_count = repair_attempt_count
         attempt_error = error_summary or (None if exit_code == 0 else f"Claude Code exited with status {exit_code}")
         retry_scheduled = False
         if task.cancel_requested or terminal_reason == "cancelled":

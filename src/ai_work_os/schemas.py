@@ -12,6 +12,8 @@ class TaskCreate(BaseModel):
     max_attempts: int = Field(default=1, ge=1, le=3)
     acceptance_criteria: str | None = Field(default=None, max_length=10_000)
     verification_commands: list[str] = Field(default_factory=list, max_length=5)
+    auto_repair: bool = False
+    max_repair_attempts: int = Field(default=0, ge=0, le=2)
 
     @field_validator("verification_commands")
     @classmethod
@@ -40,6 +42,9 @@ class TaskRead(BaseModel):
     acceptance_criteria: str | None = None
     verification_commands: list[str] = Field(default_factory=list)
     verification_status: str = "not_configured"
+    auto_repair: bool = False
+    max_repair_attempts: int = 0
+    repair_attempt_count: int = 0
     available_at: datetime | None = None
     created_at: datetime
     started_at: datetime | None

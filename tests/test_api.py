@@ -1162,3 +1162,41 @@ def test_multi_parent_workflow_waits_for_every_success_and_retry(tmp_path):
         db.commit()
     worker.reconcile_workflows()
     assert client.get(f"/workflows/{workflow['id']}").json()["status"] == "succeeded"
+
+def test_reconcile_later_failure_after_workflow_already_failed(tmp_path):
+    payload = {
+        "title": "Independent branches",
+        "tasks": [
+            {"key": "fail-fast", "title": "Fail fast", "prompt": "x", "workspace_path": str(tmp_path), "priority": 100},
+            {"key": "slow-parent", "title": "Slow parent", "prompt": "x", "workspace_path": str(tmp_path), "priority": 99},
+            {"key": "slow-child", "title": "Slow child", "prompt": "x", "workspace_path": str(tmp_path),
+             "depends_on": ["slow-parent"], "priority": 98},
+        ],
+    }
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 201, response.text
+    workflow_id = response.json()["id"]
+    ids = {item["key"]: item["task"]["id"] for item in response.json()["tasks"]}
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued").update(
+            {Task.status: "cancelled"}, synchronize_session=False
+        )
+        for key in ("slow-parent", "slow-child"):
+            task = db.get(Task, ids[key])
+            task.status = "queued"
+            task.finished_at = None
+        db.get(Task, ids["fail-fast"]).status = "failed"
+        db.commit()
+
+    worker.reconcile_workflows()
+    assert client.get(f"/workflows/{workflow_id}").json()["status"] == "failed"
+    with SessionLocal() as db:
+        parent = db.get(Task, ids["slow-parent"])
+        parent.status = "failed"
+        parent.finished_at = utcnow()
+        db.commit()
+
+    worker.reconcile_workflows()
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    states = {task["id"]: task["status"] for task in detail["tasks"]}
+    assert states[ids["slow-child"]] == "blocked"

@@ -1229,3 +1229,91 @@ def test_worker_does_not_claim_task_from_cancelled_workflow(tmp_path):
     assert worker.claim_task() != task_id
     with SessionLocal() as db:
         assert db.get(Task, task_id).status == "queued"
+
+
+
+def test_worker_claim_records_owner_and_lease(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Lease claim", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    worker_id = "worker-test-owner"
+    assert worker.claim_task(worker_id) == task_id
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.worker_id == worker_id
+        assert task.lease_expires_at is not None
+        assert task.lease_expires_at > utcnow()
+
+
+def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):
+    created = client.post("/tasks", json={
+        "title": "Lease heartbeat", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+    worker_id = "worker-heartbeat"
+    assert worker.claim_task(worker_id) == task_id
+    monkeypatch.setattr(worker, "WORKER_HEARTBEAT_SECONDS", 0.01)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.lease_expires_at = utcnow() + timedelta(seconds=1)
+        db.commit()
+    async def exercise():
+        heartbeat = asyncio.create_task(worker._renew_worker_lease(task_id, worker_id))
+        await asyncio.sleep(0.04)
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+    asyncio.run(exercise())
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.lease_expires_at > utcnow() + timedelta(seconds=30)
+
+
+def test_recovery_only_fails_expired_leases_and_legacy_after_grace(tmp_path, monkeypatch):
+    fresh = client.post("/tasks", json={
+        "title": "Fresh lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    expired = client.post("/tasks", json={
+        "title": "Expired lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    legacy = client.post("/tasks", json={
+        "title": "Legacy lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        for task_id in (fresh, expired, legacy):
+            task = db.get(Task, task_id)
+            task.status = "running"
+            task.started_at = utcnow()
+        db.get(Task, fresh).worker_id = "worker-live"
+        db.get(Task, fresh).lease_expires_at = utcnow() + timedelta(minutes=1)
+        db.get(Task, expired).worker_id = "worker-dead"
+        db.get(Task, expired).lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.get(Task, legacy).worker_id = None
+        db.get(Task, legacy).lease_expires_at = None
+        db.get(Task, legacy).started_at = utcnow() - timedelta(seconds=120)
+        db.commit()
+
+    monkeypatch.setattr(worker, "WORKER_LEASE_SECONDS", 60)
+    assert worker.recover_orphaned_running_tasks() == 2
+    with SessionLocal() as db:
+        assert db.get(Task, fresh).status == "running"
+        for task_id in (expired, legacy):
+            task = db.get(Task, task_id)
+            assert task.status == "failed"
+            assert task.exit_code == 125
+            assert task.worker_id is None
+            assert task.lease_expires_at is None

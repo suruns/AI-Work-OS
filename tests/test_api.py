@@ -759,7 +759,7 @@ def test_bounded_repair_can_turn_failed_verification_into_success(tmp_path, monk
     task_id = created.json()["id"]
     calls = []
 
-    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, commands):
+    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands):
         calls.append((repair_number, commands))
         return True, [{
             "index": 1, "command": commands[0], "exit_code": 0,
@@ -795,7 +795,7 @@ def test_bounded_repair_stops_at_configured_cap(tmp_path, monkeypatch):
     task_id = created.json()["id"]
     calls = []
 
-    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, commands):
+    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands):
         calls.append(repair_number)
         return False, [{
             "index": 1, "command": commands[0], "exit_code": 1,
@@ -907,7 +907,7 @@ def test_repair_runner_executes_agent_and_reruns_verification(tmp_path, monkeypa
     commands = [f'"{sys.executable}" -c "print(42)"']
 
     passed, results, error = asyncio.run(worker.run_repair_attempt(
-        task_id, workspace, "plan", "Fix the failing check", task_dir, 1, commands,
+        task_id, workspace, "plan", "Fix the failing check", task_dir, 1, 1, commands,
     ))
 
     assert passed is True
@@ -937,7 +937,7 @@ def test_repair_runner_reports_failed_verification(tmp_path, monkeypatch):
     commands = [f'"{sys.executable}" -c "import sys; sys.exit(9)"']
 
     passed, results, error = asyncio.run(worker.run_repair_attempt(
-        task_id, workspace, "configured", "Fix the failing check", task_dir, 1, commands,
+        task_id, workspace, "configured", "Fix the failing check", task_dir, 1, 1, commands,
     ))
 
     assert passed is False
@@ -946,3 +946,82 @@ def test_repair_runner_reports_failed_verification(tmp_path, monkeypatch):
     events = client.get(f"/tasks/{task_id}/events").json()
     finished = [event for event in events if event["event_type"] == "repair.finished"][-1]
     assert finished["payload"]["status"] == "verification_failed"
+
+
+def test_repair_started_event_uses_task_limit(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Repair event limit", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+
+    passed, _, _ = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Fix", task_dir, 1, 1,
+        [f'"{sys.executable}" -c "print(1)"'],
+    ))
+    assert passed is True
+    events = client.get(f"/tasks/{task_id}/events").json()
+    started = [event for event in events if event["event_type"] == "repair.started"][-1]
+    assert started["payload"]["max_repair_attempts"] == 1
+
+
+def test_cancelled_repair_preserves_initial_verification_output(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Cancelled repair artifact", "prompt": "Make checks pass",
+        "workspace_path": str(workspace), "auto_repair": True,
+        "max_repair_attempts": 1,
+        "verification_commands": [
+            f'"{sys.executable}" -c "print(\'initial output\'); import sys; sys.exit(1)"'
+        ],
+    })
+    task_id = created.json()["id"]
+
+    async def cancel_repair(*args, **kwargs):
+        client.post(f"/tasks/{task_id}/cancel")
+        return False, [], "cancelled"
+
+    monkeypatch.setattr(worker, "run_repair_attempt", cancel_repair)
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "cancelled"
+    assert task["verification_status"] == "not_run"
+    artifact = json.loads((tmp_path / "storage" / "tasks" / task_id / "verification.json").read_text())
+    assert artifact["status"] == "cancelled"
+    assert artifact["commands"][0]["stdout"].strip() == "initial output"
+    assert artifact["commands"][0]["exit_code"] == 1
+
+
+def test_workspace_snapshot_ignores_python_cache_noise(tmp_path):
+    import subprocess
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", str(workspace)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Test"], check=True)
+    (workspace / "tracked.txt").write_text("base", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "commit", "-m", "base"], check=True, capture_output=True)
+    cache = workspace / "__pycache__"
+    cache.mkdir()
+    (cache / "generated.pyc").write_bytes(b"cache")
+    (workspace / "real-change.txt").write_text("actual", encoding="utf-8")
+
+    snapshot = asyncio.run(worker.capture_workspace_snapshot(workspace))
+    assert snapshot["available"] is True
+    assert "real-change.txt" in snapshot["untracked"]
+    assert not any("__pycache__" in name or name.endswith(".pyc") for name in snapshot["untracked"])

@@ -918,7 +918,7 @@ async def execute_task(task_id: str, worker_id: str | None = None) -> None:
     except asyncio.CancelledError:
         execution.cancel()
         await asyncio.gather(execution, return_exceptions=True)
-        raise
+        return
     finally:
         heartbeat.cancel()
         await asyncio.gather(heartbeat, return_exceptions=True)

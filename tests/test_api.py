@@ -1029,9 +1029,9 @@ def test_workspace_snapshot_ignores_python_cache_noise(tmp_path):
 
 def _workflow_payload(workspace, *, with_dependency=True):
     tasks = [
-        {"key": "prepare", "title": "Prepare", "prompt": "prepare", "workspace_path": str(workspace)},
+        {"key": "prepare", "title": "Prepare", "prompt": "prepare", "workspace_path": str(workspace), "priority": 100},
         {"key": "build", "title": "Build", "prompt": "build", "workspace_path": str(workspace),
-         "depends_on": ["prepare"] if with_dependency else []},
+         "depends_on": ["prepare"] if with_dependency else [], "priority": 99},
     ]
     return {"title": "API workflow", "tasks": tasks}
 
@@ -1086,4 +1086,5 @@ def test_failed_parent_blocks_all_descendants(tmp_path):
     assert states[task_ids["prepare"]] == "failed"
     assert states[task_ids["build"]] == "blocked"
     assert detail["status"] == "failed"
-    assert "prerequisite task" in detail["tasks"][1]["blocked_reason"]
+    blocked = next(task for task in detail["tasks"] if task["id"] == task_ids["build"])
+    assert "prerequisite task" in blocked["blocked_reason"]

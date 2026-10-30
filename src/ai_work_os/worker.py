@@ -281,13 +281,32 @@ async def run_repair_attempt(
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
             )
-            try:
-                out_bytes, err_bytes = await asyncio.wait_for(check.communicate(), timeout=120)
-                timed_out = False
-            except asyncio.TimeoutError:
-                await terminate_process_tree(check)
-                out_bytes, err_bytes = await check.communicate()
-                timed_out = True
+            communicate_task = asyncio.create_task(check.communicate())
+            timed_out = False
+            cancelled = False
+            deadline = asyncio.get_running_loop().time() + 120
+            while not communicate_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(communicate_task), timeout=0.25)
+                except asyncio.TimeoutError:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        cancelled = bool(current is None or current.cancel_requested)
+                    if cancelled:
+                        await terminate_process_tree(check)
+                        break
+                    if asyncio.get_running_loop().time() >= deadline:
+                        timed_out = True
+                        await terminate_process_tree(check)
+                        break
+            out_bytes, err_bytes = await communicate_task
+            if cancelled:
+                add_event(task_id, "repair.finished", {
+                    "repair_attempt": repair_number,
+                    "status": "cancelled",
+                    "verification": results,
+                })
+                return False, results, "cancelled"
             results.append({
                 "index": index,
                 "command": command_text,

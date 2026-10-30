@@ -1200,3 +1200,32 @@ def test_reconcile_later_failure_after_workflow_already_failed(tmp_path):
     detail = client.get(f"/workflows/{workflow_id}").json()
     states = {task["id"]: task["status"] for task in detail["tasks"]}
     assert states[ids["slow-child"]] == "blocked"
+
+
+
+def test_cancel_task_is_idempotent_and_emits_one_event(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Cancel idempotency", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    assert client.post(f"/tasks/{task_id}/cancel").status_code == 200
+    assert client.post(f"/tasks/{task_id}/cancel").status_code == 200
+    events = client.get(f"/tasks/{task_id}/events").json()
+    cancelled = [event for event in events if event["event_type"] == "task.cancelled"]
+    assert len(cancelled) == 1
+
+
+def test_worker_does_not_claim_task_from_cancelled_workflow(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201
+    workflow_id = response.json()["id"]
+    task_id = response.json()["tasks"][0]["task"]["id"]
+    with SessionLocal() as db:
+        workflow = db.get(Workflow, workflow_id)
+        workflow.status = "cancelled"
+        workflow.finished_at = utcnow()
+        # Deliberately leave the task queued to exercise the claim-side fence.
+        db.commit()
+    assert worker.claim_task() != task_id
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "queued"

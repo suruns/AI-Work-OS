@@ -185,9 +185,20 @@ def reconcile_workflows() -> None:
                     root_reason = failed_parent.blocked_reason or (
                         f"Blocked because prerequisite task {failed_parent.id} ended as {failed_parent.status}."
                     )
+                    blocked_at = now()
+                    result = db.execute(
+                        update(Task)
+                        .where(Task.id == task.id, Task.status == "queued")
+                        .values(
+                            status="blocked", blocked_reason=root_reason,
+                            finished_at=blocked_at, error_summary=root_reason,
+                        )
+                    )
+                    if result.rowcount != 1:
+                        continue
                     task.status = "blocked"
                     task.blocked_reason = root_reason
-                    task.finished_at = now()
+                    task.finished_at = blocked_at
                     task.error_summary = root_reason
                     db.add(TaskEvent(task_id=task.id, event_type="task.blocked", payload={
                         "status": "blocked", "reason": root_reason,
@@ -195,19 +206,28 @@ def reconcile_workflows() -> None:
                     }))
                     changed = True
             statuses = [task.status for task in tasks]
+            target_status = None
             if statuses and all(status == "succeeded" for status in statuses):
-                workflow.status = "succeeded"
-                workflow.finished_at = now()
+                target_status = "succeeded"
             elif any(status in {"failed", "blocked"} for status in statuses):
-                workflow.status = "failed"
-                workflow.finished_at = now()
+                target_status = "failed"
             elif any(status == "cancelled" for status in statuses):
-                workflow.status = "cancelled"
-                workflow.finished_at = now()
+                target_status = "cancelled"
             elif any(task.started_at is not None for task in tasks):
-                workflow.status = "running"
-                workflow.started_at = workflow.started_at or min(
-                    (task.started_at for task in tasks if task.started_at is not None), default=now()
+                target_status = "running"
+            if target_status is not None:
+                values = {"status": target_status}
+                if target_status in {"succeeded", "failed", "cancelled"}:
+                    values["finished_at"] = now()
+                if target_status == "running":
+                    first_started = min(
+                        (task.started_at for task in tasks if task.started_at is not None), default=now()
+                    )
+                    values["started_at"] = workflow.started_at or first_started
+                db.execute(
+                    update(Workflow)
+                    .where(Workflow.id == workflow.id, Workflow.status.in_(["queued", "running"]))
+                    .values(**values)
                 )
         db.commit()
 

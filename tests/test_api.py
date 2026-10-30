@@ -1088,3 +1088,14 @@ def test_failed_parent_blocks_all_descendants(tmp_path):
     assert detail["status"] == "failed"
     blocked = next(task for task in detail["tasks"] if task["id"] == task_ids["build"])
     assert "prerequisite task" in blocked["blocked_reason"]
+
+
+def test_workflow_cancel_cancels_queued_tasks(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201
+    workflow_id = response.json()["id"]
+    cancelled = client.post(f"/workflows/{workflow_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    assert all(task["status"] == "cancelled" for task in detail["tasks"])

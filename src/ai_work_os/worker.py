@@ -234,7 +234,7 @@ def reconcile_workflows() -> None:
         db.commit()
 
 
-def claim_task(worker_id: str) -> str | None:
+def claim_task(worker_id: str = "legacy-worker") -> str | None:
     reconcile_workflows()
     with SessionLocal() as db:
         started_at = now()
@@ -825,6 +825,7 @@ def recover_orphaned_running_tasks() -> int:
                         (Task.lease_expires_at.is_(None)) & (Task.started_at <= legacy_cutoff),
                     ),
                 )
+                .execution_options(synchronize_session=False)
                 .values(
                     status="failed", finished_at=recovered_at, exit_code=125,
                     error_summary=(
@@ -874,7 +875,19 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
             raise RuntimeError(f"Worker lease lost for task {task_id}")
 
 
-async def execute_task(task_id: str, worker_id: str) -> None:
+async def execute_task(task_id: str, worker_id: str | None = None) -> None:
+    if worker_id is None:
+        worker_id = "direct-execution"
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            if task is None:
+                return
+            if task.status == "queued":
+                task.status = "running"
+                task.started_at = now()
+            task.worker_id = worker_id
+            task.lease_expires_at = now() + timedelta(seconds=WORKER_LEASE_SECONDS)
+            db.commit()
     execution = asyncio.create_task(_execute_task(task_id, worker_id))
     heartbeat = asyncio.create_task(_renew_worker_lease(task_id, worker_id))
     try:

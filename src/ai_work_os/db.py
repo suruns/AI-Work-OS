@@ -46,4 +46,10 @@ def ensure_schema_compatibility() -> None:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN verification_commands JSON NOT NULL DEFAULT '[]'"))
         if "verification_status" not in columns:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN verification_status VARCHAR(32) NOT NULL DEFAULT 'not_configured'"))
+        if "auto_repair" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN auto_repair INTEGER NOT NULL DEFAULT 0"))
+        if "max_repair_attempts" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN max_repair_attempts INTEGER NOT NULL DEFAULT 0"))
+        if "repair_attempt_count" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN repair_attempt_count INTEGER NOT NULL DEFAULT 0"))
         connection.execute(text("UPDATE tasks SET available_at = created_at WHERE available_at IS NULL"))

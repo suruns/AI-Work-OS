@@ -888,3 +888,61 @@ def test_cancellation_during_repair_closes_task_as_cancelled(tmp_path, monkeypat
     events = client.get(f"/tasks/{task_id}/events").json()
     finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
     assert finished["payload"]["terminal_reason"] == "cancelled"
+
+
+def test_repair_runner_executes_agent_and_reruns_verification(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Repair runner success", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    commands = [f'"{sys.executable}" -c "print(42)"']
+
+    passed, results, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Fix the failing check", task_dir, 1, commands,
+    ))
+
+    assert passed is True
+    assert error is None
+    assert results[0]["exit_code"] == 0
+    assert (task_dir / "repair-01.stdout.jsonl").is_file()
+    assert (task_dir / "repair-01.stderr.log").is_file()
+    events = client.get(f"/tasks/{task_id}/events").json()
+    repair_events = [event["event_type"] for event in events if event["event_type"].startswith("repair.")]
+    assert repair_events == ["repair.started", "repair.finished"]
+
+
+def test_repair_runner_reports_failed_verification(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Repair runner failure", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    commands = [f'"{sys.executable}" -c "import sys; sys.exit(9)"']
+
+    passed, results, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "configured", "Fix the failing check", task_dir, 1, commands,
+    ))
+
+    assert passed is False
+    assert error is None
+    assert results[0]["exit_code"] == 9
+    events = client.get(f"/tasks/{task_id}/events").json()
+    finished = [event for event in events if event["event_type"] == "repair.finished"][-1]
+    assert finished["payload"]["status"] == "verification_failed"

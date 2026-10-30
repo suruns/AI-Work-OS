@@ -579,6 +579,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "timeout_seconds_per_command": 120,
             "acceptance_criteria": acceptance_criteria,
         })
+        verification_cancelled = False
         for index, command_text in enumerate(verification_commands, start=1):
             try:
                 argv = shlex.split(command_text)
@@ -590,28 +591,40 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=(os.name == "posix"),
                 )
-                try:
-                    stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)
-                except asyncio.CancelledError:
-                    await terminate_process_tree(proc)
-                    raise
-                except asyncio.TimeoutError:
-                    await terminate_process_tree(proc)
-                    stdout_bytes, stderr_bytes = await proc.communicate()
-                    verification_results.append({
-                        "index": index, "command": command_text, "exit_code": proc.returncode,
-                        "timed_out": True,
-                        "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
-                        "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
-                    })
-                    break
+                communicate_task = asyncio.create_task(proc.communicate())
+                timed_out = False
+                cancelled = False
+                deadline = asyncio.get_running_loop().time() + 120
+                while not communicate_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(communicate_task), timeout=0.25)
+                    except asyncio.CancelledError:
+                        await terminate_process_tree(proc)
+                        await asyncio.gather(communicate_task, return_exceptions=True)
+                        raise
+                    except asyncio.TimeoutError:
+                        with SessionLocal() as db:
+                            current = db.get(Task, task_id)
+                            cancelled = bool(current is None or current.cancel_requested)
+                        if cancelled:
+                            await terminate_process_tree(proc)
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            timed_out = True
+                            await terminate_process_tree(proc)
+                            break
+                stdout_bytes, stderr_bytes = await communicate_task
                 verification_results.append({
                     "index": index, "command": command_text, "exit_code": proc.returncode,
-                    "timed_out": False,
+                    "timed_out": timed_out, "cancelled": cancelled,
                     "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
                     "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
                 })
-                if proc.returncode != 0:
+                if cancelled:
+                    verification_cancelled = True
+                    terminal_reason = "cancelled"
+                    break
+                if timed_out or proc.returncode != 0:
                     break
             except (OSError, ValueError) as exc:
                 verification_results.append({
@@ -620,16 +633,32 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     "stderr": f"{type(exc).__name__}: {exc}",
                 })
                 break
-        passed = len(verification_results) == len(verification_commands) and all(
-            result.get("exit_code") == 0 and not result.get("timed_out")
-            for result in verification_results
-        )
-        verification_status = "passed" if passed else "failed"
-        verification_payload = {
-            "status": verification_status,
-            "acceptance_criteria": acceptance_criteria,
-            "commands": verification_results,
-        }
+        if verification_cancelled:
+            verification_status = "not_run"
+            verification_payload = {
+                "status": "cancelled",
+                "acceptance_criteria": acceptance_criteria,
+                "commands": verification_results,
+            }
+        else:
+            passed = len(verification_results) == len(verification_commands) and all(
+                result.get("exit_code") == 0 and not result.get("timed_out")
+                for result in verification_results
+            )
+            verification_status = "passed" if passed else "failed"
+            verification_payload = {
+                "status": verification_status,
+                "acceptance_criteria": acceptance_criteria,
+                "commands": verification_results,
+            }
+            if not passed:
+                terminal_reason = "verification_failed"
+                failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
+                error_summary = (
+                    f"Verification failed for command: {failed.get('command', 'unknown command')}"
+                    + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
+                    + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
+                )
         try:
             (task_dir / "verification.json").write_text(
                 json.dumps(verification_payload, ensure_ascii=True, indent=2),
@@ -638,14 +667,6 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         except OSError as exc:
             verification_payload["artifact_write_error"] = f"{type(exc).__name__}: {exc}"
         add_event(task_id, "verification.finished", verification_payload)
-        if not passed:
-            terminal_reason = "verification_failed"
-            failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
-            error_summary = (
-                f"Verification failed for command: {failed.get('command', 'unknown command')}"
-                + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
-                + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
-            )
 
     initial_verification_results = list(verification_results)
     repair_attempt_count = 0

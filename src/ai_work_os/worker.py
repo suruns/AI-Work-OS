@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from sqlalchemy import select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, elapsed_ms
+from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, elapsed_ms
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -157,15 +157,88 @@ def add_event(task_id: str, event_type: str, payload: dict) -> None:
         db.commit()
 
 
+def reconcile_workflows() -> None:
+    """Idempotently block descendants of failed parents and aggregate workflow state."""
+    with SessionLocal() as db:
+        workflows = list(db.scalars(select(Workflow).where(Workflow.status.in_(["queued", "running"]))))
+        for workflow in workflows:
+            tasks = list(db.scalars(select(Task).where(Task.workflow_id == workflow.id)))
+            by_id = {task.id: task for task in tasks}
+            edges = list(db.scalars(select(WorkflowTaskDependency).where(
+                WorkflowTaskDependency.workflow_id == workflow.id
+            )))
+            parents: dict[str, list[str]] = {task.id: [] for task in tasks}
+            for edge in edges:
+                parents.setdefault(edge.downstream_task_id, []).append(edge.upstream_task_id)
+            changed = True
+            while changed:
+                changed = False
+                for task in tasks:
+                    if task.status != "queued":
+                        continue
+                    failed_parent = next((
+                        by_id[parent_id] for parent_id in parents.get(task.id, [])
+                        if parent_id in by_id and by_id[parent_id].status in {"failed", "cancelled", "blocked"}
+                    ), None)
+                    if failed_parent is None:
+                        continue
+                    root_reason = failed_parent.blocked_reason or (
+                        f"Blocked because prerequisite task {failed_parent.id} ended as {failed_parent.status}."
+                    )
+                    task.status = "blocked"
+                    task.blocked_reason = root_reason
+                    task.finished_at = now()
+                    task.error_summary = root_reason
+                    db.add(TaskEvent(task_id=task.id, event_type="task.blocked", payload={
+                        "status": "blocked", "reason": root_reason,
+                        "failed_ancestor_task_id": failed_parent.id, "workflow_id": workflow.id,
+                    }))
+                    changed = True
+            statuses = [task.status for task in tasks]
+            if statuses and all(status == "succeeded" for status in statuses):
+                workflow.status = "succeeded"
+                workflow.finished_at = now()
+            elif any(status in {"failed", "blocked"} for status in statuses):
+                workflow.status = "failed"
+                workflow.finished_at = now()
+            elif statuses and all(status == "cancelled" for status in statuses):
+                workflow.status = "cancelled"
+                workflow.finished_at = now()
+            elif any(task.started_at is not None for task in tasks):
+                workflow.status = "running"
+                workflow.started_at = workflow.started_at or min(
+                    (task.started_at for task in tasks if task.started_at is not None), default=now()
+                )
+        db.commit()
+
+
 def claim_task() -> str | None:
+    reconcile_workflows()
     with SessionLocal() as db:
         started_at = now()
-        task = db.scalar(
+        candidates = list(db.scalars(
             select(Task)
             .where(Task.status == "queued", Task.available_at <= started_at)
             .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
-            .limit(1)
-        )
+            .limit(100)
+        ))
+        task = None
+        for candidate in candidates:
+            if candidate.workflow_id is None:
+                task = candidate
+                break
+            parent_ids = db.scalars(select(WorkflowTaskDependency.upstream_task_id).where(
+                WorkflowTaskDependency.workflow_id == candidate.workflow_id,
+                WorkflowTaskDependency.downstream_task_id == candidate.id,
+            ))
+            parent_ids = list(parent_ids)
+            if not parent_ids:
+                task = candidate
+                break
+            parent_statuses = list(db.scalars(select(Task.status).where(Task.id.in_(parent_ids))))
+            if len(parent_statuses) == len(parent_ids) and all(status == "succeeded" for status in parent_statuses):
+                task = candidate
+                break
         if task is None:
             return None
         attempt_number = int(task.attempt_count or 0) + 1
@@ -683,6 +756,7 @@ async def execute_task(task_id: str) -> None:
             "latest_stderr_alias": str(task_dir / "stderr.log"),
         }))
         db.commit()
+    reconcile_workflows()
 
 
 def recover_orphaned_running_tasks() -> int:
@@ -718,6 +792,7 @@ def recover_orphaned_running_tasks() -> int:
 
 async def run_worker() -> None:
     recovered = recover_orphaned_running_tasks()
+    reconcile_workflows()
     print(
         f"AI Work OS worker started; concurrency={MAX_CONCURRENT_TASKS}; "
         f"recovered_orphaned_tasks={recovered}.",

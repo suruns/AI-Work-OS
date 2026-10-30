@@ -20,6 +20,8 @@ POLL_SECONDS = float(os.getenv("AI_WORK_OS_POLL_SECONDS", "1"))
 MAX_TASK_SECONDS = int(os.getenv("AI_WORK_OS_MAX_TASK_SECONDS", "3600"))
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("AI_WORK_OS_MAX_CONCURRENT_TASKS", "1")))
 RETRY_BASE_DELAY_SECONDS = max(0.0, float(os.getenv("AI_WORK_OS_RETRY_BASE_DELAY_SECONDS", "2")))
+WORKER_LEASE_SECONDS = max(30, int(os.getenv("AI_WORK_OS_WORKER_LEASE_SECONDS", "60")))
+WORKER_HEARTBEAT_SECONDS = max(5, min(WORKER_LEASE_SECONDS // 2, int(os.getenv("AI_WORK_OS_WORKER_HEARTBEAT_SECONDS", "10"))))
 
 
 def now() -> datetime:
@@ -232,10 +234,11 @@ def reconcile_workflows() -> None:
         db.commit()
 
 
-def claim_task() -> str | None:
+def claim_task(worker_id: str) -> str | None:
     reconcile_workflows()
     with SessionLocal() as db:
         started_at = now()
+        lease_expires_at = started_at + timedelta(seconds=WORKER_LEASE_SECONDS)
         candidates = list(db.scalars(
             select(Task)
             .where(Task.status == "queued", Task.available_at <= started_at)
@@ -273,7 +276,7 @@ def claim_task() -> str | None:
         result = db.execute(
             update(Task)
             .where(Task.id == task.id, Task.status == "queued", workflow_not_cancelled)
-            .values(status="running", started_at=started_at, attempt_count=Task.attempt_count + 1)
+            .values(status="running", started_at=started_at, attempt_count=Task.attempt_count + 1, worker_id=worker_id, lease_expires_at=lease_expires_at)
         )
         if result.rowcount != 1:
             db.rollback()
@@ -455,10 +458,10 @@ async def run_repair_attempt(
     return passed, results, None
 
 
-async def execute_task(task_id: str) -> None:
+async def _execute_task(task_id: str, worker_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        if task is None:
+        if task is None or task.status != "running" or task.worker_id != worker_id:
             return
         workspace = Path(task.workspace_path)
         prompt = task.prompt
@@ -739,7 +742,7 @@ async def execute_task(task_id: str) -> None:
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        if task is None:
+        if task is None or task.status != "running" or task.worker_id != worker_id:
             return
         task.exit_code, task.session_id = exit_code, session_id
         task.repair_attempt_count = repair_attempt_count
@@ -774,6 +777,8 @@ async def execute_task(task_id: str) -> None:
             if verification_status == "pending":
                 verification_status = "not_run"
         task.verification_status = verification_status
+        task.worker_id = None
+        task.lease_expires_at = None
         db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
             "status": task.status,
             "exit_code": exit_code,

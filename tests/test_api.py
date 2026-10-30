@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from datetime import timedelta
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
 from ai_work_os import api as api_module
@@ -1108,3 +1109,56 @@ def test_workflow_cancel_cancels_queued_tasks(tmp_path):
     assert cancelled.json()["status"] == "cancelled"
     detail = client.get(f"/workflows/{workflow_id}").json()
     assert all(task["status"] == "cancelled" for task in detail["tasks"])
+
+
+def test_multi_parent_workflow_waits_for_every_success_and_retry(tmp_path):
+    payload = {
+        "title": "Multi-parent workflow",
+        "tasks": [
+            {"key": "first", "title": "First", "prompt": "first", "workspace_path": str(tmp_path), "priority": 100},
+            {"key": "second", "title": "Second", "prompt": "second", "workspace_path": str(tmp_path), "priority": 99},
+            {"key": "join", "title": "Join", "prompt": "join", "workspace_path": str(tmp_path),
+             "depends_on": ["first", "second"], "priority": 98},
+        ],
+    }
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 201, response.text
+    workflow = response.json()
+    ids = {item["key"]: item["task"]["id"] for item in workflow["tasks"]}
+
+    with SessionLocal() as db:
+        for unrelated in db.query(Task).filter(Task.status == "queued").all():
+            if unrelated.id not in ids.values():
+                unrelated.status = "cancelled"
+                unrelated.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task() == ids["first"]
+    assert worker.claim_task() == ids["second"]
+    assert worker.claim_task() is None
+
+    with SessionLocal() as db:
+        first = db.get(Task, ids["first"])
+        second = db.get(Task, ids["second"])
+        first.status = "succeeded"
+        first.finished_at = utcnow()
+        # Simulate the second parent waiting for its retry backoff.
+        second.status = "queued"
+        second.available_at = utcnow() + timedelta(hours=1)
+        db.commit()
+
+    assert worker.claim_task() is None
+    with SessionLocal() as db:
+        second = db.get(Task, ids["second"])
+        second.status = "succeeded"
+        second.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task() == ids["join"]
+    with SessionLocal() as db:
+        joined = db.get(Task, ids["join"])
+        joined.status = "succeeded"
+        joined.finished_at = utcnow()
+        db.commit()
+    worker.reconcile_workflows()
+    assert client.get(f"/workflows/{workflow['id']}").json()["status"] == "succeeded"

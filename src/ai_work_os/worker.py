@@ -250,6 +250,11 @@ def claim_task() -> str | None:
             db.rollback()
             return None
         task_id = task.id
+        if task.workflow_id is not None:
+            workflow = db.get(Workflow, task.workflow_id)
+            if workflow is not None and workflow.status == "queued":
+                workflow.status = "running"
+                workflow.started_at = started_at
         db.add(TaskEvent(
             task_id=task_id,
             event_type="executor.claimed",

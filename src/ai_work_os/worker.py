@@ -220,7 +220,6 @@ def claim_task() -> str | None:
             select(Task)
             .where(Task.status == "queued", Task.available_at <= started_at)
             .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
-            .limit(100)
         ))
         task = None
         for candidate in candidates:

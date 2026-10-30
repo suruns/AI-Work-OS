@@ -704,3 +704,155 @@ def test_verification_command_validation_and_default_status(tmp_path):
         "verification_commands": ["true"] * 6,
     })
     assert invalid.status_code == 422
+
+
+def _write_fake_claude(path):
+    path.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json\\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'fake-session'}))\\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def test_auto_repair_options_are_opt_in_and_bounded(tmp_path):
+    defaults = client.post("/tasks", json={
+        "title": "Repair defaults", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    assert defaults.status_code == 201
+    assert defaults.json()["auto_repair"] is False
+    assert defaults.json()["max_repair_attempts"] == 0
+    assert defaults.json()["repair_attempt_count"] == 0
+
+    enabled = client.post("/tasks", json={
+        "title": "Repair enabled", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "auto_repair": True, "max_repair_attempts": 2,
+        "verification_commands": ["python -c \"print('ok')\""],
+    })
+    assert enabled.status_code == 201
+    assert enabled.json()["auto_repair"] is True
+    assert enabled.json()["max_repair_attempts"] == 2
+
+    invalid = client.post("/tasks", json={
+        "title": "Repair over cap", "prompt": "Inspect", "workspace_path": str(tmp_path),
+        "auto_repair": True, "max_repair_attempts": 3,
+    })
+    assert invalid.status_code == 422
+
+
+def test_bounded_repair_can_turn_failed_verification_into_success(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Repair success", "prompt": "Make checks pass",
+        "workspace_path": str(workspace), "auto_repair": True,
+        "max_repair_attempts": 1,
+        "verification_commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    calls = []
+
+    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, commands):
+        calls.append((repair_number, commands))
+        return True, [{
+            "index": 1, "command": commands[0], "exit_code": 0,
+            "timed_out": False, "stdout": "ok", "stderr": "",
+        }], None
+
+    monkeypatch.setattr(worker, "run_repair_attempt", fake_repair)
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    assert task["verification_status"] == "passed"
+    assert task["repair_attempt_count"] == 1
+    assert len(calls) == 1
+    assert calls[0][0] == 1
+    assert calls[0][1] == created.json()["verification_commands"]
+
+
+def test_bounded_repair_stops_at_configured_cap(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Repair cap", "prompt": "Make checks pass",
+        "workspace_path": str(workspace), "auto_repair": True,
+        "max_repair_attempts": 2,
+        "verification_commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+    })
+    task_id = created.json()["id"]
+    calls = []
+
+    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, commands):
+        calls.append(repair_number)
+        return False, [{
+            "index": 1, "command": commands[0], "exit_code": 1,
+            "timed_out": False, "stdout": "", "stderr": "still failing",
+        }], None
+
+    monkeypatch.setattr(worker, "run_repair_attempt", failing_repair)
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["verification_status"] == "failed"
+    assert task["repair_attempt_count"] == 2
+    assert calls == [1, 2]
+
+
+def test_disabled_repair_does_not_invoke_repair_agent(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Repair disabled", "prompt": "Make checks pass",
+        "workspace_path": str(workspace),
+        "verification_commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+    })
+    task_id = created.json()["id"]
+
+    async def unexpected_repair(*args, **kwargs):
+        raise AssertionError("repair must remain disabled by default")
+
+    monkeypatch.setattr(worker, "run_repair_attempt", unexpected_repair)
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["repair_attempt_count"] == 0
+
+
+def test_repair_logs_are_listed_and_downloadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Repair log artifacts", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    task_dir = api_module.STORAGE / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    (task_dir / "repair-01.stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
+    (task_dir / "repair-01.stderr.log").write_text("diagnostic\\n", encoding="utf-8")
+
+    artifacts = client.get(f"/tasks/{task_id}/artifacts").json()["artifacts"]
+    names = {item["name"] for item in artifacts}
+    assert "repair-01.stdout.jsonl" in names
+    assert "repair-01.stderr.log" in names
+    assert client.get(f"/tasks/{task_id}/artifacts/repair-01.stdout.jsonl").status_code == 200
+    assert client.get(f"/tasks/{task_id}/artifacts/repair-01.stderr.log").status_code == 200
+    assert client.get(f"/tasks/{task_id}/artifacts/repair-99.stdout.jsonl").status_code == 404

@@ -258,12 +258,21 @@ def list_task_artifacts(task_id: str) -> dict:
     if storage_path_safe and task_dir.is_dir():
         for candidate in sorted(task_dir.iterdir()):
             match = re.fullmatch(r"(stdout|stderr)\.attempt-(\d{3})\.(jsonl|log)", candidate.name)
-            if not match or candidate.is_symlink() or not candidate.is_file():
+            repair_match = re.fullmatch(r"repair-(\d{2})\.(stdout\.jsonl|stderr\.log)", candidate.name)
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            if match:
+                kind = "execution_log" if match.group(1) == "stdout" else "error_log"
+                attempt = int(match.group(2))
+            elif repair_match:
+                kind = "repair_execution_log" if repair_match.group(2).startswith("stdout") else "repair_error_log"
+                attempt = int(repair_match.group(1))
+            else:
                 continue
             artifacts.append({
                 "name": candidate.name,
-                "kind": "execution_log" if match.group(1) == "stdout" else "error_log",
-                "attempt": int(match.group(2)),
+                "kind": kind,
+                "attempt": attempt,
                 "size_bytes": candidate.stat().st_size,
                 "download_url": f"/tasks/{task_id}/artifacts/{candidate.name}",
             })
@@ -328,9 +337,15 @@ def download_task_artifact(task_id: str, name: str):
     }
     if name not in allowed:
         match = re.fullmatch(r"(stdout|stderr)\.attempt-(\d{3})\.(jsonl|log)", name)
-        if not match or (match.group(1) == "stdout" and match.group(3) != "jsonl") or (match.group(1) == "stderr" and match.group(3) != "log"):
+        repair_match = re.fullmatch(r"repair-(\d{2})\.(stdout\.jsonl|stderr\.log)", name)
+        if match:
+            if (match.group(1) == "stdout" and match.group(3) != "jsonl") or (match.group(1) == "stderr" and match.group(3) != "log"):
+                raise HTTPException(status_code=404, detail="artifact not found")
+            allowed[name] = "application/x-ndjson" if match.group(1) == "stdout" else "text/plain; charset=utf-8"
+        elif repair_match:
+            allowed[name] = "application/x-ndjson" if repair_match.group(2).startswith("stdout") else "text/plain; charset=utf-8"
+        else:
             raise HTTPException(status_code=404, detail="artifact not found")
-        allowed[name] = "application/x-ndjson" if match.group(1) == "stdout" else "text/plain; charset=utf-8"
     with SessionLocal() as db:
         if not db.get(Task, task_id):
             raise HTTPException(status_code=404, detail="task not found")

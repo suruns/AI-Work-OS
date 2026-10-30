@@ -1419,7 +1419,7 @@ def test_cancel_during_verification_terminates_command_and_records_results(tmp_p
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     fake_claude.chmod(0o755)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")

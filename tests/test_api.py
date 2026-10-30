@@ -1055,8 +1055,8 @@ def test_create_workflow_and_dependency_gates_worker(tmp_path):
         db.commit()
 
     # The first task is eligible; the dependent task must remain blocked from claim.
-    assert worker.claim_task() == task_ids["prepare"]
-    assert worker.claim_task() is None
+    assert worker.claim_task("worker-test") == task_ids["prepare"]
+    assert worker.claim_task("worker-test") is None
 
     with SessionLocal() as db:
         first = db.get(Task, task_ids["prepare"])
@@ -1064,7 +1064,7 @@ def test_create_workflow_and_dependency_gates_worker(tmp_path):
         first.finished_at = utcnow()
         db.commit()
 
-    assert worker.claim_task() == task_ids["build"]
+    assert worker.claim_task("worker-test") == task_ids["build"]
 
 
 def test_workflow_rejects_unknown_dependency_and_cycle(tmp_path):
@@ -1133,9 +1133,9 @@ def test_multi_parent_workflow_waits_for_every_success_and_retry(tmp_path):
                 unrelated.finished_at = utcnow()
         db.commit()
 
-    assert worker.claim_task() == ids["first"]
-    assert worker.claim_task() == ids["second"]
-    assert worker.claim_task() is None
+    assert worker.claim_task("worker-test") == ids["first"]
+    assert worker.claim_task("worker-test") == ids["second"]
+    assert worker.claim_task("worker-test") is None
 
     with SessionLocal() as db:
         first = db.get(Task, ids["first"])
@@ -1147,14 +1147,14 @@ def test_multi_parent_workflow_waits_for_every_success_and_retry(tmp_path):
         second.available_at = utcnow() + timedelta(hours=1)
         db.commit()
 
-    assert worker.claim_task() is None
+    assert worker.claim_task("worker-test") is None
     with SessionLocal() as db:
         second = db.get(Task, ids["second"])
         second.status = "succeeded"
         second.finished_at = utcnow()
         db.commit()
 
-    assert worker.claim_task() == ids["join"]
+    assert worker.claim_task("worker-test") == ids["join"]
     with SessionLocal() as db:
         joined = db.get(Task, ids["join"])
         joined.status = "succeeded"
@@ -1226,7 +1226,7 @@ def test_worker_does_not_claim_task_from_cancelled_workflow(tmp_path):
         workflow.finished_at = utcnow()
         # Deliberately leave the task queued to exercise the claim-side fence.
         db.commit()
-    assert worker.claim_task() != task_id
+    assert worker.claim_task("worker-test") != task_id
     with SessionLocal() as db:
         assert db.get(Task, task_id).status == "queued"
 

@@ -32,6 +32,7 @@ def ensure_schema_compatibility() -> None:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN workflow_id VARCHAR(36) REFERENCES workflows(id)"))
         if "blocked_reason" not in columns:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN blocked_reason TEXT"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_workflow_id ON tasks (workflow_id)"))
         if "permission_mode" not in columns:
             connection.execute(text(
                 "ALTER TABLE tasks ADD COLUMN permission_mode VARCHAR(32) NOT NULL DEFAULT 'plan'"

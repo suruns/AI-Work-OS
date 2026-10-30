@@ -891,16 +891,47 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
 
 async def execute_task(task_id: str, worker_id: str | None = None) -> None:
     if worker_id is None:
-        worker_id = "direct-execution"
         with SessionLocal() as db:
             task = db.get(Task, task_id)
             if task is None:
                 return
+            # Compatibility path for tests/embedded callers: never steal a live
+            # lease from a named worker. claim_task() without an ID uses this
+            # stable legacy identity.
             if task.status == "queued":
-                task.status = "running"
-                task.started_at = now()
-            task.worker_id = worker_id
-            task.lease_expires_at = now() + timedelta(seconds=WORKER_LEASE_SECONDS)
+                worker_id = "direct-execution"
+                claimed_at = now()
+                result = db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "queued")
+                    .values(
+                        status="running",
+                        started_at=claimed_at,
+                        attempt_count=Task.attempt_count + 1,
+                        worker_id=worker_id,
+                        lease_expires_at=claimed_at + timedelta(seconds=WORKER_LEASE_SECONDS),
+                    )
+                )
+                if result.rowcount != 1:
+                    db.rollback()
+                    return
+            elif task.status == "running" and task.worker_id == "legacy-worker":
+                worker_id = "legacy-worker"
+            elif task.status == "running" and task.worker_id is None:
+                worker_id = "direct-execution"
+                result = db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "running", Task.worker_id.is_(None))
+                    .values(
+                        worker_id=worker_id,
+                        lease_expires_at=now() + timedelta(seconds=WORKER_LEASE_SECONDS),
+                    )
+                )
+                if result.rowcount != 1:
+                    db.rollback()
+                    return
+            else:
+                return
             db.commit()
     execution = asyncio.create_task(_execute_task(task_id, worker_id))
     heartbeat = asyncio.create_task(_renew_worker_lease(task_id, worker_id))

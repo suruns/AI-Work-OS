@@ -585,6 +585,9 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 )
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)
+                except asyncio.CancelledError:
+                    await terminate_process_tree(proc)
+                    raise
                 except asyncio.TimeoutError:
                     await terminate_process_tree(proc)
                     stdout_bytes, stderr_bytes = await proc.communicate()

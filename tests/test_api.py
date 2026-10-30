@@ -1046,9 +1046,9 @@ def test_create_workflow_and_dependency_gates_worker(tmp_path):
 
     # Keep unrelated queued tasks from earlier API tests out of this scheduler assertion.
     with SessionLocal() as db:
-        for unrelated in db.query(Task).filter(
-            Task.status == "queued", Task.workflow_id != workflow["id"]
-        ).all():
+        for unrelated in db.query(Task).filter(Task.status == "queued").all():
+            if unrelated.id in task_ids.values():
+                continue
             unrelated.status = "cancelled"
             unrelated.finished_at = utcnow()
         db.commit()

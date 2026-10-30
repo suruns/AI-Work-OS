@@ -873,7 +873,8 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
     """Renew ownership periodically; cancel execution immediately after losing the lease."""
     while True:
         await asyncio.sleep(WORKER_HEARTBEAT_SECONDS)
-        expires_at = now() + timedelta(seconds=WORKER_LEASE_SECONDS)
+        renewed_at = now()
+        expires_at = renewed_at + timedelta(seconds=WORKER_LEASE_SECONDS)
         with SessionLocal() as db:
             result = db.execute(
                 update(Task)
@@ -881,6 +882,7 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
                     Task.id == task_id,
                     Task.status == "running",
                     Task.worker_id == worker_id,
+                    Task.lease_expires_at > renewed_at,
                 )
                 .values(lease_expires_at=expires_at)
             )

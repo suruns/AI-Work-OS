@@ -1413,3 +1413,42 @@ def test_worker_cannot_resurrect_expired_lease(tmp_path, monkeypatch):
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         assert task.lease_expires_at.timestamp() < utcnow().timestamp()
+
+
+def test_cancel_during_verification_terminates_command_and_records_results(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Cancel verification",
+        "prompt": "Run verification",
+        "workspace_path": str(workspace),
+        "verification_commands": [f'"{sys.executable}" -c "import time; time.sleep(30)"'],
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+
+    async def execute_and_cancel():
+        execution = asyncio.create_task(worker.execute_task(task_id))
+        for _ in range(100):
+            events = client.get(f"/tasks/{task_id}/events").json()
+            if any(event["event_type"] == "verification.started" for event in events):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("verification did not start")
+        response = client.post(f"/tasks/{task_id}/cancel")
+        assert response.status_code == 200
+        await asyncio.wait_for(execution, timeout=5)
+
+    asyncio.run(execute_and_cancel())
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "cancelled"
+    assert task["verification_status"] == "not_run"
+    artifact = json.loads((tmp_path / "storage" / "tasks" / task_id / "verification.json").read_text())
+    assert artifact["status"] == "cancelled"
+    assert artifact["commands"][0]["cancelled"] is True

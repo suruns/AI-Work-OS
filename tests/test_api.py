@@ -8,7 +8,7 @@ from ai_work_os.api import app
 from ai_work_os import api as api_module
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
-from ai_work_os.models import Task, TaskEvent, utcnow
+from ai_work_os.models import Task, TaskEvent, Workflow, utcnow
 
 client = TestClient(app)
 

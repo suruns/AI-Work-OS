@@ -1044,6 +1044,15 @@ def test_create_workflow_and_dependency_gates_worker(tmp_path):
     assert len(workflow["dependencies"]) == 1
     task_ids = {item["key"]: item["task"]["id"] for item in workflow["tasks"]}
 
+    # Keep unrelated queued tasks from earlier API tests out of this scheduler assertion.
+    with SessionLocal() as db:
+        for unrelated in db.query(Task).filter(
+            Task.status == "queued", Task.workflow_id != workflow["id"]
+        ).all():
+            unrelated.status = "cancelled"
+            unrelated.finished_at = utcnow()
+        db.commit()
+
     # The first task is eligible; the dependent task must remain blocked from claim.
     assert worker.claim_task() == task_ids["prepare"]
     assert worker.claim_task() is None

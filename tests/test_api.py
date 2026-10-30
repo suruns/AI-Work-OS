@@ -1025,3 +1025,65 @@ def test_workspace_snapshot_ignores_python_cache_noise(tmp_path):
     assert snapshot["available"] is True
     assert "real-change.txt" in snapshot["untracked"]
     assert not any("__pycache__" in name or name.endswith(".pyc") for name in snapshot["untracked"])
+
+
+def _workflow_payload(workspace, *, with_dependency=True):
+    tasks = [
+        {"key": "prepare", "title": "Prepare", "prompt": "prepare", "workspace_path": str(workspace)},
+        {"key": "build", "title": "Build", "prompt": "build", "workspace_path": str(workspace),
+         "depends_on": ["prepare"] if with_dependency else []},
+    ]
+    return {"title": "API workflow", "tasks": tasks}
+
+
+def test_create_workflow_and_dependency_gates_worker(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201, response.text
+    workflow = response.json()
+    assert workflow["status"] == "queued"
+    assert len(workflow["dependencies"]) == 1
+    task_ids = {item["key"]: item["task"]["id"] for item in workflow["tasks"]}
+
+    # The first task is eligible; the dependent task must remain blocked from claim.
+    assert worker.claim_task() == task_ids["prepare"]
+    assert worker.claim_task() is None
+
+    with SessionLocal() as db:
+        first = db.get(Task, task_ids["prepare"])
+        first.status = "succeeded"
+        first.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task() == task_ids["build"]
+
+
+def test_workflow_rejects_unknown_dependency_and_cycle(tmp_path):
+    payload = _workflow_payload(tmp_path)
+    payload["tasks"][0]["depends_on"] = ["missing"]
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 422
+
+    payload = _workflow_payload(tmp_path)
+    payload["tasks"][0]["depends_on"] = ["build"]
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 422
+
+
+def test_failed_parent_blocks_all_descendants(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201
+    workflow_id = response.json()["id"]
+    task_ids = {item["key"]: item["task"]["id"] for item in response.json()["tasks"]}
+    with SessionLocal() as db:
+        first = db.get(Task, task_ids["prepare"])
+        first.status = "failed"
+        first.finished_at = utcnow()
+        db.commit()
+
+    worker.reconcile_workflows()
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    states = {task["id"]: task["status"] for task in detail["tasks"]}
+    assert states[task_ids["prepare"]] == "failed"
+    assert states[task_ids["build"]] == "blocked"
+    assert detail["status"] == "failed"
+    assert "prerequisite task" in detail["tasks"][1]["blocked_reason"]

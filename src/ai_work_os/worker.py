@@ -806,25 +806,32 @@ def recover_orphaned_running_tasks() -> int:
     legacy_cutoff = recovered_at - timedelta(seconds=WORKER_LEASE_SECONDS)
     recovered = 0
     with SessionLocal() as db:
-        candidates = list(db.scalars(select(Task).where(
-            Task.status == "running",
-            or_(
-                Task.lease_expires_at <= recovered_at,
-                (Task.lease_expires_at.is_(None)) & (Task.started_at <= legacy_cutoff),
-            ),
-        )))
+        candidates = list(db.scalars(select(Task).where(Task.status == "running")))
         for task in candidates:
+            lease = task.lease_expires_at
+            started = task.started_at
+            if lease is not None:
+                if lease.tzinfo is None:
+                    lease = lease.replace(tzinfo=timezone.utc)
+                expired = lease <= recovered_at
+            else:
+                if started is not None and started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                expired = started is None or started <= legacy_cutoff
+            if not expired:
+                continue
             previous_started_at = task.started_at.isoformat() if task.started_at else None
+            owner = task.worker_id
+            original_lease = task.lease_expires_at
+            conditions = [
+                Task.id == task.id,
+                Task.status == "running",
+                Task.worker_id == owner if owner is not None else Task.worker_id.is_(None),
+                Task.lease_expires_at == original_lease if original_lease is not None else Task.lease_expires_at.is_(None),
+            ]
             result = db.execute(
                 update(Task)
-                .where(
-                    Task.id == task.id,
-                    Task.status == "running",
-                    or_(
-                        Task.lease_expires_at <= recovered_at,
-                        (Task.lease_expires_at.is_(None)) & (Task.started_at <= legacy_cutoff),
-                    ),
-                )
+                .where(*conditions)
                 .execution_options(synchronize_session=False)
                 .values(
                     status="failed", finished_at=recovered_at, exit_code=125,
@@ -901,6 +908,10 @@ async def execute_task(task_id: str, worker_id: str | None = None) -> None:
                 await asyncio.gather(execution, return_exceptions=True)
                 return
         await execution
+    except asyncio.CancelledError:
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
+        raise
     finally:
         heartbeat.cancel()
         await asyncio.gather(heartbeat, return_exceptions=True)

@@ -25,6 +25,9 @@ def elapsed_ms(start: datetime | None, end: datetime | None = None) -> int | Non
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True)
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow: Mapped["Workflow | None"] = relationship(back_populates="tasks")
     title: Mapped[str] = mapped_column(String(240))
     prompt: Mapped[str] = mapped_column(Text)
     workspace_path: Mapped[str] = mapped_column(Text)
@@ -78,3 +81,24 @@ class TaskEvent(Base):
     event_type: Mapped[str] = mapped_column(String(120))
     payload: Mapped[dict] = mapped_column(JSON)
     task: Mapped[Task] = relationship(back_populates="events")
+
+    
+class Workflow(Base):
+    __tablename__ = "workflows"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tasks: Mapped[list["Task"]] = relationship(back_populates="workflow")
+    dependencies: Mapped[list["WorkflowTaskDependency"]] = relationship(back_populates="workflow", cascade="all, delete-orphan")
+
+
+class WorkflowTaskDependency(Base):
+    __tablename__ = "workflow_task_dependencies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    upstream_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    downstream_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    workflow: Mapped[Workflow] = relationship(back_populates="dependencies")

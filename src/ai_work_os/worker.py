@@ -8,7 +8,7 @@ import shutil
 import shlex
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from sqlalchemy import select, update
+from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, elapsed_ms
 
@@ -261,9 +261,18 @@ def claim_task() -> str | None:
         if task is None:
             return None
         attempt_number = int(task.attempt_count or 0) + 1
+        workflow_not_cancelled = or_(
+            Task.workflow_id.is_(None),
+            exists(
+                select(Workflow.id).where(
+                    Workflow.id == Task.workflow_id,
+                    Workflow.status != "cancelled",
+                )
+            ),
+        )
         result = db.execute(
             update(Task)
-            .where(Task.id == task.id, Task.status == "queued")
+            .where(Task.id == task.id, Task.status == "queued", workflow_not_cancelled)
             .values(status="running", started_at=started_at, attempt_count=Task.attempt_count + 1)
         )
         if result.rowcount != 1:

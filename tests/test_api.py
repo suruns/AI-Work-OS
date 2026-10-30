@@ -1332,6 +1332,7 @@ def test_direct_execution_cannot_steal_live_worker_lease(tmp_path):
         db.commit()
 
     assert worker.claim_task("worker-owner-A") == task_id
+    assert worker.claim_task("worker-owner-B") is None
     asyncio.run(worker.execute_task(task_id))
     with SessionLocal() as db:
         task = db.get(Task, task_id)

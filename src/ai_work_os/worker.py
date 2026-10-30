@@ -160,7 +160,7 @@ def add_event(task_id: str, event_type: str, payload: dict) -> None:
 def reconcile_workflows() -> None:
     """Idempotently block descendants of failed parents and aggregate workflow state."""
     with SessionLocal() as db:
-        workflows = list(db.scalars(select(Workflow).where(Workflow.status.in_(["queued", "running"]))))
+        workflows = list(db.scalars(select(Workflow)))
         for workflow in workflows:
             tasks = list(db.scalars(select(Task).where(Task.workflow_id == workflow.id)))
             by_id = {task.id: task for task in tasks}

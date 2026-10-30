@@ -201,7 +201,7 @@ def reconcile_workflows() -> None:
             elif any(status in {"failed", "blocked"} for status in statuses):
                 workflow.status = "failed"
                 workflow.finished_at = now()
-            elif statuses and all(status == "cancelled" for status in statuses):
+            elif any(status == "cancelled" for status in statuses):
                 workflow.status = "cancelled"
                 workflow.finished_at = now()
             elif any(task.started_at is not None for task in tasks):

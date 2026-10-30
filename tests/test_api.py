@@ -118,7 +118,7 @@ def test_worker_restart_marks_orphaned_running_tasks_failed_without_retry(tmp_pa
         task = db.get(Task, task_id)
         task.status = "running"
         task.attempt_count = 1
-        task.started_at = utcnow()
+        task.started_at = utcnow() - timedelta(seconds=120)
         db.commit()
 
     recovered = worker.recover_orphaned_running_tasks()

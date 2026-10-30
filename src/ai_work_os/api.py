@@ -48,6 +48,8 @@ def create_task(body: TaskCreate) -> Task:
         max_attempts=body.max_attempts,
         acceptance_criteria=body.acceptance_criteria,
         verification_commands=body.verification_commands,
+        auto_repair=body.auto_repair,
+        max_repair_attempts=body.max_repair_attempts if body.auto_repair else 0,
         verification_status="pending" if body.verification_commands else "not_configured",
     )
     with SessionLocal() as db:

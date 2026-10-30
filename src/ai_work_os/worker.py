@@ -798,20 +798,43 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
 
 
 def recover_orphaned_running_tasks() -> int:
-    """Fail tasks left running by a previous worker process; never replay them automatically."""
+    """Fail only expired leases; legacy rows receive a lease-length startup grace period."""
     recovered_at = now()
+    legacy_cutoff = recovered_at - timedelta(seconds=WORKER_LEASE_SECONDS)
+    recovered = 0
     with SessionLocal() as db:
-        orphaned = list(db.scalars(select(Task).where(Task.status == "running")))
-        for task in orphaned:
+        candidates = list(db.scalars(select(Task).where(
+            Task.status == "running",
+            or_(
+                Task.lease_expires_at <= recovered_at,
+                (Task.lease_expires_at.is_(None)) & (Task.started_at <= legacy_cutoff),
+            ),
+        )))
+        for task in candidates:
             previous_started_at = task.started_at.isoformat() if task.started_at else None
-            task.status = "failed"
-            task.finished_at = recovered_at
-            task.exit_code = 125
-            task.error_summary = (
-                "Worker restarted while this task was running. It was marked failed and was not "
-                "retried automatically because the previous agent process may have produced side effects. "
-                "Inspect the workspace and process state before manually retrying."
+            result = db.execute(
+                update(Task)
+                .where(
+                    Task.id == task.id,
+                    Task.status == "running",
+                    or_(
+                        Task.lease_expires_at <= recovered_at,
+                        (Task.lease_expires_at.is_(None)) & (Task.started_at <= legacy_cutoff),
+                    ),
+                )
+                .values(
+                    status="failed", finished_at=recovered_at, exit_code=125,
+                    error_summary=(
+                        "Worker lease expired. The task was marked failed and was not retried "
+                        "automatically because the previous agent process may have produced side effects. "
+                        "Inspect workspace and process state before manually retrying."
+                    ),
+                    worker_id=None, lease_expires_at=None,
+                )
             )
+            if result.rowcount != 1:
+                continue
+            recovered += 1
             db.add(TaskEvent(
                 task_id=task.id,
                 event_type="worker.orphaned_task_recovered",
@@ -821,18 +844,62 @@ def recover_orphaned_running_tasks() -> int:
                     "attempt": task.attempt_count,
                     "max_attempts": task.max_attempts,
                     "automatic_retry": False,
-                    "reason": "worker_restart",
+                    "reason": "lease_expired",
                 },
             ))
         db.commit()
-        return len(orphaned)
+    return recovered
+
+
+async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
+    """Renew ownership periodically; cancel execution immediately after losing the lease."""
+    while True:
+        await asyncio.sleep(WORKER_HEARTBEAT_SECONDS)
+        expires_at = now() + timedelta(seconds=WORKER_LEASE_SECONDS)
+        with SessionLocal() as db:
+            result = db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.status == "running",
+                    Task.worker_id == worker_id,
+                )
+                .values(lease_expires_at=expires_at)
+            )
+            db.commit()
+        if result.rowcount != 1:
+            raise RuntimeError(f"Worker lease lost for task {task_id}")
+
+
+async def execute_task(task_id: str, worker_id: str) -> None:
+    execution = asyncio.create_task(_execute_task(task_id, worker_id))
+    heartbeat = asyncio.create_task(_renew_worker_lease(task_id, worker_id))
+    try:
+        done, _ = await asyncio.wait(
+            {execution, heartbeat}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if heartbeat in done:
+            error = heartbeat.exception()
+            if error is not None:
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+                return
+        await execution
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
 
 
 async def run_worker() -> None:
+    worker_id = str(__import__("uuid").uuid4())
     recovered = recover_orphaned_running_tasks()
     reconcile_workflows()
     print(
-        f"AI Work OS worker started; concurrency={MAX_CONCURRENT_TASKS}; "
+        f"AI Work OS worker started; id={worker_id}; concurrency={MAX_CONCURRENT_TASKS}; "
+        f"lease_seconds={WORKER_LEASE_SECONDS}; heartbeat_seconds={WORKER_HEARTBEAT_SECONDS}; "
         f"recovered_orphaned_tasks={recovered}.",
         flush=True,
     )
@@ -840,10 +907,10 @@ async def run_worker() -> None:
     while True:
         active = {job for job in active if not job.done()}
         while len(active) < MAX_CONCURRENT_TASKS:
-            task_id = claim_task()
+            task_id = claim_task(worker_id)
             if task_id is None:
                 break
-            active.add(asyncio.create_task(execute_task(task_id)))
+            active.add(asyncio.create_task(execute_task(task_id, worker_id)))
         if active:
             await asyncio.wait(active, timeout=POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         else:

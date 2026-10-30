@@ -1317,3 +1317,65 @@ def test_recovery_only_fails_expired_leases_and_legacy_after_grace(tmp_path, mon
             assert task.exit_code == 125
             assert task.worker_id is None
             assert task.lease_expires_at is None
+
+
+def test_direct_execution_cannot_steal_live_worker_lease(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Do not steal lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task("worker-owner-A") == task_id
+    asyncio.run(worker.execute_task(task_id))
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.worker_id == "worker-owner-A"
+        assert task.lease_expires_at is not None
+
+
+def test_stale_worker_cannot_complete_reassigned_task(tmp_path, monkeypatch):
+    created = client.post("/tasks", json={
+        "title": "Fence stale worker", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.worker_id = "worker-owner-B"
+        task.lease_expires_at = utcnow() + timedelta(seconds=60)
+        db.commit()
+
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    asyncio.run(worker._execute_task(task_id, "worker-owner-A"))
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.worker_id == "worker-owner-B"
+        assert task.exit_code is None
+
+
+def test_expired_lease_recovery_is_idempotent(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Recover once", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.worker_id = "worker-gone"
+        task.started_at = utcnow() - timedelta(minutes=2)
+        task.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+
+    assert worker.recover_orphaned_running_tasks() == 1
+    assert worker.recover_orphaned_running_tasks() == 0
+    events = client.get(f"/tasks/{task_id}/events").json()
+    recovered = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
+    assert len(recovered) == 1

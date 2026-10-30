@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow
 from .schemas import TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
@@ -416,22 +416,31 @@ def cancel_task(task_id: str) -> Task:
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
         if task.status in {"queued", "running"}:
-            task.cancel_requested = 1
-            if task.status == "queued":
-                # A queued task has no worker to observe the cancellation flag.
-                task.status = "cancelled"
-                task.finished_at = utcnow()
+            timestamp = utcnow()
+            queued_result = db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status == "queued")
+                .values(
+                    status="cancelled", cancel_requested=1, finished_at=timestamp,
+                    error_summary="Cancelled before task execution",
+                )
+            )
+            if queued_result.rowcount == 1:
                 db.add(TaskEvent(
-                    task_id=task.id,
-                    event_type="task.cancelled",
+                    task_id=task_id, event_type="task.cancelled",
                     payload={"status": "cancelled", "cancelled_before_start": True},
                 ))
             else:
-                db.add(TaskEvent(
-                    task_id=task.id,
-                    event_type="task.cancel_requested",
-                    payload={"status": "running"},
-                ))
+                running_result = db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "running", Task.cancel_requested == 0)
+                    .values(cancel_requested=1)
+                )
+                if running_result.rowcount == 1:
+                    db.add(TaskEvent(
+                        task_id=task_id, event_type="task.cancel_requested",
+                        payload={"status": "running"},
+                    ))
             db.commit()
             db.refresh(task)
         return task
@@ -574,23 +583,36 @@ def cancel_workflow(workflow_id: str) -> dict:
         if workflow.status in {"succeeded", "failed", "cancelled"}:
             return _workflow_payload(db, workflow)
         timestamp = utcnow()
-        tasks = list(db.scalars(select(Task).where(
-            Task.workflow_id == workflow_id, Task.status.in_(["queued", "running"])
-        )))
-        for task in tasks:
-            if task.status == "queued":
-                task.status = "cancelled"
-                task.finished_at = timestamp
-                task.error_summary = "Workflow cancelled before task execution"
-                db.add(TaskEvent(task_id=task.id, event_type="task.cancelled", payload={
-                    "status": "cancelled", "cancelled_before_start": True, "workflow_id": workflow_id,
-                }))
-            else:
-                task.cancel_requested = 1
-                db.add(TaskEvent(task_id=task.id, event_type="task.cancellation_requested", payload={
-                    "reason": "workflow_cancelled", "workflow_id": workflow_id,
-                }))
+        # Publish workflow cancellation first. The worker's atomic claim checks this
+        # state, so a task cannot be newly claimed after this transaction commits.
         workflow.status = "cancelled"
         workflow.finished_at = timestamp
+        tasks = list(db.scalars(select(Task.id).where(
+            Task.workflow_id == workflow_id, Task.status.in_(["queued", "running"])
+        )))
+        for task_id in tasks:
+            queued_result = db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status == "queued")
+                .values(
+                    status="cancelled", cancel_requested=1, finished_at=timestamp,
+                    error_summary="Workflow cancelled before task execution",
+                )
+            )
+            if queued_result.rowcount == 1:
+                db.add(TaskEvent(task_id=task_id, event_type="task.cancelled", payload={
+                    "status": "cancelled", "cancelled_before_start": True, "workflow_id": workflow_id,
+                }))
+                continue
+            running_result = db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status == "running", Task.cancel_requested == 0)
+                .values(cancel_requested=1)
+            )
+            if running_result.rowcount == 1:
+                db.add(TaskEvent(task_id=task_id, event_type="task.cancellation_requested", payload={
+                    "reason": "workflow_cancelled", "workflow_id": workflow_id,
+                }))
         db.commit()
+        db.refresh(workflow)
         return _workflow_payload(db, workflow)

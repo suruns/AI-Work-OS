@@ -187,23 +187,42 @@ def claim_task() -> str | None:
 
 
 
-async def run_repair_attempt(task_id: str, workspace: Path, permission_mode: str, repair_prompt: str, task_dir: Path, repair_number: int) -> tuple[bool, list[dict], str | None]:
-    """Run one bounded repair invocation and re-check the task's acceptance commands."""
+async def run_repair_attempt(
+    task_id: str,
+    workspace: Path,
+    permission_mode: str,
+    repair_prompt: str,
+    task_dir: Path,
+    repair_number: int,
+    verification_commands: list[str],
+) -> tuple[bool, list[dict], str | None]:
+    """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
-    add_event(task_id, "repair.started", {"repair_attempt": repair_number, "max_repair_attempts": 2})
+    add_event(task_id, "repair.started", {
+        "repair_attempt": repair_number,
+        "max_repair_attempts": 2,
+    })
     command = build_command(repair_prompt, permission_mode)
     try:
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
-                *command, cwd=str(workspace), stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, start_new_session=(os.name == "posix"),
+                *command,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
             )
+
             async def drain(stream, target):
                 while chunk := await stream.read(4096):
                     target.write(chunk.decode("utf-8", errors="replace"))
                     target.flush()
-            readers = [asyncio.create_task(drain(proc.stdout, out)), asyncio.create_task(drain(proc.stderr, err))]
+
+            readers = [
+                asyncio.create_task(drain(proc.stdout, out)),
+                asyncio.create_task(drain(proc.stderr, err)),
+            ]
             deadline = asyncio.get_running_loop().time() + min(MAX_TASK_SECONDS, 600)
             reason = None
             try:
@@ -224,42 +243,82 @@ async def run_repair_attempt(task_id: str, workspace: Path, permission_mode: str
                             break
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
-        if proc.returncode != 0 or reason:
-            add_event(task_id, "repair.finished", {"repair_attempt": repair_number, "status": reason or "agent_failed", "exit_code": proc.returncode})
+        if reason or proc.returncode != 0:
+            status = reason or "agent_failed"
+            add_event(task_id, "repair.finished", {
+                "repair_attempt": repair_number,
+                "status": status,
+                "exit_code": proc.returncode,
+            })
             return False, [], reason or f"repair agent exited with {proc.returncode}"
     except Exception as exc:
-        add_event(task_id, "repair.finished", {"repair_attempt": repair_number, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+        add_event(task_id, "repair.finished", {
+            "repair_attempt": repair_number,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        })
         return False, [], f"{type(exc).__name__}: {exc}"
 
     results = []
-    for index, command_text in enumerate(verification_commands_for_repair(task_id), start=1):
+    for index, command_text in enumerate(verification_commands, start=1):
+        with SessionLocal() as db:
+            current = db.get(Task, task_id)
+            if current is None or current.cancel_requested:
+                add_event(task_id, "repair.finished", {
+                    "repair_attempt": repair_number,
+                    "status": "cancelled",
+                    "verification": results,
+                })
+                return False, results, "cancelled"
         try:
             argv = shlex.split(command_text)
             if not argv:
                 raise ValueError("command is empty")
-            check = await asyncio.create_subprocess_exec(*argv, cwd=str(workspace), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=(os.name == "posix"))
+            check = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
             try:
                 out_bytes, err_bytes = await asyncio.wait_for(check.communicate(), timeout=120)
+                timed_out = False
             except asyncio.TimeoutError:
                 await terminate_process_tree(check)
                 out_bytes, err_bytes = await check.communicate()
-                results.append({"index": index, "command": command_text, "exit_code": check.returncode, "timed_out": True, "stdout": out_bytes.decode("utf-8", errors="replace")[-20000:], "stderr": err_bytes.decode("utf-8", errors="replace")[-20000:]})
-                break
-            results.append({"index": index, "command": command_text, "exit_code": check.returncode, "timed_out": False, "stdout": out_bytes.decode("utf-8", errors="replace")[-20000:], "stderr": err_bytes.decode("utf-8", errors="replace")[-20000:]})
-            if check.returncode != 0:
+                timed_out = True
+            results.append({
+                "index": index,
+                "command": command_text,
+                "exit_code": check.returncode,
+                "timed_out": timed_out,
+                "stdout": out_bytes.decode("utf-8", errors="replace")[-20000:],
+                "stderr": err_bytes.decode("utf-8", errors="replace")[-20000:],
+            })
+            if timed_out or check.returncode != 0:
                 break
         except (OSError, ValueError) as exc:
-            results.append({"index": index, "command": command_text, "exit_code": None, "timed_out": False, "stdout": "", "stderr": f"{type(exc).__name__}: {exc}"})
+            results.append({
+                "index": index,
+                "command": command_text,
+                "exit_code": None,
+                "timed_out": False,
+                "stdout": "",
+                "stderr": f"{type(exc).__name__}: {exc}",
+            })
             break
-    passed = bool(results) and len(results) == len(verification_commands_for_repair(task_id)) and all(x.get("exit_code") == 0 and not x.get("timed_out") for x in results)
-    add_event(task_id, "repair.finished", {"repair_attempt": repair_number, "status": "passed" if passed else "verification_failed", "verification": results})
+    passed = (
+        bool(verification_commands)
+        and len(results) == len(verification_commands)
+        and all(item.get("exit_code") == 0 and not item.get("timed_out") for item in results)
+    )
+    add_event(task_id, "repair.finished", {
+        "repair_attempt": repair_number,
+        "status": "passed" if passed else "verification_failed",
+        "verification": results,
+    })
     return passed, results, None
-
-
-def verification_commands_for_repair(task_id: str) -> list[str]:
-    with SessionLocal() as db:
-        task = db.get(Task, task_id)
-        return list(task.verification_commands or []) if task else []
 
 
 async def execute_task(task_id: str) -> None:
@@ -462,7 +521,8 @@ async def execute_task(task_id: str) -> None:
             )
             repair_attempt_count = repair_number
             passed, repair_results, repair_error = await run_repair_attempt(
-                task_id, workspace, permission_mode, repair_prompt, task_dir, repair_number
+                task_id, workspace, permission_mode, repair_prompt, task_dir,
+                repair_number, verification_commands,
             )
             verification_results = repair_results
             if passed:
@@ -482,6 +542,12 @@ async def execute_task(task_id: str) -> None:
                 break
             if repair_error:
                 error_summary = f"Automatic repair attempt {repair_number} failed: {repair_error}"
+            if repair_error == "cancelled":
+                terminal_reason = "cancelled"
+                break
+            if repair_error == "timeout":
+                terminal_reason = "timeout"
+                break
             verification_status = "failed"
             terminal_reason = "verification_failed"
         if verification_status == "failed":

@@ -856,3 +856,35 @@ def test_repair_logs_are_listed_and_downloadable(tmp_path, monkeypatch):
     assert client.get(f"/tasks/{task_id}/artifacts/repair-01.stdout.jsonl").status_code == 200
     assert client.get(f"/tasks/{task_id}/artifacts/repair-01.stderr.log").status_code == 200
     assert client.get(f"/tasks/{task_id}/artifacts/repair-99.stdout.jsonl").status_code == 404
+
+
+def test_cancellation_during_repair_closes_task_as_cancelled(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Cancel repair", "prompt": "Make checks pass",
+        "workspace_path": str(workspace), "auto_repair": True,
+        "max_repair_attempts": 1,
+        "verification_commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+    })
+    task_id = created.json()["id"]
+
+    async def cancel_during_repair(*args, **kwargs):
+        response = client.post(f"/tasks/{task_id}/cancel")
+        assert response.status_code == 200
+        return False, [], "cancelled"
+
+    monkeypatch.setattr(worker, "run_repair_attempt", cancel_during_repair)
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "cancelled"
+    assert task["repair_attempt_count"] == 1
+    events = client.get(f"/tasks/{task_id}/events").json()
+    finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
+    assert finished["payload"]["terminal_reason"] == "cancelled"

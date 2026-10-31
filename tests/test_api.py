@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
@@ -1311,7 +1312,7 @@ def test_simultaneous_workers_cannot_claim_the_same_task(tmp_path, monkeypatch):
         start.wait(timeout=5)
         return worker.claim_task(worker_id)
 
-    with __import__("concurrent.futures").futures.ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(claim, "worker-race-A")
         second = pool.submit(claim, "worker-race-B")
         start.wait(timeout=5)

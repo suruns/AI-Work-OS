@@ -1265,6 +1265,33 @@ def test_worker_claim_records_owner_and_lease(tmp_path):
         assert task.lease_expires_at.timestamp() > utcnow().timestamp()
 
 
+def test_multiple_workers_claim_distinct_tasks_with_independent_leases(tmp_path):
+    first = client.post("/tasks", json={
+        "title": "Worker A task", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    second = client.post("/tasks", json={
+        "title": "Worker B task", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id not in {first, second}:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    claimed_a = worker.claim_task("worker-A")
+    claimed_b = worker.claim_task("worker-B")
+    assert {claimed_a, claimed_b} == {first, second}
+    with SessionLocal() as db:
+        task_a = db.get(Task, claimed_a)
+        task_b = db.get(Task, claimed_b)
+        assert task_a.worker_id == "worker-A"
+        assert task_b.worker_id == "worker-B"
+        assert task_a.lease_expires_at is not None
+        assert task_b.lease_expires_at is not None
+        assert task_a.lease_expires_at != task_b.lease_expires_at or task_a.id != task_b.id
+
+
 def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):
     created = client.post("/tasks", json={
         "title": "Lease heartbeat", "prompt": "Inspect", "workspace_path": str(tmp_path),

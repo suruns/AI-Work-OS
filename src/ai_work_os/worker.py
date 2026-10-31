@@ -8,9 +8,9 @@ import shutil
 import shlex
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from sqlalchemy import select, update
+from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, elapsed_ms
+from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, elapsed_ms
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -20,6 +20,8 @@ POLL_SECONDS = float(os.getenv("AI_WORK_OS_POLL_SECONDS", "1"))
 MAX_TASK_SECONDS = int(os.getenv("AI_WORK_OS_MAX_TASK_SECONDS", "3600"))
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("AI_WORK_OS_MAX_CONCURRENT_TASKS", "1")))
 RETRY_BASE_DELAY_SECONDS = max(0.0, float(os.getenv("AI_WORK_OS_RETRY_BASE_DELAY_SECONDS", "2")))
+WORKER_LEASE_SECONDS = max(30, int(os.getenv("AI_WORK_OS_WORKER_LEASE_SECONDS", "60")))
+WORKER_HEARTBEAT_SECONDS = max(5, min(WORKER_LEASE_SECONDS // 2, int(os.getenv("AI_WORK_OS_WORKER_HEARTBEAT_SECONDS", "10"))))
 
 
 def now() -> datetime:
@@ -157,27 +159,140 @@ def add_event(task_id: str, event_type: str, payload: dict) -> None:
         db.commit()
 
 
-def claim_task() -> str | None:
+def reconcile_workflows() -> None:
+    """Idempotently block descendants of failed parents and aggregate workflow state."""
     with SessionLocal() as db:
+        workflows = list(db.scalars(select(Workflow)))
+        for workflow in workflows:
+            tasks = list(db.scalars(select(Task).where(Task.workflow_id == workflow.id)))
+            by_id = {task.id: task for task in tasks}
+            edges = list(db.scalars(select(WorkflowTaskDependency).where(
+                WorkflowTaskDependency.workflow_id == workflow.id
+            )))
+            parents: dict[str, list[str]] = {task.id: [] for task in tasks}
+            for edge in edges:
+                parents.setdefault(edge.downstream_task_id, []).append(edge.upstream_task_id)
+            changed = True
+            while changed:
+                changed = False
+                for task in tasks:
+                    if task.status != "queued":
+                        continue
+                    failed_parent = next((
+                        by_id[parent_id] for parent_id in parents.get(task.id, [])
+                        if parent_id in by_id and by_id[parent_id].status in {"failed", "cancelled", "blocked"}
+                    ), None)
+                    if failed_parent is None:
+                        continue
+                    root_reason = failed_parent.blocked_reason or (
+                        f"Blocked because prerequisite task {failed_parent.id} ended as {failed_parent.status}."
+                    )
+                    blocked_at = now()
+                    result = db.execute(
+                        update(Task)
+                        .where(Task.id == task.id, Task.status == "queued")
+                        .values(
+                            status="blocked", blocked_reason=root_reason,
+                            finished_at=blocked_at, error_summary=root_reason,
+                        )
+                    )
+                    if result.rowcount != 1:
+                        continue
+                    task.status = "blocked"
+                    task.blocked_reason = root_reason
+                    task.finished_at = blocked_at
+                    task.error_summary = root_reason
+                    db.add(TaskEvent(task_id=task.id, event_type="task.blocked", payload={
+                        "status": "blocked", "reason": root_reason,
+                        "failed_ancestor_task_id": failed_parent.id, "workflow_id": workflow.id,
+                    }))
+                    changed = True
+            statuses = [task.status for task in tasks]
+            target_status = None
+            if statuses and all(status == "succeeded" for status in statuses):
+                target_status = "succeeded"
+            elif any(status in {"failed", "blocked"} for status in statuses):
+                target_status = "failed"
+            elif any(status == "cancelled" for status in statuses):
+                target_status = "cancelled"
+            elif any(task.started_at is not None for task in tasks):
+                target_status = "running"
+            if target_status is not None:
+                values = {"status": target_status}
+                if target_status in {"succeeded", "failed", "cancelled"}:
+                    values["finished_at"] = now()
+                if target_status == "running":
+                    first_started = min(
+                        (task.started_at for task in tasks if task.started_at is not None), default=now()
+                    )
+                    values["started_at"] = workflow.started_at or first_started
+                db.execute(
+                    update(Workflow)
+                    .where(Workflow.id == workflow.id, Workflow.status.in_(["queued", "running"]))
+                    .values(**values)
+                )
+        db.commit()
+
+
+def claim_task(worker_id: str = "legacy-worker") -> str | None:
+    reconcile_workflows()
+    with SessionLocal() as db:
+        # SQLite's deferred transactions can let two workers read the same queued
+        # row and then fail while both try to upgrade their read locks to writes.
+        # Acquire the write reservation before reading candidates so claimers
+        # serialize; the conditional UPDATE below remains the final status fence.
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         started_at = now()
-        task = db.scalar(
+        lease_expires_at = started_at + timedelta(seconds=WORKER_LEASE_SECONDS)
+        candidates = list(db.scalars(
             select(Task)
             .where(Task.status == "queued", Task.available_at <= started_at)
             .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
-            .limit(1)
-        )
+        ))
+        task = None
+        for candidate in candidates:
+            if candidate.workflow_id is None:
+                task = candidate
+                break
+            parent_ids = db.scalars(select(WorkflowTaskDependency.upstream_task_id).where(
+                WorkflowTaskDependency.workflow_id == candidate.workflow_id,
+                WorkflowTaskDependency.downstream_task_id == candidate.id,
+            ))
+            parent_ids = list(parent_ids)
+            if not parent_ids:
+                task = candidate
+                break
+            parent_statuses = list(db.scalars(select(Task.status).where(Task.id.in_(parent_ids))))
+            if len(parent_statuses) == len(parent_ids) and all(status == "succeeded" for status in parent_statuses):
+                task = candidate
+                break
         if task is None:
             return None
         attempt_number = int(task.attempt_count or 0) + 1
+        workflow_not_cancelled = or_(
+            Task.workflow_id.is_(None),
+            exists(
+                select(Workflow.id).where(
+                    Workflow.id == Task.workflow_id,
+                    Workflow.status != "cancelled",
+                )
+            ),
+        )
         result = db.execute(
             update(Task)
-            .where(Task.id == task.id, Task.status == "queued")
-            .values(status="running", started_at=started_at, attempt_count=Task.attempt_count + 1)
+            .where(Task.id == task.id, Task.status == "queued", workflow_not_cancelled)
+            .values(status="running", started_at=started_at, attempt_count=Task.attempt_count + 1, worker_id=worker_id, lease_expires_at=lease_expires_at)
         )
         if result.rowcount != 1:
             db.rollback()
             return None
         task_id = task.id
+        if task.workflow_id is not None:
+            workflow = db.get(Workflow, task.workflow_id)
+            if workflow is not None and workflow.status == "queued":
+                workflow.status = "running"
+                workflow.started_at = started_at
         db.add(TaskEvent(
             task_id=task_id,
             event_type="executor.claimed",
@@ -250,6 +365,9 @@ async def run_repair_attempt(
                             reason = "timeout"
                             await terminate_process_tree(proc)
                             break
+            except asyncio.CancelledError:
+                await terminate_process_tree(proc)
+                raise
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
         if reason or proc.returncode != 0:
@@ -297,6 +415,10 @@ async def run_repair_attempt(
             while not communicate_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(communicate_task), timeout=0.25)
+                except asyncio.CancelledError:
+                    await terminate_process_tree(check)
+                    await asyncio.gather(communicate_task, return_exceptions=True)
+                    raise
                 except asyncio.TimeoutError:
                     with SessionLocal() as db:
                         current = db.get(Task, task_id)
@@ -349,10 +471,10 @@ async def run_repair_attempt(
     return passed, results, None
 
 
-async def execute_task(task_id: str) -> None:
+async def _execute_task(task_id: str, worker_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        if task is None:
+        if task is None or task.status != "running" or task.worker_id != worker_id:
             return
         workspace = Path(task.workspace_path)
         prompt = task.prompt
@@ -463,6 +585,7 @@ async def execute_task(task_id: str) -> None:
             "timeout_seconds_per_command": 120,
             "acceptance_criteria": acceptance_criteria,
         })
+        verification_cancelled = False
         for index, command_text in enumerate(verification_commands, start=1):
             try:
                 argv = shlex.split(command_text)
@@ -474,25 +597,40 @@ async def execute_task(task_id: str) -> None:
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=(os.name == "posix"),
                 )
-                try:
-                    stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)
-                except asyncio.TimeoutError:
-                    await terminate_process_tree(proc)
-                    stdout_bytes, stderr_bytes = await proc.communicate()
-                    verification_results.append({
-                        "index": index, "command": command_text, "exit_code": proc.returncode,
-                        "timed_out": True,
-                        "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
-                        "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
-                    })
-                    break
+                communicate_task = asyncio.create_task(proc.communicate())
+                timed_out = False
+                cancelled = False
+                deadline = asyncio.get_running_loop().time() + 120
+                while not communicate_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(communicate_task), timeout=0.25)
+                    except asyncio.CancelledError:
+                        await terminate_process_tree(proc)
+                        await asyncio.gather(communicate_task, return_exceptions=True)
+                        raise
+                    except asyncio.TimeoutError:
+                        with SessionLocal() as db:
+                            current = db.get(Task, task_id)
+                            cancelled = bool(current is None or current.cancel_requested)
+                        if cancelled:
+                            await terminate_process_tree(proc)
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            timed_out = True
+                            await terminate_process_tree(proc)
+                            break
+                stdout_bytes, stderr_bytes = await communicate_task
                 verification_results.append({
                     "index": index, "command": command_text, "exit_code": proc.returncode,
-                    "timed_out": False,
+                    "timed_out": timed_out, "cancelled": cancelled,
                     "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
                     "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
                 })
-                if proc.returncode != 0:
+                if cancelled:
+                    verification_cancelled = True
+                    terminal_reason = "cancelled"
+                    break
+                if timed_out or proc.returncode != 0:
                     break
             except (OSError, ValueError) as exc:
                 verification_results.append({
@@ -501,16 +639,32 @@ async def execute_task(task_id: str) -> None:
                     "stderr": f"{type(exc).__name__}: {exc}",
                 })
                 break
-        passed = len(verification_results) == len(verification_commands) and all(
-            result.get("exit_code") == 0 and not result.get("timed_out")
-            for result in verification_results
-        )
-        verification_status = "passed" if passed else "failed"
-        verification_payload = {
-            "status": verification_status,
-            "acceptance_criteria": acceptance_criteria,
-            "commands": verification_results,
-        }
+        if verification_cancelled:
+            verification_status = "not_run"
+            verification_payload = {
+                "status": "cancelled",
+                "acceptance_criteria": acceptance_criteria,
+                "commands": verification_results,
+            }
+        else:
+            passed = len(verification_results) == len(verification_commands) and all(
+                result.get("exit_code") == 0 and not result.get("timed_out")
+                for result in verification_results
+            )
+            verification_status = "passed" if passed else "failed"
+            verification_payload = {
+                "status": verification_status,
+                "acceptance_criteria": acceptance_criteria,
+                "commands": verification_results,
+            }
+            if not passed:
+                terminal_reason = "verification_failed"
+                failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
+                error_summary = (
+                    f"Verification failed for command: {failed.get('command', 'unknown command')}"
+                    + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
+                    + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
+                )
         try:
             (task_dir / "verification.json").write_text(
                 json.dumps(verification_payload, ensure_ascii=True, indent=2),
@@ -519,14 +673,6 @@ async def execute_task(task_id: str) -> None:
         except OSError as exc:
             verification_payload["artifact_write_error"] = f"{type(exc).__name__}: {exc}"
         add_event(task_id, "verification.finished", verification_payload)
-        if not passed:
-            terminal_reason = "verification_failed"
-            failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
-            error_summary = (
-                f"Verification failed for command: {failed.get('command', 'unknown command')}"
-                + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
-                + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
-            )
 
     initial_verification_results = list(verification_results)
     repair_attempt_count = 0
@@ -633,7 +779,7 @@ async def execute_task(task_id: str) -> None:
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        if task is None:
+        if task is None or task.status != "running" or task.worker_id != worker_id:
             return
         task.exit_code, task.session_id = exit_code, session_id
         task.repair_attempt_count = repair_attempt_count
@@ -668,6 +814,8 @@ async def execute_task(task_id: str) -> None:
             if verification_status == "pending":
                 verification_status = "not_run"
         task.verification_status = verification_status
+        task.worker_id = None
+        task.lease_expires_at = None
         db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
             "status": task.status,
             "exit_code": exit_code,
@@ -683,23 +831,55 @@ async def execute_task(task_id: str) -> None:
             "latest_stderr_alias": str(task_dir / "stderr.log"),
         }))
         db.commit()
+    reconcile_workflows()
 
 
 def recover_orphaned_running_tasks() -> int:
-    """Fail tasks left running by a previous worker process; never replay them automatically."""
+    """Fail only expired leases; legacy rows receive a lease-length startup grace period."""
     recovered_at = now()
+    legacy_cutoff = recovered_at - timedelta(seconds=WORKER_LEASE_SECONDS)
+    recovered = 0
     with SessionLocal() as db:
-        orphaned = list(db.scalars(select(Task).where(Task.status == "running")))
-        for task in orphaned:
+        candidates = list(db.scalars(select(Task).where(Task.status == "running")))
+        for task in candidates:
+            lease = task.lease_expires_at
+            started = task.started_at
+            if lease is not None:
+                if lease.tzinfo is None:
+                    lease = lease.replace(tzinfo=timezone.utc)
+                expired = lease <= recovered_at
+            else:
+                if started is not None and started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                expired = started is None or started <= legacy_cutoff
+            if not expired:
+                continue
             previous_started_at = task.started_at.isoformat() if task.started_at else None
-            task.status = "failed"
-            task.finished_at = recovered_at
-            task.exit_code = 125
-            task.error_summary = (
-                "Worker restarted while this task was running. It was marked failed and was not "
-                "retried automatically because the previous agent process may have produced side effects. "
-                "Inspect the workspace and process state before manually retrying."
+            owner = task.worker_id
+            original_lease = task.lease_expires_at
+            conditions = [
+                Task.id == task.id,
+                Task.status == "running",
+                Task.worker_id == owner if owner is not None else Task.worker_id.is_(None),
+                Task.lease_expires_at == original_lease if original_lease is not None else Task.lease_expires_at.is_(None),
+            ]
+            result = db.execute(
+                update(Task)
+                .where(*conditions)
+                .execution_options(synchronize_session=False)
+                .values(
+                    status="failed", finished_at=recovered_at, exit_code=125,
+                    error_summary=(
+                        "Worker lease expired. The task was marked failed and was not retried "
+                        "automatically because the previous agent process may have produced side effects. "
+                        "Inspect workspace and process state before manually retrying."
+                    ),
+                    worker_id=None, lease_expires_at=None,
+                )
             )
+            if result.rowcount != 1:
+                continue
+            recovered += 1
             db.add(TaskEvent(
                 task_id=task.id,
                 event_type="worker.orphaned_task_recovered",
@@ -709,17 +889,111 @@ def recover_orphaned_running_tasks() -> int:
                     "attempt": task.attempt_count,
                     "max_attempts": task.max_attempts,
                     "automatic_retry": False,
-                    "reason": "worker_restart",
+                    "reason": "lease_expired",
                 },
             ))
         db.commit()
-        return len(orphaned)
+    return recovered
+
+
+async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
+    """Renew ownership periodically; cancel execution immediately after losing the lease."""
+    while True:
+        await asyncio.sleep(WORKER_HEARTBEAT_SECONDS)
+        renewed_at = now()
+        expires_at = renewed_at + timedelta(seconds=WORKER_LEASE_SECONDS)
+        with SessionLocal() as db:
+            result = db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.status == "running",
+                    Task.worker_id == worker_id,
+                    Task.lease_expires_at > renewed_at,
+                )
+                .values(lease_expires_at=expires_at)
+            )
+            db.commit()
+        if result.rowcount != 1:
+            raise RuntimeError(f"Worker lease lost for task {task_id}")
+
+
+async def execute_task(task_id: str, worker_id: str | None = None) -> None:
+    if worker_id is None:
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            if task is None:
+                return
+            # Compatibility path for tests/embedded callers: never steal a live
+            # lease from a named worker. claim_task() without an ID uses this
+            # stable legacy identity.
+            if task.status == "queued":
+                worker_id = "direct-execution"
+                claimed_at = now()
+                result = db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "queued")
+                    .values(
+                        status="running",
+                        started_at=claimed_at,
+                        attempt_count=Task.attempt_count + 1,
+                        worker_id=worker_id,
+                        lease_expires_at=claimed_at + timedelta(seconds=WORKER_LEASE_SECONDS),
+                    )
+                )
+                if result.rowcount != 1:
+                    db.rollback()
+                    return
+            elif task.status == "running" and task.worker_id == "legacy-worker":
+                worker_id = "legacy-worker"
+            elif task.status == "running" and task.worker_id is None:
+                worker_id = "direct-execution"
+                result = db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "running", Task.worker_id.is_(None))
+                    .values(
+                        worker_id=worker_id,
+                        lease_expires_at=now() + timedelta(seconds=WORKER_LEASE_SECONDS),
+                    )
+                )
+                if result.rowcount != 1:
+                    db.rollback()
+                    return
+            else:
+                return
+            db.commit()
+    execution = asyncio.create_task(_execute_task(task_id, worker_id))
+    heartbeat = asyncio.create_task(_renew_worker_lease(task_id, worker_id))
+    try:
+        done, _ = await asyncio.wait(
+            {execution, heartbeat}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if heartbeat in done:
+            error = heartbeat.exception()
+            if error is not None:
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+                return
+        await execution
+    except asyncio.CancelledError:
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
+        return
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
 
 
 async def run_worker() -> None:
+    worker_id = str(__import__("uuid").uuid4())
     recovered = recover_orphaned_running_tasks()
+    reconcile_workflows()
     print(
-        f"AI Work OS worker started; concurrency={MAX_CONCURRENT_TASKS}; "
+        f"AI Work OS worker started; id={worker_id}; concurrency={MAX_CONCURRENT_TASKS}; "
+        f"lease_seconds={WORKER_LEASE_SECONDS}; heartbeat_seconds={WORKER_HEARTBEAT_SECONDS}; "
         f"recovered_orphaned_tasks={recovered}.",
         flush=True,
     )
@@ -727,10 +1001,10 @@ async def run_worker() -> None:
     while True:
         active = {job for job in active if not job.done()}
         while len(active) < MAX_CONCURRENT_TASKS:
-            task_id = claim_task()
+            task_id = claim_task(worker_id)
             if task_id is None:
                 break
-            active.add(asyncio.create_task(execute_task(task_id)))
+            active.add(asyncio.create_task(execute_task(task_id, worker_id)))
         if active:
             await asyncio.wait(active, timeout=POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         else:

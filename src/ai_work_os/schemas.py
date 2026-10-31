@@ -53,6 +53,8 @@ class TaskRead(BaseModel):
     session_id: str | None
     error_summary: str | None
     cancel_requested: int
+    workflow_id: str | None = None
+    blocked_reason: str | None = None
     queue_wait_ms: int | None = None
     execution_ms: int | None = None
     model_config = {"from_attributes": True}
@@ -64,4 +66,30 @@ class TaskEventRead(BaseModel):
     occurred_at: datetime
     event_type: str
     payload: dict
+    model_config = {"from_attributes": True}
+
+    
+class WorkflowTaskCreate(TaskCreate):
+    key: str = Field(min_length=1, max_length=80)
+    depends_on: list[str] = Field(default_factory=list, max_length=50)
+
+
+class WorkflowCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    tasks: list[WorkflowTaskCreate] = Field(min_length=1, max_length=100)
+
+
+class WorkflowTaskRead(TaskRead):
+    workflow_id: str | None = None
+    blocked_reason: str | None = None
+
+
+class WorkflowRead(BaseModel):
+    id: str
+    title: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    counts: dict[str, int]
     model_config = {"from_attributes": True}

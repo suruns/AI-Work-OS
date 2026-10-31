@@ -19,6 +19,17 @@ def test_health():
     assert response.json()["status"] == "ok"
 
 
+def test_dashboard_task_selection_is_scoped_to_task_rows():
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    # Workflow rows also use the shared .task styling class, but have no task data-id.
+    assert 'data-workflow-id="' in html
+    assert '$("tasks").querySelectorAll(".task[data-id]")' in html
+    # A global selector would bind workflow rows and can request /tasks/undefined.
+    assert 'document.querySelectorAll(".task")' not in html
+
+
 def test_dashboard_is_served():
     response = client.get("/")
     assert response.status_code == 200

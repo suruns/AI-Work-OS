@@ -237,6 +237,12 @@ def reconcile_workflows() -> None:
 def claim_task(worker_id: str = "legacy-worker") -> str | None:
     reconcile_workflows()
     with SessionLocal() as db:
+        # SQLite's deferred transactions can let two workers read the same queued
+        # row and then fail while both try to upgrade their read locks to writes.
+        # Acquire the write reservation before reading candidates so claimers
+        # serialize; the conditional UPDATE below remains the final status fence.
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         started_at = now()
         lease_expires_at = started_at + timedelta(seconds=WORKER_LEASE_SECONDS)
         candidates = list(db.scalars(

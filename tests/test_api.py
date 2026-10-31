@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
 from datetime import timedelta
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
@@ -1289,6 +1290,41 @@ def test_multiple_workers_claim_distinct_tasks_with_independent_leases(tmp_path)
         assert task_b.worker_id == "worker-B"
         assert task_a.lease_expires_at is not None
         assert task_b.lease_expires_at is not None
+
+
+def test_simultaneous_workers_cannot_claim_the_same_task(tmp_path, monkeypatch):
+    task_id = client.post("/tasks", json={
+        "title": "Contended claim", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    # Keep this test focused on the claim transaction, not workflow reconciliation.
+    monkeypatch.setattr(worker, "reconcile_workflows", lambda: None)
+    start = threading.Barrier(3)
+
+    def claim(worker_id):
+        start.wait(timeout=5)
+        return worker.claim_task(worker_id)
+
+    with __import__("concurrent.futures").futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(claim, "worker-race-A")
+        second = pool.submit(claim, "worker-race-B")
+        start.wait(timeout=5)
+        results = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert results.count(task_id) == 1
+    assert results.count(None) == 1
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.worker_id in {"worker-race-A", "worker-race-B"}
+        assert task.attempt_count == 1
+        assert task.lease_expires_at is not None
 
 
 def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):

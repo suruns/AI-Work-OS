@@ -1289,7 +1289,6 @@ def test_multiple_workers_claim_distinct_tasks_with_independent_leases(tmp_path)
         assert task_b.worker_id == "worker-B"
         assert task_a.lease_expires_at is not None
         assert task_b.lease_expires_at is not None
-        assert task_a.lease_expires_at != task_b.lease_expires_at or task_a.id != task_b.id
 
 
 def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):

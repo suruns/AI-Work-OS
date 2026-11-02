@@ -6,10 +6,10 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, utcnow
-from .schemas import TaskCreate, TaskRead, TaskEventRead
+from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow
+from .schemas import TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -416,22 +416,203 @@ def cancel_task(task_id: str) -> Task:
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
         if task.status in {"queued", "running"}:
-            task.cancel_requested = 1
-            if task.status == "queued":
-                # A queued task has no worker to observe the cancellation flag.
-                task.status = "cancelled"
-                task.finished_at = utcnow()
+            timestamp = utcnow()
+            queued_result = db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status == "queued")
+                .values(
+                    status="cancelled", cancel_requested=1, finished_at=timestamp,
+                    error_summary="Cancelled before task execution",
+                )
+            )
+            if queued_result.rowcount == 1:
                 db.add(TaskEvent(
-                    task_id=task.id,
-                    event_type="task.cancelled",
+                    task_id=task_id, event_type="task.cancelled",
                     payload={"status": "cancelled", "cancelled_before_start": True},
                 ))
             else:
-                db.add(TaskEvent(
-                    task_id=task.id,
-                    event_type="task.cancel_requested",
-                    payload={"status": "running"},
-                ))
+                running_result = db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "running", Task.cancel_requested == 0)
+                    .values(cancel_requested=1)
+                )
+                if running_result.rowcount == 1:
+                    db.add(TaskEvent(
+                        task_id=task_id, event_type="task.cancel_requested",
+                        payload={"status": "running"},
+                    ))
             db.commit()
             db.refresh(task)
         return task
+
+
+def _workflow_counts(db, workflow_id: str) -> dict[str, int]:
+    rows = db.execute(
+        select(Task.status, func.count()).where(Task.workflow_id == workflow_id).group_by(Task.status)
+    ).all()
+    return {status: count for status, count in rows}
+
+
+def _workflow_payload(db, workflow: Workflow) -> dict:
+    counts = _workflow_counts(db, workflow.id)
+    return {
+        "id": workflow.id, "title": workflow.title, "status": workflow.status,
+        "created_at": workflow.created_at, "started_at": workflow.started_at,
+        "finished_at": workflow.finished_at, "counts": counts,
+    }
+
+
+def _validate_dag(items: list) -> dict[str, list[str]]:
+    by_key = {item.key: item for item in items}
+    if len(by_key) != len(items):
+        raise HTTPException(status_code=422, detail="task keys must be unique")
+    graph = {}
+    for item in items:
+        if item.key in item.depends_on:
+            raise HTTPException(status_code=422, detail=f"task {item.key!r} cannot depend on itself")
+        unknown = sorted(set(item.depends_on) - set(by_key))
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"task {item.key!r} references unknown dependencies: {unknown}")
+        if len(set(item.depends_on)) != len(item.depends_on):
+            raise HTTPException(status_code=422, detail=f"task {item.key!r} has duplicate dependencies")
+        graph[item.key] = list(item.depends_on)
+    visiting, visited = set(), set()
+    def visit(key: str) -> None:
+        if key in visiting:
+            raise HTTPException(status_code=422, detail="workflow dependencies contain a cycle")
+        if key in visited:
+            return
+        visiting.add(key)
+        for parent in graph[key]:
+            visit(parent)
+        visiting.remove(key)
+        visited.add(key)
+    for key in graph:
+        visit(key)
+    return graph
+
+
+@app.post("/workflows", status_code=201)
+def create_workflow(body: WorkflowCreate) -> dict:
+    graph = _validate_dag(body.tasks)
+    workspaces = {}
+    for item in body.tasks:
+        workspace = Path(item.workspace_path).expanduser().resolve()
+        if not workspace.is_dir():
+            raise HTTPException(status_code=422, detail=f"workspace_path for task {item.key!r} must be an existing directory")
+        workspaces[item.key] = str(workspace)
+
+    with SessionLocal() as db:
+        workflow = Workflow(title=body.title.strip(), status="queued")
+        db.add(workflow)
+        db.flush()
+        created = {}
+        for item in body.tasks:
+            task = Task(
+                workflow_id=workflow.id, title=item.title.strip(), prompt=item.prompt,
+                workspace_path=workspaces[item.key], permission_mode=item.permission_mode,
+                priority=item.priority, max_attempts=item.max_attempts,
+                acceptance_criteria=item.acceptance_criteria,
+                verification_commands=item.verification_commands,
+                auto_repair=item.auto_repair,
+                max_repair_attempts=item.max_repair_attempts if item.auto_repair else 0,
+                verification_status="pending" if item.verification_commands else "not_configured",
+            )
+            db.add(task)
+            created[item.key] = task
+        db.flush()
+        for child, parents in graph.items():
+            for parent in parents:
+                db.add(WorkflowTaskDependency(
+                    workflow_id=workflow.id,
+                    upstream_task_id=created[parent].id,
+                    downstream_task_id=created[child].id,
+                ))
+        for task in created.values():
+            db.add(TaskEvent(task_id=task.id, event_type="task.queued", payload={
+                "status": "queued", "workflow_id": workflow.id,
+            }))
+        db.commit()
+        db.refresh(workflow)
+        return {
+            **_workflow_payload(db, workflow),
+            "tasks": [{"key": key, "task": {
+                "id": task.id, "title": task.title, "status": task.status,
+                "workflow_id": task.workflow_id,
+            }} for key, task in created.items()],
+            "dependencies": [
+                {"upstream_task_id": created[parent].id, "downstream_task_id": created[child].id}
+                for child, parents in graph.items() for parent in parents
+            ],
+        }
+
+
+@app.get("/workflows")
+def list_workflows(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+    with SessionLocal() as db:
+        workflows = list(db.scalars(select(Workflow).order_by(Workflow.created_at.desc()).limit(limit)))
+        return [_workflow_payload(db, workflow) for workflow in workflows]
+
+
+@app.get("/workflows/{workflow_id}")
+def get_workflow(workflow_id: str) -> dict:
+    with SessionLocal() as db:
+        workflow = db.get(Workflow, workflow_id)
+        if workflow is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        tasks = list(db.scalars(select(Task).where(Task.workflow_id == workflow_id).order_by(Task.created_at, Task.id)))
+        edges = list(db.scalars(select(WorkflowTaskDependency).where(WorkflowTaskDependency.workflow_id == workflow_id)))
+        return {
+            **_workflow_payload(db, workflow),
+            "tasks": [TaskRead.model_validate(task).model_dump(mode="json") | {
+                "workflow_id": task.workflow_id, "blocked_reason": task.blocked_reason,
+            } for task in tasks],
+            "dependencies": [
+                {"upstream_task_id": edge.upstream_task_id, "downstream_task_id": edge.downstream_task_id}
+                for edge in edges
+            ],
+        }
+
+
+@app.post("/workflows/{workflow_id}/cancel")
+def cancel_workflow(workflow_id: str) -> dict:
+    with SessionLocal() as db:
+        workflow = db.get(Workflow, workflow_id)
+        if workflow is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        if workflow.status in {"succeeded", "failed", "cancelled"}:
+            return _workflow_payload(db, workflow)
+        timestamp = utcnow()
+        # Publish workflow cancellation first. The worker's atomic claim checks this
+        # state, so a task cannot be newly claimed after this transaction commits.
+        workflow.status = "cancelled"
+        workflow.finished_at = timestamp
+        tasks = list(db.scalars(select(Task.id).where(
+            Task.workflow_id == workflow_id, Task.status.in_(["queued", "running"])
+        )))
+        for task_id in tasks:
+            queued_result = db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status == "queued")
+                .values(
+                    status="cancelled", cancel_requested=1, finished_at=timestamp,
+                    error_summary="Workflow cancelled before task execution",
+                )
+            )
+            if queued_result.rowcount == 1:
+                db.add(TaskEvent(task_id=task_id, event_type="task.cancelled", payload={
+                    "status": "cancelled", "cancelled_before_start": True, "workflow_id": workflow_id,
+                }))
+                continue
+            running_result = db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status == "running", Task.cancel_requested == 0)
+                .values(cancel_requested=1)
+            )
+            if running_result.rowcount == 1:
+                db.add(TaskEvent(task_id=task_id, event_type="task.cancellation_requested", payload={
+                    "reason": "workflow_cancelled", "workflow_id": workflow_id,
+                }))
+        db.commit()
+        db.refresh(workflow)
+        return _workflow_payload(db, workflow)

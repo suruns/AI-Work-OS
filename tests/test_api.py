@@ -1,21 +1,43 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta, timezone
 from fastapi.testclient import TestClient
 from ai_work_os.api import app
 from ai_work_os import api as api_module
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
-from ai_work_os.models import Task, TaskEvent, utcnow
+from ai_work_os.models import Task, TaskEvent, Workflow, utcnow
 
 client = TestClient(app)
+
+
+def utc_timestamp(value):
+    """SQLite drops tzinfo, returning naive datetimes that represent UTC."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
 
 
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_dashboard_task_selection_is_scoped_to_task_rows():
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    # Workflow rows also use the shared .task styling class, but have no task data-id.
+    assert 'data-workflow-id="' in html
+    assert '$("tasks").querySelectorAll(".task[data-id]")' in html
+    # A global selector would bind workflow rows and can request /tasks/undefined.
+    assert 'document.querySelectorAll(".task")' not in html
 
 
 def test_dashboard_is_served():
@@ -26,6 +48,10 @@ def test_dashboard_is_served():
     assert "Agent result" in response.text
     assert "function renderArtifacts(data)" in response.text
     assert "Workspace files changed during task" in response.text
+    assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
+    assert "selectedWorkflow" in response.text
+    assert "workflowDetailToken" in response.text
+    assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
 
 
 def test_stats_shape():
@@ -117,7 +143,7 @@ def test_worker_restart_marks_orphaned_running_tasks_failed_without_retry(tmp_pa
         task = db.get(Task, task_id)
         task.status = "running"
         task.attempt_count = 1
-        task.started_at = utcnow()
+        task.started_at = utcnow() - timedelta(seconds=120)
         db.commit()
 
     recovered = worker.recover_orphaned_running_tasks()
@@ -1025,3 +1051,776 @@ def test_workspace_snapshot_ignores_python_cache_noise(tmp_path):
     assert snapshot["available"] is True
     assert "real-change.txt" in snapshot["untracked"]
     assert not any("__pycache__" in name or name.endswith(".pyc") for name in snapshot["untracked"])
+
+
+def _quiesce_unrelated_queued(task_ids):
+    """Keep queued tasks from earlier tests out of scheduler assertions."""
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued", Task.id.notin_(list(task_ids))).update(
+            {Task.status: "cancelled", Task.finished_at: utcnow()}, synchronize_session=False
+        )
+        db.commit()
+
+
+def _workflow_payload(workspace, *, with_dependency=True):
+    tasks = [
+        {"key": "prepare", "title": "Prepare", "prompt": "prepare", "workspace_path": str(workspace), "priority": 100},
+        {"key": "build", "title": "Build", "prompt": "build", "workspace_path": str(workspace),
+         "depends_on": ["prepare"] if with_dependency else [], "priority": 99},
+    ]
+    return {"title": "API workflow", "tasks": tasks}
+
+
+def test_create_workflow_and_dependency_gates_worker(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201, response.text
+    workflow = response.json()
+    assert workflow["status"] == "queued"
+    assert len(workflow["dependencies"]) == 1
+    task_ids = {item["key"]: item["task"]["id"] for item in workflow["tasks"]}
+
+    # Keep unrelated queued tasks from earlier API tests out of this scheduler assertion.
+    with SessionLocal() as db:
+        for unrelated in db.query(Task).filter(Task.status == "queued").all():
+            if unrelated.id in task_ids.values():
+                continue
+            unrelated.status = "cancelled"
+            unrelated.finished_at = utcnow()
+        db.commit()
+
+    # The first task is eligible; the dependent task must remain blocked from claim.
+    assert worker.claim_task("worker-test") == task_ids["prepare"]
+    assert worker.claim_task("worker-test") is None
+
+    with SessionLocal() as db:
+        first = db.get(Task, task_ids["prepare"])
+        first.status = "succeeded"
+        first.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task("worker-test") == task_ids["build"]
+
+
+def test_workflow_rejects_unknown_dependency_and_cycle(tmp_path):
+    payload = _workflow_payload(tmp_path)
+    payload["tasks"][0]["depends_on"] = ["missing"]
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 422
+
+    payload = _workflow_payload(tmp_path)
+    payload["tasks"][0]["depends_on"] = ["build"]
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 422
+
+
+def test_failed_parent_blocks_all_descendants(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201
+    workflow_id = response.json()["id"]
+    task_ids = {item["key"]: item["task"]["id"] for item in response.json()["tasks"]}
+    with SessionLocal() as db:
+        first = db.get(Task, task_ids["prepare"])
+        first.status = "failed"
+        first.finished_at = utcnow()
+        db.commit()
+
+    worker.reconcile_workflows()
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    states = {task["id"]: task["status"] for task in detail["tasks"]}
+    assert states[task_ids["prepare"]] == "failed"
+    assert states[task_ids["build"]] == "blocked"
+    assert detail["status"] == "failed"
+    blocked = next(task for task in detail["tasks"] if task["id"] == task_ids["build"])
+    assert "prerequisite task" in blocked["blocked_reason"]
+
+
+def test_workflow_cancel_cancels_queued_tasks(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201
+    workflow_id = response.json()["id"]
+    cancelled = client.post(f"/workflows/{workflow_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    assert all(task["status"] == "cancelled" for task in detail["tasks"])
+
+
+def test_workflow_cancel_requests_running_worker_shutdown_without_releasing_lease(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexec sleep 10\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/workflows", json=_workflow_payload(workspace))
+    assert created.status_code == 201
+    workflow_id = created.json()["id"]
+    task_id = next(item["task"]["id"] for item in created.json()["tasks"] if item["key"] == "prepare")
+
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    # Keep this test scoped to cancellation of one running workflow task;
+    # unrelated workflow fixtures are reconciled in their own tests.
+    monkeypatch.setattr(worker, "reconcile_workflows", lambda: None)
+    worker_id = "workflow-cancel-worker"
+    assert worker.claim_task(worker_id) == task_id
+
+    async def execute_then_cancel_workflow():
+        execution = asyncio.create_task(worker.execute_task(task_id, worker_id))
+        for _ in range(100):
+            events = client.get(f"/tasks/{task_id}/events").json()
+            if any(event["event_type"] == "executor.started" for event in events):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("worker execution did not start")
+
+        cancelled = client.post(f"/workflows/{workflow_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+
+        # Cancellation is a request to the live owner, not permission to steal
+        # or clear its lease before the subprocess has actually stopped.
+        with SessionLocal() as db:
+            current = db.get(Task, task_id)
+            assert current.status == "running"
+            assert bool(current.cancel_requested)
+            assert current.worker_id == worker_id
+            assert current.lease_expires_at is not None
+
+        await asyncio.wait_for(execution, timeout=5)
+
+    asyncio.run(execute_then_cancel_workflow())
+
+    with SessionLocal() as db:
+        current = db.get(Task, task_id)
+        assert current.status == "cancelled"
+        assert current.worker_id is None
+        assert current.lease_expires_at is None
+    events = client.get(f"/tasks/{task_id}/events").json()
+    assert any(event["event_type"] == "task.cancellation_requested" for event in events)
+    assert events[-1]["event_type"] == "executor.finished"
+    assert events[-1]["payload"]["status"] == "cancelled"
+
+
+def test_multi_parent_workflow_waits_for_every_success_and_retry(tmp_path):
+    payload = {
+        "title": "Multi-parent workflow",
+        "tasks": [
+            {"key": "first", "title": "First", "prompt": "first", "workspace_path": str(tmp_path), "priority": 100},
+            {"key": "second", "title": "Second", "prompt": "second", "workspace_path": str(tmp_path), "priority": 99},
+            {"key": "join", "title": "Join", "prompt": "join", "workspace_path": str(tmp_path),
+             "depends_on": ["first", "second"], "priority": 98},
+        ],
+    }
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 201, response.text
+    workflow = response.json()
+    ids = {item["key"]: item["task"]["id"] for item in workflow["tasks"]}
+
+    with SessionLocal() as db:
+        for unrelated in db.query(Task).filter(Task.status == "queued").all():
+            if unrelated.id not in ids.values():
+                unrelated.status = "cancelled"
+                unrelated.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task("worker-test") == ids["first"]
+    assert worker.claim_task("worker-test") == ids["second"]
+    assert worker.claim_task("worker-test") is None
+
+    with SessionLocal() as db:
+        first = db.get(Task, ids["first"])
+        second = db.get(Task, ids["second"])
+        first.status = "succeeded"
+        first.finished_at = utcnow()
+        # Simulate the second parent waiting for its retry backoff.
+        second.status = "queued"
+        second.available_at = utcnow() + timedelta(hours=1)
+        db.commit()
+
+    assert worker.claim_task("worker-test") is None
+    with SessionLocal() as db:
+        second = db.get(Task, ids["second"])
+        second.status = "succeeded"
+        second.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task("worker-test") == ids["join"]
+    with SessionLocal() as db:
+        joined = db.get(Task, ids["join"])
+        joined.status = "succeeded"
+        joined.finished_at = utcnow()
+        db.commit()
+    worker.reconcile_workflows()
+    assert client.get(f"/workflows/{workflow['id']}").json()["status"] == "succeeded"
+
+def test_reconcile_later_failure_after_workflow_already_failed(tmp_path):
+    payload = {
+        "title": "Independent branches",
+        "tasks": [
+            {"key": "fail-fast", "title": "Fail fast", "prompt": "x", "workspace_path": str(tmp_path), "priority": 100},
+            {"key": "slow-parent", "title": "Slow parent", "prompt": "x", "workspace_path": str(tmp_path), "priority": 99},
+            {"key": "slow-child", "title": "Slow child", "prompt": "x", "workspace_path": str(tmp_path),
+             "depends_on": ["slow-parent"], "priority": 98},
+        ],
+    }
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 201, response.text
+    workflow_id = response.json()["id"]
+    ids = {item["key"]: item["task"]["id"] for item in response.json()["tasks"]}
+    with SessionLocal() as db:
+        db.query(Task).filter(Task.status == "queued").update(
+            {Task.status: "cancelled"}, synchronize_session=False
+        )
+        for key in ("slow-parent", "slow-child"):
+            task = db.get(Task, ids[key])
+            task.status = "queued"
+            task.finished_at = None
+        db.get(Task, ids["fail-fast"]).status = "failed"
+        db.commit()
+
+    # A failure in one branch must not finalize the workflow while siblings can still run.
+    worker.reconcile_workflows()
+    assert client.get(f"/workflows/{workflow_id}").json()["status"] in {"queued", "running"}
+    with SessionLocal() as db:
+        parent = db.get(Task, ids["slow-parent"])
+        parent.status = "failed"
+        parent.finished_at = utcnow()
+        db.commit()
+
+    worker.reconcile_workflows()
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    states = {task["id"]: task["status"] for task in detail["tasks"]}
+    assert states[ids["slow-child"]] == "blocked"
+    assert detail["status"] == "failed"
+
+
+
+def test_cancel_task_is_idempotent_and_emits_one_event(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Cancel idempotency", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    assert client.post(f"/tasks/{task_id}/cancel").status_code == 200
+    assert client.post(f"/tasks/{task_id}/cancel").status_code == 200
+    events = client.get(f"/tasks/{task_id}/events").json()
+    cancelled = [event for event in events if event["event_type"] == "task.cancelled"]
+    assert len(cancelled) == 1
+
+
+def test_worker_does_not_claim_task_from_cancelled_workflow(tmp_path):
+    response = client.post("/workflows", json=_workflow_payload(tmp_path))
+    assert response.status_code == 201
+    workflow_id = response.json()["id"]
+    task_id = response.json()["tasks"][0]["task"]["id"]
+    with SessionLocal() as db:
+        workflow = db.get(Workflow, workflow_id)
+        workflow.status = "cancelled"
+        workflow.finished_at = utcnow()
+        # Deliberately leave the task queued to exercise the claim-side fence.
+        db.commit()
+    assert worker.claim_task("worker-test") != task_id
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "queued"
+
+
+def _create_workflow_with_tasks(tmp_path, title, definitions):
+    payload = {
+        "title": title,
+        "tasks": [
+            {
+                "key": key, "title": key, "prompt": "x", "workspace_path": str(tmp_path),
+                "priority": 100 - index, "depends_on": depends_on,
+            }
+            for index, (key, depends_on) in enumerate(definitions)
+        ],
+    }
+    response = client.post("/workflows", json=payload)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    ids = {item["key"]: item["task"]["id"] for item in created["tasks"]}
+    _quiesce_unrelated_queued(ids.values())
+    return created["id"], ids
+
+
+def _workflow_states(workflow_id):
+    detail = client.get(f"/workflows/{workflow_id}").json()
+    return detail, {task["title"]: task for task in detail["tasks"]}
+
+
+def test_cancelled_member_does_not_cancel_workflow_or_starve_others(tmp_path):
+    workflow_id, ids = _create_workflow_with_tasks(tmp_path, "member cancel", [
+        ("A", []), ("B", []), ("C", ["A"]),
+    ])
+
+    assert client.post(f"/tasks/{ids['A']}/cancel").status_code == 200
+    worker.reconcile_workflows()
+
+    detail, by_title = _workflow_states(workflow_id)
+    assert by_title["A"]["status"] == "cancelled"
+    assert by_title["C"]["status"] == "blocked"
+    assert "cancelled" in by_title["C"]["blocked_reason"]
+    assert ids["A"] in by_title["C"]["blocked_reason"]
+    assert detail["status"] in {"queued", "running"}
+    assert detail["status"] != "cancelled"
+
+    # The regression: a cancelled member used to make the whole workflow terminal,
+    # which starved every queued task behind the claim-side workflow fence.
+    assert worker.claim_task("worker-cancel-member") == ids["B"]
+    with SessionLocal() as db:
+        task = db.get(Task, ids["B"])
+        task.status = "succeeded"
+        task.finished_at = utcnow()
+        task.worker_id = None
+        task.lease_expires_at = None
+        db.commit()
+
+    worker.reconcile_workflows()
+    final = client.get(f"/workflows/{workflow_id}").json()
+    assert final["status"] == "cancelled"
+    assert final["counts"] == {"cancelled": 1, "blocked": 1, "succeeded": 1}
+
+
+def test_cancelled_task_does_not_block_independent_branch(tmp_path):
+    workflow_id, ids = _create_workflow_with_tasks(tmp_path, "independent branches", [
+        ("X", []), ("Y", []),
+    ])
+
+    assert client.post(f"/tasks/{ids['X']}/cancel").status_code == 200
+    worker.reconcile_workflows()
+    assert worker.claim_task("worker-independent") == ids["Y"]
+    with SessionLocal() as db:
+        task = db.get(Task, ids["Y"])
+        task.status = "succeeded"
+        task.finished_at = utcnow()
+        task.worker_id = None
+        task.lease_expires_at = None
+        db.commit()
+    worker.reconcile_workflows()
+
+    detail, by_title = _workflow_states(workflow_id)
+    assert by_title["X"]["status"] == "cancelled"
+    assert by_title["Y"]["status"] == "succeeded"
+    assert detail["status"] == "cancelled"
+
+
+def test_multi_level_cancellation_blocks_descendants_only(tmp_path):
+    workflow_id, ids = _create_workflow_with_tasks(tmp_path, "multi level cancel", [
+        ("A", []), ("B", ["A"]), ("C", ["B"]), ("D", []),
+    ])
+
+    assert client.post(f"/tasks/{ids['A']}/cancel").status_code == 200
+    worker.reconcile_workflows()
+
+    detail, by_title = _workflow_states(workflow_id)
+    assert by_title["A"]["status"] == "cancelled"
+    assert by_title["B"]["status"] == "blocked"
+    assert by_title["C"]["status"] == "blocked"
+    for key in ("B", "C"):
+        assert "cancelled" in by_title[key]["blocked_reason"]
+        assert ids["A"] in by_title[key]["blocked_reason"]
+    assert by_title["D"]["status"] == "queued"
+    assert detail["status"] in {"queued", "running"}
+
+    assert worker.claim_task("worker-multi-level") == ids["D"]
+    with SessionLocal() as db:
+        task = db.get(Task, ids["D"])
+        task.status = "succeeded"
+        task.finished_at = utcnow()
+        task.worker_id = None
+        task.lease_expires_at = None
+        db.commit()
+    worker.reconcile_workflows()
+    assert client.get(f"/workflows/{workflow_id}").json()["status"] == "cancelled"
+
+
+def test_workflow_cancel_is_terminal_and_does_not_rewrite_events(tmp_path):
+    workflow_id, ids = _create_workflow_with_tasks(tmp_path, "workflow cancel", [
+        ("A", []), ("B", ["A"]), ("C", []),
+    ])
+    with SessionLocal() as db:
+        task = db.get(Task, ids["B"])
+        task.status = "running"
+        task.started_at = utcnow()
+        task.attempt_count = 1
+        task.worker_id = "stale-worker"
+        task.lease_expires_at = utcnow() + timedelta(seconds=60)
+        db.commit()
+
+    assert client.post(f"/workflows/{workflow_id}/cancel").status_code == 200
+    detail, by_title = _workflow_states(workflow_id)
+    assert detail["status"] == "cancelled"
+    assert by_title["A"]["status"] == "cancelled"
+    assert by_title["C"]["status"] == "cancelled"
+    assert by_title["B"]["status"] == "running"
+    assert by_title["B"]["cancel_requested"] == 1
+    finished_at = detail["finished_at"]
+
+    worker.reconcile_workflows()
+    detail, by_title = _workflow_states(workflow_id)
+    assert detail["status"] == "cancelled"
+    assert detail["finished_at"] == finished_at
+    assert by_title["B"]["status"] == "running"
+
+    def event_counts():
+        with SessionLocal() as db:
+            return {
+                "queued_cancelled": sum(
+                    db.query(TaskEvent).filter(
+                        TaskEvent.task_id == ids[key], TaskEvent.event_type == "task.cancelled",
+                    ).count() for key in ("A", "C")
+                ),
+                "running_requests": db.query(TaskEvent).filter(
+                    TaskEvent.task_id == ids["B"], TaskEvent.event_type == "task.cancellation_requested",
+                ).count(),
+            }
+
+    baseline = event_counts()
+    assert baseline == {"queued_cancelled": 2, "running_requests": 1}
+    assert client.post(f"/workflows/{workflow_id}/cancel").status_code == 200
+    worker.reconcile_workflows()
+    assert event_counts() == baseline
+
+    # A stale worker finishing late must not resurrect the workflow.
+    with SessionLocal() as db:
+        task = db.get(Task, ids["B"])
+        task.status = "cancelled"
+        task.finished_at = utcnow()
+        task.worker_id = None
+        task.lease_expires_at = None
+        db.commit()
+    worker.reconcile_workflows()
+    detail, _ = _workflow_states(workflow_id)
+    assert detail["status"] == "cancelled"
+    assert detail["finished_at"] == finished_at
+
+
+def test_concurrent_reconciliation_is_idempotent(tmp_path):
+    workflow_id, ids = _create_workflow_with_tasks(tmp_path, "concurrent reconcile", [
+        ("A", []), ("B", ["A"]), ("C", ["A"]),
+    ])
+    with SessionLocal() as db:
+        task = db.get(Task, ids["A"])
+        task.status = "failed"
+        task.finished_at = utcnow()
+        db.commit()
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda _: worker.reconcile_workflows(), range(6)))
+
+    detail, by_title = _workflow_states(workflow_id)
+    assert detail["status"] == "failed"
+    assert by_title["B"]["status"] == "blocked"
+    assert by_title["C"]["status"] == "blocked"
+    with SessionLocal() as db:
+        blocked_events = {
+            key: db.query(TaskEvent).filter(
+                TaskEvent.task_id == ids[key], TaskEvent.event_type == "task.blocked",
+            ).count()
+            for key in ("B", "C")
+        }
+    assert blocked_events == {"B": 1, "C": 1}
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda _: worker.reconcile_workflows(), range(6)))
+    detail, by_title = _workflow_states(workflow_id)
+    assert detail["status"] == "failed"
+    assert by_title["B"]["status"] == "blocked"
+    assert by_title["C"]["status"] == "blocked"
+    with SessionLocal() as db:
+        for key in ("B", "C"):
+            assert db.query(TaskEvent).filter(
+                TaskEvent.task_id == ids[key], TaskEvent.event_type == "task.blocked",
+            ).count() == 1
+
+
+
+def test_worker_claim_records_owner_and_lease(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Lease claim", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    worker_id = "worker-test-owner"
+    assert worker.claim_task(worker_id) == task_id
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.worker_id == worker_id
+        assert task.lease_expires_at is not None
+        assert utc_timestamp(task.lease_expires_at) > utcnow().timestamp()
+
+
+def test_multiple_workers_claim_distinct_tasks_with_independent_leases(tmp_path):
+    first = client.post("/tasks", json={
+        "title": "Worker A task", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    second = client.post("/tasks", json={
+        "title": "Worker B task", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id not in {first, second}:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    claimed_a = worker.claim_task("worker-A")
+    claimed_b = worker.claim_task("worker-B")
+    assert {claimed_a, claimed_b} == {first, second}
+    with SessionLocal() as db:
+        task_a = db.get(Task, claimed_a)
+        task_b = db.get(Task, claimed_b)
+        assert task_a.worker_id == "worker-A"
+        assert task_b.worker_id == "worker-B"
+        assert task_a.lease_expires_at is not None
+        assert task_b.lease_expires_at is not None
+
+
+def test_simultaneous_workers_cannot_claim_the_same_task(tmp_path, monkeypatch):
+    task_id = client.post("/tasks", json={
+        "title": "Contended claim", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    # Keep this test focused on the claim transaction, not workflow reconciliation.
+    monkeypatch.setattr(worker, "reconcile_workflows", lambda: None)
+    start = threading.Barrier(3)
+
+    def claim(worker_id):
+        start.wait(timeout=5)
+        return worker.claim_task(worker_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(claim, "worker-race-A")
+        second = pool.submit(claim, "worker-race-B")
+        start.wait(timeout=5)
+        results = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert results.count(task_id) == 1
+    assert results.count(None) == 1
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.worker_id in {"worker-race-A", "worker-race-B"}
+        assert task.attempt_count == 1
+        assert task.lease_expires_at is not None
+
+
+def test_worker_heartbeat_renews_matching_lease(tmp_path, monkeypatch):
+    created = client.post("/tasks", json={
+        "title": "Lease heartbeat", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+    worker_id = "worker-heartbeat"
+    assert worker.claim_task(worker_id) == task_id
+    monkeypatch.setattr(worker, "WORKER_HEARTBEAT_SECONDS", 0.01)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.lease_expires_at = utcnow() + timedelta(seconds=1)
+        db.commit()
+    async def exercise():
+        heartbeat = asyncio.create_task(worker._renew_worker_lease(task_id, worker_id))
+        await asyncio.sleep(0.04)
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+    asyncio.run(exercise())
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert utc_timestamp(task.lease_expires_at) > (utcnow() + timedelta(seconds=30)).timestamp()
+
+
+def test_recovery_only_fails_expired_leases_and_legacy_after_grace(tmp_path, monkeypatch):
+    fresh = client.post("/tasks", json={
+        "title": "Fresh lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    expired = client.post("/tasks", json={
+        "title": "Expired lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    legacy = client.post("/tasks", json={
+        "title": "Legacy lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        for task_id in (fresh, expired, legacy):
+            task = db.get(Task, task_id)
+            task.status = "running"
+            task.started_at = utcnow()
+        db.get(Task, fresh).worker_id = "worker-live"
+        db.get(Task, fresh).lease_expires_at = utcnow() + timedelta(minutes=1)
+        db.get(Task, expired).worker_id = "worker-dead"
+        db.get(Task, expired).lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.get(Task, legacy).worker_id = None
+        db.get(Task, legacy).lease_expires_at = None
+        db.get(Task, legacy).started_at = utcnow() - timedelta(seconds=120)
+        db.commit()
+
+    monkeypatch.setattr(worker, "WORKER_LEASE_SECONDS", 60)
+    assert worker.recover_orphaned_running_tasks() == 2
+    with SessionLocal() as db:
+        assert db.get(Task, fresh).status == "running"
+        for task_id in (expired, legacy):
+            task = db.get(Task, task_id)
+            assert task.status == "failed"
+            assert task.exit_code == 125
+            assert task.worker_id is None
+            assert task.lease_expires_at is None
+
+
+def test_direct_execution_cannot_steal_live_worker_lease(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Do not steal lease", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    assert worker.claim_task("worker-owner-A") == task_id
+    assert worker.claim_task("worker-owner-B") is None
+    asyncio.run(worker.execute_task(task_id))
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.worker_id == "worker-owner-A"
+        assert task.lease_expires_at is not None
+
+
+def test_stale_worker_cannot_complete_reassigned_task(tmp_path, monkeypatch):
+    created = client.post("/tasks", json={
+        "title": "Fence stale worker", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.worker_id = "worker-owner-B"
+        task.lease_expires_at = utcnow() + timedelta(seconds=60)
+        db.commit()
+
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    asyncio.run(worker._execute_task(task_id, "worker-owner-A"))
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.worker_id == "worker-owner-B"
+        assert task.exit_code is None
+
+
+def test_expired_lease_recovery_is_idempotent(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Recover once", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.worker_id = "worker-gone"
+        task.started_at = utcnow() - timedelta(minutes=2)
+        task.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+
+    assert worker.recover_orphaned_running_tasks() == 1
+    assert worker.recover_orphaned_running_tasks() == 0
+    events = client.get(f"/tasks/{task_id}/events").json()
+    recovered = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
+    assert len(recovered) == 1
+
+
+def test_worker_cannot_resurrect_expired_lease(tmp_path, monkeypatch):
+    created = client.post("/tasks", json={
+        "title": "Expired heartbeat", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+    worker_id = "worker-expired"
+    assert worker.claim_task(worker_id) == task_id
+    monkeypatch.setattr(worker, "WORKER_HEARTBEAT_SECONDS", 0.01)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+
+    async def exercise():
+        try:
+            await worker._renew_worker_lease(task_id, worker_id)
+        except RuntimeError as exc:
+            assert "lease lost" in str(exc)
+        else:
+            raise AssertionError("expired lease must not be renewed")
+
+    asyncio.run(exercise())
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert utc_timestamp(task.lease_expires_at) < utcnow().timestamp()
+
+
+def test_cancel_during_verification_terminates_command_and_records_results(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Cancel verification",
+        "prompt": "Run verification",
+        "workspace_path": str(workspace),
+        "verification_commands": [f'"{sys.executable}" -c "import time; time.sleep(30)"'],
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+
+    async def execute_and_cancel():
+        execution = asyncio.create_task(worker.execute_task(task_id))
+        for _ in range(100):
+            events = client.get(f"/tasks/{task_id}/events").json()
+            if any(event["event_type"] == "verification.started" for event in events):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("verification did not start")
+        response = client.post(f"/tasks/{task_id}/cancel")
+        assert response.status_code == 200
+        await asyncio.wait_for(execution, timeout=5)
+
+    asyncio.run(execute_and_cancel())
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "cancelled"
+    assert task["verification_status"] == "not_run"
+    artifact = json.loads((tmp_path / "storage" / "tasks" / task_id / "verification.json").read_text())
+    assert artifact["status"] == "cancelled"
+    assert artifact["commands"][0]["cancelled"] is True

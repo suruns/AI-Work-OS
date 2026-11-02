@@ -28,6 +28,15 @@ def ensure_schema_compatibility() -> None:
         return
     columns = {column["name"] for column in inspector.get_columns("tasks")}
     with engine.begin() as connection:
+        if "workflow_id" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN workflow_id VARCHAR(36) REFERENCES workflows(id)"))
+        if "blocked_reason" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN blocked_reason TEXT"))
+        if "worker_id" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN worker_id VARCHAR(36)"))
+        if "lease_expires_at" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN lease_expires_at DATETIME"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_workflow_id ON tasks (workflow_id)"))
         if "permission_mode" not in columns:
             connection.execute(text(
                 "ALTER TABLE tasks ADD COLUMN permission_mode VARCHAR(32) NOT NULL DEFAULT 'plan'"

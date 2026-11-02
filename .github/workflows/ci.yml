@@ -30,7 +30,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "Dashboard E2E stability run $attempt/3"
-            pytest -q -m e2e
+            pytest -q tests/e2e -m e2e
           done
       - name: Upload browser failure artifacts
         if: failure()

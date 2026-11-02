@@ -1145,6 +1145,9 @@ def test_workflow_cancel_requests_running_worker_shutdown_without_releasing_leas
                 other.finished_at = utcnow()
         db.commit()
 
+    # Keep this test scoped to cancellation of one running workflow task;
+    # unrelated workflow fixtures are reconciled in their own tests.
+    monkeypatch.setattr(worker, "reconcile_workflows", lambda: None)
     worker_id = "workflow-cancel-worker"
     assert worker.claim_task(worker_id) == task_id
 

@@ -73,27 +73,34 @@ def dashboard(tmp_path: Path, request: pytest.FixtureRequest):
             context = browser.new_context()
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
-            page.goto(base_url, wait_until="domcontentloaded")
-            page.locator("#connection").filter(has_text="API connected").wait_for(timeout=10_000)
-            yield {
-                "page": page,
-                "base_url": base_url,
-                "db_path": db_path,
-                "workspace": tmp_path,
-                "context": context,
-            }
-
-            report = getattr(request.node, "rep_call", None)
-            artifact_dir = Path(os.getenv("AI_WORK_OS_E2E_ARTIFACTS", "artifacts/e2e"))
-            if report and report.failed:
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-                name = request.node.name.replace("/", "_")
-                page.screenshot(path=str(artifact_dir / f"{name}.png"), full_page=True)
-                context.tracing.stop(path=str(artifact_dir / f"{name}.zip"))
-            else:
-                context.tracing.stop()
-            context.close()
-            browser.close()
+            try:
+                page.goto(base_url, wait_until="domcontentloaded")
+                page.locator("#connection").filter(
+                    has_text="API connected"
+                ).wait_for(timeout=10_000)
+                yield {
+                    "page": page,
+                    "base_url": base_url,
+                    "db_path": db_path,
+                    "workspace": tmp_path,
+                    "context": context,
+                }
+            finally:
+                report = getattr(request.node, "rep_call", None)
+                artifact_dir = Path(os.getenv("AI_WORK_OS_E2E_ARTIFACTS", "artifacts/e2e"))
+                try:
+                    if report and report.failed:
+                        artifact_dir.mkdir(parents=True, exist_ok=True)
+                        name = request.node.name.replace("/", "_")
+                        page.screenshot(
+                            path=str(artifact_dir / f"{name}.png"), full_page=True
+                        )
+                        context.tracing.stop(path=str(artifact_dir / f"{name}.zip"))
+                    else:
+                        context.tracing.stop()
+                finally:
+                    context.close()
+                    browser.close()
     finally:
         server.terminate()
         try:

@@ -31,7 +31,7 @@ If browser system libraries are already installed, python -m playwright install 
     # Repeat the browser suite three times to check for timing flakes
     for attempt in 1 2 3; do
       echo "Dashboard E2E stability run $attempt/3"
-      pytest -q tests/e2e -m e2e || break
+      pytest -q tests/e2e -m e2e || exit 1
     done
 
 The E2E fixture allocates an available localhost port and tears down its API process and browser after each test. To keep failure evidence in a chosen directory:

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "httpx>=0.27"]
+e2e = ["playwright>=1.50,<2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -24,6 +25,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "e2e: real-browser Dashboard end-to-end tests (requires Playwright Chromium)",
+]
 
 [tool.setuptools.package-data]
 ai_work_os = ["web/*.html"]

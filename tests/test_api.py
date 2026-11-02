@@ -1861,7 +1861,7 @@ def test_workers_endpoint_reports_idle_offline_and_expired_lease(tmp_path):
     assert by_id[idle_id]["status"] == "idle"
     assert by_id[offline_id]["status"] == "offline"
     assert by_id[expired_id]["status"] == "lease_expired"
-    assert by_id["monitor-expired-worker"]["active_tasks"][0]["lease_expired"] is True
+    assert by_id[expired_id]["active_tasks"][0]["lease_expired"] is True
     assert payload["by_status"]["idle"] >= 1
     assert payload["by_status"]["offline"] >= 1
     assert payload["by_status"]["lease_expired"] >= 1

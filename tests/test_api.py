@@ -1875,7 +1875,8 @@ def test_worker_heartbeat_registers_process_and_tracks_active_tasks(tmp_path):
         "workspace_path": str(tmp_path),
     })
     task_id = created.json()["id"]
-    worker_id = "worker-heartbeat-api"
+    import uuid
+    worker_id = f"worker-heartbeat-{uuid.uuid4().hex[:8]}"
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         task.status = "running"

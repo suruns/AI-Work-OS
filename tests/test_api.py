@@ -1124,6 +1124,68 @@ def test_workflow_cancel_cancels_queued_tasks(tmp_path):
     assert all(task["status"] == "cancelled" for task in detail["tasks"])
 
 
+def test_workflow_cancel_requests_running_worker_shutdown_without_releasing_lease(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text("#!/bin/sh\nexec sleep 10\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/workflows", json=_workflow_payload(workspace))
+    assert created.status_code == 201
+    workflow_id = created.json()["id"]
+    task_id = next(item["task"]["id"] for item in created.json()["tasks"] if item["key"] == "prepare")
+
+    with SessionLocal() as db:
+        for other in db.query(Task).filter(Task.status == "queued").all():
+            if other.id != task_id:
+                other.status = "cancelled"
+                other.finished_at = utcnow()
+        db.commit()
+
+    worker_id = "workflow-cancel-worker"
+    assert worker.claim_task(worker_id) == task_id
+
+    async def execute_then_cancel_workflow():
+        execution = asyncio.create_task(worker.execute_task(task_id, worker_id))
+        for _ in range(100):
+            events = client.get(f"/tasks/{task_id}/events").json()
+            if any(event["event_type"] == "executor.started" for event in events):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("worker execution did not start")
+
+        cancelled = client.post(f"/workflows/{workflow_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+
+        # Cancellation is a request to the live owner, not permission to steal
+        # or clear its lease before the subprocess has actually stopped.
+        with SessionLocal() as db:
+            current = db.get(Task, task_id)
+            assert current.status == "running"
+            assert current.cancel_requested is True
+            assert current.worker_id == worker_id
+            assert current.lease_expires_at is not None
+
+        await asyncio.wait_for(execution, timeout=5)
+
+    asyncio.run(execute_then_cancel_workflow())
+
+    with SessionLocal() as db:
+        current = db.get(Task, task_id)
+        assert current.status == "cancelled"
+        assert current.worker_id is None
+        assert current.lease_expires_at is None
+    events = client.get(f"/tasks/{task_id}/events").json()
+    assert any(event["event_type"] == "task.cancellation_requested" for event in events)
+    assert events[-1]["event_type"] == "executor.finished"
+    assert events[-1]["payload"]["status"] == "cancelled"
+
+
 def test_multi_parent_workflow_waits_for_every_success_and_retry(tmp_path):
     payload = {
         "title": "Multi-parent workflow",

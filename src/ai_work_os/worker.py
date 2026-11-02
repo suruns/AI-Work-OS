@@ -1113,6 +1113,11 @@ async def run_worker() -> None:
             else:
                 await asyncio.sleep(POLL_SECONDS)
     finally:
+        # Stop in-flight executions before publishing the graceful offline state.
+        for job in active:
+            job.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
         mark_worker_offline(worker_id)
 
 

@@ -1896,4 +1896,7 @@ def test_worker_heartbeat_registers_process_and_tracks_active_tasks(tmp_path):
     worker.mark_worker_offline(worker_id)
     with SessionLocal() as db:
         assert db.get(Worker, worker_id).status == "offline"
+    listed = client.get("/workers").json()
+    current = next(item for item in listed["workers"] if item["worker_id"] == worker_id)
+    assert current["status"] == "offline"
 

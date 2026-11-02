@@ -68,7 +68,7 @@ def list_workers() -> dict:
                 })
             if expired_tasks:
                 display_status = "lease_expired"
-            elif age_seconds > offline_after:
+            elif record.status == "offline" or age_seconds > offline_after:
                 display_status = "offline"
             elif active_tasks:
                 display_status = "busy"

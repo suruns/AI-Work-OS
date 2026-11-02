@@ -1829,23 +1829,26 @@ def test_workers_endpoint_reports_idle_offline_and_expired_lease(tmp_path):
     from datetime import timedelta
     from ai_work_os.models import Worker
 
+    import uuid
+    prefix = f"monitor-{uuid.uuid4().hex[:8]}"
+    idle_id, offline_id, expired_id = (f"{prefix}-idle", f"{prefix}-offline", f"{prefix}-expired")
     now = utcnow()
     with SessionLocal() as db:
         db.add_all([
-            Worker(worker_id="monitor-idle-worker", hostname="host-a", pid=101,
+            Worker(worker_id=idle_id, hostname="host-a", pid=101,
                    started_at=now - timedelta(minutes=2), last_heartbeat_at=now,
                    status="idle", concurrency=2, active_task_count=0),
-            Worker(worker_id="monitor-offline-worker", hostname="host-b", pid=202,
+            Worker(worker_id=offline_id, hostname="host-b", pid=202,
                    started_at=now - timedelta(minutes=10),
                    last_heartbeat_at=now - timedelta(minutes=5),
                    status="busy", concurrency=1, active_task_count=1),
-            Worker(worker_id="monitor-expired-worker", hostname="host-c", pid=303,
+            Worker(worker_id=expired_id, hostname="host-c", pid=303,
                    started_at=now - timedelta(minutes=3), last_heartbeat_at=now,
                    status="busy", concurrency=1, active_task_count=1),
         ])
         db.add(Task(
             title="Expired worker task", prompt="test", workspace_path=str(tmp_path),
-            status="running", worker_id="monitor-expired-worker",
+            status="running", worker_id=expired_id,
             started_at=now - timedelta(minutes=1),
             lease_expires_at=now - timedelta(seconds=1),
         ))
@@ -1855,9 +1858,9 @@ def test_workers_endpoint_reports_idle_offline_and_expired_lease(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     by_id = {item["worker_id"]: item for item in payload["workers"]}
-    assert by_id["monitor-idle-worker"]["status"] == "idle"
-    assert by_id["monitor-offline-worker"]["status"] == "offline"
-    assert by_id["monitor-expired-worker"]["status"] == "lease_expired"
+    assert by_id[idle_id]["status"] == "idle"
+    assert by_id[offline_id]["status"] == "offline"
+    assert by_id[expired_id]["status"] == "lease_expired"
     assert by_id["monitor-expired-worker"]["active_tasks"][0]["lease_expired"] is True
     assert payload["by_status"]["idle"] >= 1
     assert payload["by_status"]["offline"] >= 1

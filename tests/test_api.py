@@ -1170,7 +1170,7 @@ def test_workflow_cancel_requests_running_worker_shutdown_without_releasing_leas
         with SessionLocal() as db:
             current = db.get(Task, task_id)
             assert current.status == "running"
-            assert current.cancel_requested is True
+            assert bool(current.cancel_requested)
             assert current.worker_id == worker_id
             assert current.lease_expires_at is not None
 

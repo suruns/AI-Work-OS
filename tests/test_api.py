@@ -1824,3 +1824,70 @@ def test_cancel_during_verification_terminates_command_and_records_results(tmp_p
     artifact = json.loads((tmp_path / "storage" / "tasks" / task_id / "verification.json").read_text())
     assert artifact["status"] == "cancelled"
     assert artifact["commands"][0]["cancelled"] is True
+
+def test_workers_endpoint_reports_idle_offline_and_expired_lease(tmp_path):
+    from datetime import timedelta
+    from ai_work_os.models import Worker
+
+    now = utcnow()
+    with SessionLocal() as db:
+        db.add_all([
+            Worker(worker_id="worker-idle", hostname="host-a", pid=101,
+                   started_at=now - timedelta(minutes=2), last_heartbeat_at=now,
+                   status="idle", concurrency=2, active_task_count=0),
+            Worker(worker_id="worker-offline", hostname="host-b", pid=202,
+                   started_at=now - timedelta(minutes=10),
+                   last_heartbeat_at=now - timedelta(minutes=5),
+                   status="busy", concurrency=1, active_task_count=1),
+            Worker(worker_id="worker-expired", hostname="host-c", pid=303,
+                   started_at=now - timedelta(minutes=3), last_heartbeat_at=now,
+                   status="busy", concurrency=1, active_task_count=1),
+        ])
+        db.add(Task(
+            title="Expired worker task", prompt="test", workspace_path=str(tmp_path),
+            status="running", worker_id="worker-expired",
+            started_at=now - timedelta(minutes=1),
+            lease_expires_at=now - timedelta(seconds=1),
+        ))
+        db.commit()
+
+    response = client.get("/workers")
+    assert response.status_code == 200
+    payload = response.json()
+    by_id = {item["worker_id"]: item for item in payload["workers"]}
+    assert by_id["worker-idle"]["status"] == "idle"
+    assert by_id["worker-offline"]["status"] == "offline"
+    assert by_id["worker-expired"]["status"] == "lease_expired"
+    assert by_id["worker-expired"]["active_tasks"][0]["lease_expired"] is True
+    assert payload["by_status"] == {"idle": 1, "busy": 0, "offline": 1, "lease_expired": 1}
+
+
+def test_worker_heartbeat_registers_process_and_tracks_active_tasks(tmp_path):
+    from ai_work_os.models import Worker
+
+    created = client.post("/tasks", json={
+        "title": "Worker monitor task", "prompt": "inspect",
+        "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    worker_id = "worker-heartbeat-api"
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.worker_id = worker_id
+        task.started_at = utcnow()
+        task.lease_expires_at = utcnow() + timedelta(minutes=1)
+        db.commit()
+
+    worker.heartbeat_worker(worker_id, 3)
+    with SessionLocal() as db:
+        record = db.get(Worker, worker_id)
+        assert record is not None
+        assert record.status == "busy"
+        assert record.active_task_count == 1
+        assert record.concurrency == 3
+
+    worker.mark_worker_offline(worker_id)
+    with SessionLocal() as db:
+        assert db.get(Worker, worker_id).status == "offline"
+

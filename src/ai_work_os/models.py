@@ -104,3 +104,15 @@ class WorkflowTaskDependency(Base):
     upstream_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
     downstream_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
     workflow: Mapped[Workflow] = relationship(back_populates="dependencies")
+
+class Worker(Base):
+    """Last-known liveness record for a long-running task worker process."""
+    __tablename__ = "workers"
+    worker_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="idle", nullable=False)
+    concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    active_task_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

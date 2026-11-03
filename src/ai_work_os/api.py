@@ -260,6 +260,12 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
     elif classification == "timeout":
         evidence = [e.id for e, p in zip(events, payloads)
                     if p.get("timed_out") is True or p.get("reason") == "timeout"
+                    or any(
+                        result.get("timed_out") is True
+                        for key in ("commands", "verification")
+                        for result in p.get(key, [])
+                        if isinstance(result, dict)
+                    )
                     or "timeout" in e.event_type]
         hypotheses.append({
             "message": "A recorded execution or verification step timed out.",

@@ -1944,4 +1944,3 @@ def test_workflow_events_are_merged_chronologically_and_filter_token_noise(tmp_p
     ).json()
     assert any(event["payload"].get("subtype") == "thinking_tokens" for event in all_events)
     assert client.get("/workflows/missing-workflow/events").status_code == 404
-

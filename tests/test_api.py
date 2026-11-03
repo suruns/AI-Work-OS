@@ -1899,3 +1899,49 @@ def test_worker_heartbeat_registers_process_and_tracks_active_tasks(tmp_path):
     listed = client.get("/workers").json()
     current = next(item for item in listed["workers"] if item["worker_id"] == worker_id)
     assert current["status"] == "offline"
+
+
+def test_workflow_events_are_merged_chronologically_and_filter_token_noise(tmp_path):
+    created = client.post("/workflows", json={
+        "title": "Execution trace fixture",
+        "tasks": [
+            {"key": "prepare", "title": "Prepare workspace", "prompt": "Inspect", "workspace_path": str(tmp_path)},
+            {"key": "verify", "title": "Verify result", "prompt": "Verify", "workspace_path": str(tmp_path),
+             "depends_on": ["prepare"]},
+        ],
+    })
+    assert created.status_code == 201
+    workflow_id = created.json()["id"]
+    task_ids = {item["key"]: item["task"]["id"] for item in created.json()["tasks"]}
+    base = utcnow()
+    with SessionLocal() as db:
+        db.add_all([
+            TaskEvent(task_id=task_ids["prepare"], occurred_at=base,
+                      event_type="executor.claimed", payload={"attempt": 1}),
+            TaskEvent(task_id=task_ids["verify"], occurred_at=base + timedelta(seconds=2),
+                      event_type="executor.finished", payload={"status": "failed", "error_summary": "verification failed"}),
+            TaskEvent(task_id=task_ids["verify"], occurred_at=base + timedelta(seconds=3),
+                      event_type="claude.system", payload={"subtype": "thinking_tokens", "estimated_tokens": 42}),
+        ])
+        db.commit()
+
+    response = client.get(f"/workflows/{workflow_id}/events")
+    assert response.status_code == 200
+    events = response.json()
+    assert [event["event_type"] for event in events] == [
+        "task.queued", "task.queued", "executor.claimed", "executor.finished",
+    ]
+    assert [event["occurred_at"] for event in events] == sorted(
+        event["occurred_at"] for event in events
+    )
+    failure = events[-1]
+    assert failure["task_id"] == task_ids["verify"]
+    assert failure["task_title"] == "Verify result"
+    assert failure["payload"]["error_summary"] == "verification failed"
+
+    all_events = client.get(
+        f"/workflows/{workflow_id}/events?include_thinking_tokens=true"
+    ).json()
+    assert any(event["payload"].get("subtype") == "thinking_tokens" for event in all_events)
+    assert client.get("/workflows/missing-workflow/events").status_code == 404
+

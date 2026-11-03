@@ -178,6 +178,159 @@ def get_task_events(
     visible.sort(key=lambda event: event.id if isinstance(event, TaskEvent) else event["id"])
     return visible
 
+
+
+def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
+    """Build a read-only, evidence-linked diagnosis from persisted task state."""
+    event_types = [event.event_type for event in events]
+    payloads = [event.payload or {} for event in events]
+    terminal_reasons = [p.get("terminal_reason") for p in payloads if p.get("terminal_reason")]
+    timed_out = any(
+        p.get("timed_out") is True or p.get("reason") == "timeout"
+        for p in payloads
+    ) or "timeout" in terminal_reasons or any("timeout" in name for name in event_types)
+    worker_lost = any(
+        name in {"worker.orphaned_task_recovered", "worker.lease_expired", "executor.lease_lost"}
+        for name in event_types
+    )
+    verification_failed = (
+        task.verification_status == "failed"
+        or "verification_failed" in terminal_reasons
+        or any(name == "verification.finished" and p.get("status") == "failed"
+               for name, p in zip(event_types, payloads))
+    )
+    blocked = task.status == "blocked" or bool(task.blocked_reason)
+    cancelled = task.status == "cancelled" or any(
+        name in {"task.cancelled", "task.cancellation_requested"} for name in event_types
+    )
+
+    if blocked:
+        classification, confidence = "dependency_blocked", "high"
+    elif worker_lost:
+        classification, confidence = "worker_lost", "high"
+    elif timed_out:
+        classification, confidence = "timeout", "high"
+    elif cancelled:
+        classification, confidence = "cancelled", "high"
+    elif verification_failed:
+        classification, confidence = "verification_failed", "high"
+    elif task.status == "failed":
+        classification, confidence = "execution_failed", "medium"
+    else:
+        classification, confidence = None, "unknown"
+
+    facts = [
+        {"key": "task_status", "value": task.status, "source": "tasks.status"},
+        {"key": "attempt_count", "value": task.attempt_count, "source": "tasks.attempt_count"},
+        {"key": "max_attempts", "value": task.max_attempts, "source": "tasks.max_attempts"},
+        {"key": "verification_status", "value": task.verification_status, "source": "tasks.verification_status"},
+        {"key": "exit_code", "value": task.exit_code, "source": "tasks.exit_code"},
+    ]
+    if task.error_summary:
+        facts.append({"key": "error_summary", "value": task.error_summary, "source": "tasks.error_summary"})
+    if task.blocked_reason:
+        facts.append({"key": "blocked_reason", "value": task.blocked_reason, "source": "tasks.blocked_reason"})
+
+    hypotheses = []
+    if classification == "verification_failed":
+        evidence = [e.id for e in events if e.event_type == "verification.finished"
+                    and (e.payload or {}).get("status") == "failed"]
+        hypotheses.append({
+            "message": "The agent execution reached verification, but one or more configured checks failed.",
+            "evidence_event_ids": evidence,
+            "recommendation": "Inspect the verification command result and decide whether the task requirements or implementation need correction.",
+        })
+    elif classification == "worker_lost":
+        evidence = [e.id for e in events if e.event_type == "worker.orphaned_task_recovered"]
+        hypotheses.append({
+            "message": "The worker owning this task was considered lost or its lease expired.",
+            "evidence_event_ids": evidence,
+            "recommendation": "Check worker process and host availability before manually deciding whether to run the task again.",
+        })
+    elif classification == "timeout":
+        evidence = [e.id for e, p in zip(events, payloads)
+                    if p.get("timed_out") is True or p.get("reason") == "timeout"
+                    or "timeout" in e.event_type]
+        hypotheses.append({
+            "message": "A recorded execution or verification step timed out.",
+            "evidence_event_ids": evidence,
+            "recommendation": "Review the timed-out step and its configured time limit; do not retry until repeating its side effects is safe.",
+        })
+    elif classification == "execution_failed":
+        evidence = [e.id for e in events if e.event_type == "executor.finished"]
+        hypotheses.append({
+            "message": "The task ended in a failed state. The available structured records do not identify a more specific failure category.",
+            "evidence_event_ids": evidence,
+            "recommendation": "Inspect the task error summary and relevant attempt artifacts to identify the failing command or agent response.",
+        })
+    elif classification == "dependency_blocked":
+        hypotheses.append({
+            "message": "The task was blocked by workflow dependency state.",
+            "evidence_event_ids": [e.id for e in events if e.event_type in {"workflow.task_blocked", "task.blocked"}],
+            "recommendation": "Inspect the upstream workflow tasks and their terminal states.",
+        })
+    elif classification == "cancelled":
+        hypotheses.append({
+            "message": "The task was cancelled or had cancellation requested.",
+            "evidence_event_ids": [e.id for e in events if e.event_type in {"task.cancelled", "task.cancellation_requested"}],
+            "recommendation": "Confirm why cancellation was requested before deciding whether to create a new task.",
+        })
+
+    phase_names = {
+        "task.queued": "queued", "executor.claimed": "claimed",
+        "executor.started": "executing", "claude.started": "agent_running",
+        "verification.started": "verifying", "verification.finished": "verification_finished",
+        "repair.started": "repairing", "executor.finished": "finished",
+        "task.cancelled": "cancelled", "worker.orphaned_task_recovered": "worker_recovery",
+    }
+    replay = [{
+        "event_id": event.id,
+        "occurred_at": event.occurred_at,
+        "event_type": event.event_type,
+        "phase": phase_names.get(event.event_type, "event"),
+        "payload": event.payload or {},
+        "evidence_type": "recorded_event",
+    } for event in events]
+
+    return {
+        "task": {
+            "id": task.id, "title": task.title, "status": task.status,
+            "prompt": task.prompt, "workspace_path": task.workspace_path,
+            "created_at": task.created_at, "started_at": task.started_at,
+            "finished_at": task.finished_at, "exit_code": task.exit_code,
+            "error_summary": task.error_summary,
+            "verification_status": task.verification_status,
+            "verification_commands": task.verification_commands,
+            "attempt_count": task.attempt_count, "max_attempts": task.max_attempts,
+        },
+        "classification": classification,
+        "confidence": confidence,
+        "facts": facts,
+        "hypotheses": hypotheses,
+        "replay": replay,
+        "event_count": len(events),
+        "limitations": [
+            "Replay contains persisted structured events only; missing events are not reconstructed.",
+            "Diagnostic explanations are evidence-based hypotheses, not proof of root cause.",
+            "Raw stdout/stderr contents are intentionally not included.",
+        ],
+    }
+
+
+@app.get("/tasks/{task_id}/diagnostics")
+def get_task_diagnostics(task_id: str) -> dict:
+    """Return a read-only failure analysis and chronological execution replay."""
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        events = list(db.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task_id)
+            .order_by(TaskEvent.occurred_at, TaskEvent.id)
+        ))
+        return _diagnose_task(task, events)
+
+
 @app.get("/tasks/{task_id}/workspace-changes")
 def get_workspace_changes(task_id: str) -> dict:
     with SessionLocal() as db:

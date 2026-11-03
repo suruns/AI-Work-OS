@@ -334,7 +334,7 @@ def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashb
     detail = page.locator("#workflow-detail")
     detail.get_by_text("Trace workflow").wait_for()
     detail.get_by_text("Needs attention").wait_for()
-    detail.locator(".event").filter(has_text="Needs attention").get_by_text("verification command failed").wait_for()
+    detail.get_by_text("Trace verify: verification command failed", exact=True).wait_for()
     timeline = detail.locator(".event-list")
     timeline.locator('[data-workflow-event-task="' + tasks["Trace prepare"] + '"]').first.wait_for()
     timeline.locator('[data-workflow-event-task="' + tasks["Trace verify"] + '"]').first.wait_for()

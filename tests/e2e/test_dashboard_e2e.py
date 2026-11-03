@@ -70,7 +70,7 @@ def dashboard(tmp_path: Path, request: pytest.FixtureRequest):
             browser: Browser = playwright_instance.chromium.launch(
                 headless=True, args=["--no-sandbox"]
             )
-            context = browser.new_context()
+            context = browser.new_context(timezone_id="Asia/Shanghai")
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             try:
@@ -283,7 +283,6 @@ def test_worker_monitor_renders_idle_and_expired_workers(dashboard):
         connection.commit()
 
     # A naive timestamp returned by SQLite/API represents UTC, not browser-local time.
-    page.emulate_timezone("Asia/Shanghai")
     expected_local_time = page.evaluate(
         "(value) => new Date(value + 'Z').toLocaleString()",
         now.removesuffix("+00:00"),

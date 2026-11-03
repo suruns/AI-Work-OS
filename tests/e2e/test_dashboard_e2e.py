@@ -294,3 +294,50 @@ def test_worker_monitor_renders_idle_and_expired_workers(dashboard):
     assert "idle" in idle_card.inner_text()
     assert "offline" in offline_card.inner_text()
     assert f"Last heartbeat: {expected_local_time}" in idle_card.inner_text()
+
+
+def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashboard):
+    page: Page = dashboard["page"]
+    workspace: Path = dashboard["workspace"]
+    workflow_id = create_workflow(page, workspace, "Trace workflow", [
+        ("Trace prepare", "Prepare fixture"),
+        ("Trace verify", "Verify fixture"),
+    ])
+    response = page.request.get(f'{dashboard["base_url"]}/workflows/{workflow_id}')
+    assert response.status == 200
+    tasks = {task["title"]: task["id"] for task in response.json()["tasks"]}
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(dashboard["db_path"]) as connection:
+        connection.execute(
+            "UPDATE tasks SET status = 'failed', finished_at = ?, error_summary = ? WHERE id = ?",
+            (now.isoformat(), "verification command failed", tasks["Trace verify"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, occurred_at, event_type, payload)
+            VALUES (?, ?, ?, ?)
+            """,
+            (tasks["Trace prepare"], (now - timedelta(seconds=2)).isoformat(),
+             "executor.claimed", '{"attempt": 1}'),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, occurred_at, event_type, payload)
+            VALUES (?, ?, ?, ?)
+            """,
+            (tasks["Trace verify"], now.isoformat(),
+             "executor.finished", '{"status":"failed","error_summary":"verification command failed"}'),
+        )
+        connection.commit()
+
+    page.locator(f'#workflows [data-workflow-id="{workflow_id}"]').click()
+    detail = page.locator("#workflow-detail")
+    detail.get_by_text("Trace workflow").wait_for()
+    detail.get_by_text("Needs attention").wait_for()
+    detail.get_by_text("Trace verify: verification command failed", exact=True).wait_for()
+    timeline = detail.locator(".event-list")
+    timeline.locator('[data-workflow-event-task="' + tasks["Trace prepare"] + '"]').first.wait_for()
+    timeline.locator('[data-workflow-event-task="' + tasks["Trace verify"] + '"]').first.wait_for()
+    timeline.locator('[data-workflow-event-task="' + tasks["Trace verify"] + '"]').first.click()
+    page.locator("#detail").get_by_text("Trace verify").wait_for()
+    page.locator("#detail .event").filter(has_text="verification command failed").first.wait_for()

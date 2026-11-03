@@ -628,6 +628,42 @@ def get_workflow(workflow_id: str) -> dict:
         }
 
 
+@app.get("/workflows/{workflow_id}/events")
+def get_workflow_events(
+    workflow_id: str,
+    include_thinking_tokens: bool = Query(default=False),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> list[dict]:
+    """Return one chronological execution stream across every task in a workflow."""
+    thinking_filter = (
+        (TaskEvent.event_type == "claude.system")
+        & (TaskEvent.payload["subtype"].as_string() == "thinking_tokens")
+    )
+    with SessionLocal() as db:
+        if db.get(Workflow, workflow_id) is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        query = (
+            select(TaskEvent, Task.title)
+            .join(Task, Task.id == TaskEvent.task_id)
+            .where(Task.workflow_id == workflow_id)
+            .order_by(TaskEvent.occurred_at, TaskEvent.id)
+        )
+        if not include_thinking_tokens:
+            query = query.where(~thinking_filter)
+        rows = db.execute(query.limit(limit)).all()
+        return [
+            {
+                "id": event.id,
+                "task_id": event.task_id,
+                "task_title": task_title,
+                "occurred_at": event.occurred_at,
+                "event_type": event.event_type,
+                "payload": event.payload,
+            }
+            for event, task_title in rows
+        ]
+
+
 @app.post("/workflows/{workflow_id}/cancel")
 def cancel_workflow(workflow_id: str) -> dict:
     with SessionLocal() as db:

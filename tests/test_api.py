@@ -1944,3 +1944,106 @@ def test_workflow_events_are_merged_chronologically_and_filter_token_noise(tmp_p
     ).json()
     assert any(event["payload"].get("subtype") == "thinking_tokens" for event in all_events)
     assert client.get("/workflows/missing-workflow/events").status_code == 404
+
+
+def test_task_diagnostics_classifies_verification_failure_and_replays_events(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Diagnose verification failure",
+        "prompt": "Implement then verify",
+        "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest -q"],
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    base = utcnow()
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        task.verification_status = "failed"
+        task.exit_code = 1
+        task.error_summary = "Verification failed for command: python -m pytest -q"
+        db.add_all([
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=2),
+                      event_type="verification.finished",
+                      payload={"status": "failed", "commands": [{"exit_code": 1}]}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=1),
+                      event_type="executor.claimed", payload={"attempt": 1}),
+        ])
+        db.commit()
+
+    response = client.get(f"/tasks/{task_id}/diagnostics")
+    assert response.status_code == 200
+    report = response.json()
+    assert report["classification"] == "verification_failed"
+    assert report["confidence"] == "high"
+    assert report["task"]["prompt"] == "Implement then verify"
+    assert report["event_count"] >= 3
+    assert [item["occurred_at"] for item in report["replay"]] == sorted(
+        item["occurred_at"] for item in report["replay"]
+    )
+    assert all(item["evidence_type"] == "recorded_event" for item in report["replay"])
+    assert report["hypotheses"][0]["evidence_event_ids"]
+    assert "not proof of root cause" in report["limitations"][1]
+
+
+def test_task_diagnostics_classifies_worker_loss_and_unknown_without_inference(tmp_path):
+    worker_task = client.post("/tasks", json={
+        "title": "Worker loss fixture", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    unknown_task = client.post("/tasks", json={
+        "title": "Successful fixture", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    with SessionLocal() as db:
+        lost = db.get(Task, worker_task)
+        lost.status = "failed"
+        lost.error_summary = "Worker lease expired"
+        db.add(TaskEvent(task_id=worker_task, event_type="worker.orphaned_task_recovered",
+                         payload={"automatic_retry": False}))
+        db.get(Task, unknown_task).status = "succeeded"
+        db.commit()
+
+    lost_report = client.get(f"/tasks/{worker_task}/diagnostics").json()
+    unknown_report = client.get(f"/tasks/{unknown_task}/diagnostics").json()
+    assert lost_report["classification"] == "worker_lost"
+    assert lost_report["confidence"] == "high"
+    assert unknown_report["classification"] is None
+    assert unknown_report["confidence"] == "unknown"
+    assert unknown_report["hypotheses"] == []
+
+
+def test_task_diagnostics_returns_404_for_missing_task():
+    assert client.get("/tasks/missing-task/diagnostics").status_code == 404
+
+
+def test_dashboard_exposes_failure_analysis_and_execution_replay_entry_points():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert '"/tasks/"+encodeURIComponent(id)+"/diagnostics"' in response.text
+    assert "Failure analysis" in response.text
+    assert "Execution replay" in response.text
+
+
+def test_task_diagnostics_prioritizes_nested_verification_timeout(tmp_path):
+    task_id = client.post("/tasks", json={
+        "title": "Verification timeout fixture",
+        "prompt": "Run checks",
+        "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest"],
+    }).json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        task.verification_status = "failed"
+        db.add(TaskEvent(
+            task_id=task_id,
+            event_type="verification.finished",
+            payload={"status": "failed", "commands": [
+                {"command": "python -m pytest", "exit_code": -15, "timed_out": True}
+            ]},
+        ))
+        db.commit()
+
+    report = client.get(f"/tasks/{task_id}/diagnostics").json()
+    assert report["classification"] == "timeout"
+    assert report["confidence"] == "high"
+    assert report["hypotheses"][0]["evidence_event_ids"]

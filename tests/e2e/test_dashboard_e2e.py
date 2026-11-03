@@ -282,9 +282,16 @@ def test_worker_monitor_renders_idle_and_expired_workers(dashboard):
         )
         connection.commit()
 
+    # A naive timestamp returned by SQLite/API represents UTC, not browser-local time.
+    page.emulate_timezone("Asia/Shanghai")
+    expected_local_time = page.evaluate(
+        "(value) => new Date(value + 'Z').toLocaleString()",
+        now.removesuffix("+00:00"),
+    )
     page.locator("#refresh").click()
     page.locator("#workers .worker-card").filter(has_text="e2e-host").wait_for()
     idle_card = page.locator("#workers .worker-card").filter(has_text="e2e-idle-worker")
     offline_card = page.locator("#workers .worker-card").filter(has_text="e2e-offline-worker")
     assert "idle" in idle_card.inner_text()
     assert "offline" in offline_card.inner_text()
+    assert f"Last heartbeat: {expected_local_time}" in idle_card.inner_text()

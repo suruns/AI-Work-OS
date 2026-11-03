@@ -1899,4 +1899,3 @@ def test_worker_heartbeat_registers_process_and_tracks_active_tasks(tmp_path):
     listed = client.get("/workers").json()
     current = next(item for item in listed["workers"] if item["worker_id"] == worker_id)
     assert current["status"] == "offline"
-

@@ -45,7 +45,7 @@
 <script>
 const $=id=>document.getElementById(id);let selected=null;let tasks=[];let selectedWorkflow=null;let workflowDetailToken=0;
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const date=s=>s?new Date(s).toLocaleString():"—";
+const date=s=>{if(!s)return "—";const value=typeof s==="string"&&!/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(s)?s.replace(" ","T")+"Z":s;return new Date(value).toLocaleString()};
 function duration(ms){if(ms==null)return "—";if(ms<60000)return (ms/1000).toFixed(1)+" s";return Math.floor(ms/60000)+"m "+Math.floor((ms%60000)/1000)+"s"}
 function aggregateEvents(events){
  const visible=[],thinking=[];

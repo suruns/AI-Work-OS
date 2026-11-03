@@ -1122,4 +1122,8 @@ async def run_worker() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run_worker())
+    try:
+        asyncio.run(run_worker())
+    except KeyboardInterrupt:
+        # SIGINT is an expected graceful shutdown path, not a worker failure.
+        pass

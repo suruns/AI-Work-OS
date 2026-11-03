@@ -118,10 +118,23 @@ function renderWorkflows(items){
 async function loadWorkflowDetail(id){
  selectedWorkflow=id;const token=++workflowDetailToken;
  try{
-  const w=await api("/workflows/"+encodeURIComponent(id)),tasks=w.tasks||[],edges=w.dependencies||[];
+  const [w,events]=await Promise.all([
+   api("/workflows/"+encodeURIComponent(id)),
+   api("/workflows/"+encodeURIComponent(id)+"/events?limit=200")
+  ]);
+  const tasks=w.tasks||[],edges=w.dependencies||[];
   if(token!==workflowDetailToken||selectedWorkflow!==id)return;
   const incoming={};for(const edge of edges)(incoming[edge.downstream_task_id]??=[]).push(edge.upstream_task_id);
-  $("workflow-detail").innerHTML='<div class="event"><div class="task-head"><strong>'+esc(w.title)+'</strong>'+pill(w.status)+'</div><div class="meta">Workflow '+esc(w.id)+' · '+esc(Object.entries(w.counts||{}).map(([k,v])=>k+": "+v).join(" · "))+'</div>'+tasks.map(t=>'<div class="artifact-row" style="margin-top:8px"><span><strong>'+esc(t.title)+'</strong><div class="muted small">'+esc(t.status)+' · prerequisites: '+esc((incoming[t.id]||[]).length)+'</div>'+(t.blocked_reason?'<div class="small" style="color:var(--red)">'+esc(t.blocked_reason)+'</div>':'')+'</span></div>').join("")+(['queued','running'].includes(w.status)?'<button id="cancel-workflow" style="margin-top:10px;background:#492632;border-color:#784052">Cancel workflow</button>':'')+'</div>';
+  const attention=tasks.filter(t=>["failed","blocked"].includes(t.status));
+  const diagnostics=attention.length?'<div class="event" style="margin-top:10px;border-color:#784052"><strong style="color:var(--red)">Needs attention · '+attention.length+' task(s)</strong>'+attention.map(t=>'<div class="meta">'+esc(t.title)+': '+esc(t.error_summary||t.blocked_reason||t.status)+'</div>').join("")+'</div>':'';
+  const timeline=events.length?events.map(e=>{
+   const p=e.payload||{},parts=[];
+   for(const key of ["status","attempt","max_attempts","exit_code","terminal_reason","verification_status","error_summary","reason","subtype"])
+    if(p[key]!==undefined&&p[key]!==null&&p[key]!=="")parts.push(key.replaceAll("_"," ")+": "+p[key]);
+   return '<div class="event"><div class="task-head"><button type="button" class="file-path" data-workflow-event-task="'+esc(e.task_id)+'">'+esc(e.task_title)+'</button><span class="muted small">'+esc(date(e.occurred_at))+'</span></div><div class="event-name">'+esc(e.event_type)+'</div>'+(parts.length?'<div class="meta">'+esc(parts.join(" · "))+'</div>':'')+'</div>';
+  }).join(""):'<div class="empty">No execution events yet.</div>';
+  $("workflow-detail").innerHTML='<div class="event"><div class="task-head"><strong>'+esc(w.title)+'</strong>'+pill(w.status)+'</div><div class="meta">Workflow '+esc(w.id)+' · '+esc(Object.entries(w.counts||{}).map(([k,v])=>k+": "+v).join(" · "))+'</div>'+diagnostics+'<h2 style="margin:16px 0 8px">Workflow steps</h2>'+tasks.map(t=>'<div class="artifact-row" style="margin-top:8px"><span><strong>'+esc(t.title)+'</strong><div class="muted small">'+esc(t.status)+' · prerequisites: '+esc((incoming[t.id]||[]).length)+'</div>'+(t.blocked_reason?'<div class="small" style="color:var(--red)">'+esc(t.blocked_reason)+'</div>':'')+'</span><button type="button" class="refresh" data-workflow-event-task="'+esc(t.id)+'">Inspect task</button></div>').join("")+(['queued','running'].includes(w.status)?'<button id="cancel-workflow" style="margin-top:10px;background:#492632;border-color:#784052">Cancel workflow</button>':'')+'<h2 style="margin:18px 0 8px">Execution timeline</h2><div class="event-list">'+timeline+'</div></div>';
+  document.querySelectorAll("#workflow-detail [data-workflow-event-task]").forEach(button=>button.addEventListener("click",()=>{selected=button.dataset.workflowEventTask;renderTasks();loadDetail(selected)}));
   if($("cancel-workflow"))$("cancel-workflow").addEventListener("click",async()=>{await api("/workflows/"+encodeURIComponent(id)+"/cancel",{method:"POST"});await refresh();if(selectedWorkflow===id)await loadWorkflowDetail(id)});
  }catch(e){if(token===workflowDetailToken&&selectedWorkflow===id)$("workflow-detail").innerHTML='<div class="event">'+esc(e.message)+'</div>'}
 }

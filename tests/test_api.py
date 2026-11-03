@@ -2021,3 +2021,29 @@ def test_dashboard_exposes_failure_analysis_and_execution_replay_entry_points():
     assert '"/tasks/"+encodeURIComponent(id)+"/diagnostics"' in response.text
     assert "Failure analysis" in response.text
     assert "Execution replay" in response.text
+
+
+def test_task_diagnostics_prioritizes_nested_verification_timeout(tmp_path):
+    task_id = client.post("/tasks", json={
+        "title": "Verification timeout fixture",
+        "prompt": "Run checks",
+        "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest"],
+    }).json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        task.verification_status = "failed"
+        db.add(TaskEvent(
+            task_id=task_id,
+            event_type="verification.finished",
+            payload={"status": "failed", "commands": [
+                {"command": "python -m pytest", "exit_code": -15, "timed_out": True}
+            ]},
+        ))
+        db.commit()
+
+    report = client.get(f"/tasks/{task_id}/diagnostics").json()
+    assert report["classification"] == "timeout"
+    assert report["confidence"] == "high"
+    assert report["hypotheses"][0]["evidence_event_ids"]

@@ -106,7 +106,7 @@ def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> di
         end_to_end_samples = [
             value for task in tasks
             if task.finished_at is not None
-            and (value := elapsed_ms(task.created_at, task.finished_at)) is not None
+            and (value := _duration_sample(task.created_at, task.finished_at)) is not None
         ]
         terminal = [task for task in tasks if task.status in {"succeeded", "failed", "cancelled", "blocked"}]
         successful = sum(task.status == "succeeded" for task in terminal)

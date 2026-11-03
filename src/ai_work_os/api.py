@@ -186,11 +186,21 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
     payloads = [event.payload or {} for event in events]
     terminal_reasons = [p.get("terminal_reason") for p in payloads if p.get("terminal_reason")]
     timed_out = any(
-        p.get("timed_out") is True or p.get("reason") == "timeout"
+        p.get("timed_out") is True
+        or p.get("reason") == "timeout"
+        or any(
+            result.get("timed_out") is True
+            for key in ("commands", "verification")
+            for result in p.get(key, [])
+            if isinstance(result, dict)
+        )
         for p in payloads
     ) or "timeout" in terminal_reasons or any("timeout" in name for name in event_types)
     worker_lost = any(
-        name in {"worker.orphaned_task_recovered", "worker.lease_expired", "executor.lease_lost"}
+        name in {
+            "worker.orphaned_task_recovered", "worker.lease_expired",
+            "executor.lease_lost", "executor.interrupted",
+        }
         for name in event_types
     )
     verification_failed = (
@@ -241,7 +251,7 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
             "recommendation": "Inspect the verification command result and decide whether the task requirements or implementation need correction.",
         })
     elif classification == "worker_lost":
-        evidence = [e.id for e in events if e.event_type == "worker.orphaned_task_recovered"]
+        evidence = [e.id for e in events if e.event_type in {"worker.orphaned_task_recovered", "worker.lease_expired", "executor.lease_lost", "executor.interrupted"}]
         hypotheses.append({
             "message": "The worker owning this task was considered lost or its lease expired.",
             "evidence_event_ids": evidence,

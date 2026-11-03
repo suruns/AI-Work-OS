@@ -35,8 +35,14 @@ def task_stats() -> dict:
 def _duration_sample(start, end) -> int | None:
     if start is None or end is None:
         return None
-    from .models import elapsed_ms
-    return elapsed_ms(start, end)
+    from datetime import timezone
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if end < start:
+        return None
+    return int((end - start).total_seconds() * 1000)
 
 
 def _token_counts(value: object) -> dict[str, int]:
@@ -69,8 +75,6 @@ def _token_counts(value: object) -> dict[str, int]:
 def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> dict:
     """Aggregate persisted task/workflow timings and Claude-reported usage; never estimate cost."""
     from datetime import timedelta
-    from .models import elapsed_ms
-
     now = utcnow()
     since = now - timedelta(days=period_days)
     with SessionLocal() as db:
@@ -97,7 +101,7 @@ def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> di
         execution_samples = [
             value for task in tasks
             if task.started_at is not None and task.finished_at is not None
-            and (value := elapsed_ms(task.started_at, task.finished_at)) is not None
+            and (value := _duration_sample(task.started_at, task.finished_at)) is not None
         ]
         end_to_end_samples = [
             value for task in tasks
@@ -110,21 +114,22 @@ def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> di
         workflow_durations = [
             value for workflow in workflows
             if workflow.started_at is not None and workflow.finished_at is not None
-            and (value := elapsed_ms(workflow.started_at, workflow.finished_at)) is not None
+            and (value := _duration_sample(workflow.started_at, workflow.finished_at)) is not None
         ]
         workflow_end_to_end = [
             value for workflow in workflows
             if workflow.finished_at is not None
-            and (value := elapsed_ms(workflow.created_at, workflow.finished_at)) is not None
+            and (value := _duration_sample(workflow.created_at, workflow.finished_at)) is not None
         ]
         workflow_task_durations = [
-            elapsed_ms(task.started_at, task.finished_at)
+            _duration_sample(task.started_at, task.finished_at)
             for task in tasks if task.workflow_id and task.started_at and task.finished_at
         ]
         workflow_task_durations = [value for value in workflow_task_durations if value is not None]
 
         cost_total = 0.0
         cost_events = 0
+        usage_events = 0
         token_totals = {
             "input_tokens": 0, "output_tokens": 0,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
@@ -141,6 +146,7 @@ def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> di
             usage = payload.get("usage")
             extracted = _token_counts(usage)
             if extracted:
+                usage_events += 1
                 usage_tasks.add(event.task_id)
                 for key, value in extracted.items():
                     token_totals[key] += value
@@ -192,7 +198,7 @@ def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> di
                 "tasks_with_reported_cost": len(cost_tasks),
                 "token_totals": token_totals,
                 "tasks_with_reported_usage": len(usage_tasks),
-                "usage_result_events": len(usage_tasks),
+                "usage_result_events": usage_events,
                 "availability": "reported" if cost_events or usage_tasks else "not_collected",
                 "note": "Only values emitted in persisted Claude Code result events are included. Missing values are not estimated; no model-price conversion is applied.",
             },

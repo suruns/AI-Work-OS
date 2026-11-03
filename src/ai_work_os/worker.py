@@ -6,11 +6,53 @@ import os
 import signal
 import shutil
 import shlex
+import socket
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, elapsed_ms
+from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
+
+def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
+    """Persist process liveness; active task ownership remains authoritative on Task rows."""
+    timestamp = now()
+    with SessionLocal() as db:
+        active_count = db.scalar(
+            select(__import__("sqlalchemy").func.count(Task.id)).where(
+                Task.worker_id == worker_id, Task.status == "running"
+            )
+        ) or 0
+        record = db.get(Worker, worker_id)
+        if record is None:
+            record = Worker(
+                worker_id=worker_id, hostname=socket.gethostname(), pid=os.getpid(),
+                started_at=timestamp, last_heartbeat_at=timestamp,
+            )
+            db.add(record)
+        record.hostname = socket.gethostname()
+        record.pid = os.getpid()
+        record.last_heartbeat_at = timestamp
+        record.status = "busy" if active_count else "idle"
+        record.active_task_count = int(active_count)
+        if concurrency is not None:
+            record.concurrency = concurrency
+        db.commit()
+
+
+def mark_worker_offline(worker_id: str) -> None:
+    """Record graceful shutdown; crashed processes are detected by heartbeat expiry."""
+    with SessionLocal() as db:
+        record = db.get(Worker, worker_id)
+        if record is not None:
+            record.status = "offline"
+            record.active_task_count = int(db.scalar(
+                select(__import__("sqlalchemy").func.count(Task.id)).where(
+                    Task.worker_id == worker_id, Task.status == "running"
+                )
+            ) or 0)
+            db.commit()
+
+
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -289,6 +331,8 @@ def reconcile_workflows() -> None:
 
 
 def claim_task(worker_id: str = "legacy-worker") -> str | None:
+    if worker_id != "legacy-worker":
+        heartbeat_worker(worker_id, MAX_CONCURRENT_TASKS)
     reconcile_workflows()
     with SessionLocal() as db:
         # SQLite's deferred transactions can let two workers read the same queued
@@ -360,6 +404,8 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             },
         ))
         db.commit()
+        if worker_id != "legacy-worker":
+            heartbeat_worker(worker_id, MAX_CONCURRENT_TASKS)
         return task_id
 
 
@@ -970,6 +1016,7 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
             db.commit()
         if result.rowcount != 1:
             raise RuntimeError(f"Worker lease lost for task {task_id}")
+        heartbeat_worker(worker_id, MAX_CONCURRENT_TASKS)
 
 
 async def execute_task(task_id: str, worker_id: str | None = None) -> None:
@@ -1045,6 +1092,7 @@ async def run_worker() -> None:
     worker_id = str(__import__("uuid").uuid4())
     recovered = recover_orphaned_running_tasks()
     reconcile_workflows()
+    heartbeat_worker(worker_id, MAX_CONCURRENT_TASKS)
     print(
         f"AI Work OS worker started; id={worker_id}; concurrency={MAX_CONCURRENT_TASKS}; "
         f"lease_seconds={WORKER_LEASE_SECONDS}; heartbeat_seconds={WORKER_HEARTBEAT_SECONDS}; "
@@ -1052,18 +1100,30 @@ async def run_worker() -> None:
         flush=True,
     )
     active: set[asyncio.Task] = set()
-    while True:
-        active = {job for job in active if not job.done()}
-        while len(active) < MAX_CONCURRENT_TASKS:
-            task_id = claim_task(worker_id)
-            if task_id is None:
-                break
-            active.add(asyncio.create_task(execute_task(task_id, worker_id)))
+    try:
+        while True:
+            active = {job for job in active if not job.done()}
+            while len(active) < MAX_CONCURRENT_TASKS:
+                task_id = claim_task(worker_id)
+                if task_id is None:
+                    break
+                active.add(asyncio.create_task(execute_task(task_id, worker_id)))
+            if active:
+                await asyncio.wait(active, timeout=POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.sleep(POLL_SECONDS)
+    finally:
+        # Stop in-flight executions before publishing the graceful offline state.
+        for job in active:
+            job.cancel()
         if active:
-            await asyncio.wait(active, timeout=POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
-        else:
-            await asyncio.sleep(POLL_SECONDS)
+            await asyncio.gather(*active, return_exceptions=True)
+        mark_worker_offline(worker_id)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_worker())
+    try:
+        asyncio.run(run_worker())
+    except KeyboardInterrupt:
+        # SIGINT is an expected graceful shutdown path, not a worker failure.
+        pass

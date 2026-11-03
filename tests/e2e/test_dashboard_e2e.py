@@ -70,7 +70,7 @@ def dashboard(tmp_path: Path, request: pytest.FixtureRequest):
             browser: Browser = playwright_instance.chromium.launch(
                 headless=True, args=["--no-sandbox"]
             )
-            context = browser.new_context()
+            context = browser.new_context(timezone_id="Asia/Shanghai")
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             try:
@@ -255,3 +255,42 @@ def test_workflow_cancel_handles_queued_and_running_members_from_dashboard(dashb
     assert members["Running member"]["status"] == "running"
     assert members["Running member"]["cancel_requested"] == 1
     assert members["Queued member"]["status"] == "cancelled"
+
+
+def test_worker_monitor_renders_idle_and_expired_workers(dashboard):
+    page: Page = dashboard["page"]
+    now = datetime.now(timezone.utc).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    with sqlite3.connect(dashboard["db_path"]) as connection:
+        connection.execute(
+            """
+            INSERT INTO workers (
+                worker_id, hostname, pid, started_at, last_heartbeat_at,
+                status, concurrency, active_task_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("e2e-idle-worker", "e2e-host", 4242, now, now, "idle", 2, 0),
+        )
+        connection.execute(
+            """
+            INSERT INTO workers (
+                worker_id, hostname, pid, started_at, last_heartbeat_at,
+                status, concurrency, active_task_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("e2e-offline-worker", "offline-host", 4343, old, old, "busy", 1, 0),
+        )
+        connection.commit()
+
+    # A naive timestamp returned by SQLite/API represents UTC, not browser-local time.
+    expected_local_time = page.evaluate(
+        "(value) => new Date(value + 'Z').toLocaleString()",
+        now.removesuffix("+00:00"),
+    )
+    page.locator("#refresh").click()
+    page.locator("#workers .worker-card").filter(has_text="e2e-host").wait_for()
+    idle_card = page.locator("#workers .worker-card").filter(has_text="e2e-idle-worker")
+    offline_card = page.locator("#workers .worker-card").filter(has_text="e2e-offline-worker")
+    assert "idle" in idle_card.inner_text()
+    assert "offline" in offline_card.inner_text()
+    assert f"Last heartbeat: {expected_local_time}" in idle_card.inner_text()

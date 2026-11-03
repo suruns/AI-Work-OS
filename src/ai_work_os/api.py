@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow
+from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
 from .schemas import TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
 Base.metadata.create_all(bind=engine)
@@ -30,6 +30,60 @@ def task_stats() -> dict:
         rows = db.execute(select(Task.status, __import__("sqlalchemy").func.count()).group_by(Task.status)).all()
         counts = {status: count for status, count in rows}
         return {"total": sum(counts.values()), "by_status": counts}
+
+
+
+@app.get("/workers")
+def list_workers() -> dict:
+    """Return registered workers with liveness and task-lease diagnostics."""
+    now = utcnow()
+    heartbeat_interval = max(5, int(os.getenv("AI_WORK_OS_WORKER_HEARTBEAT_SECONDS", "10")))
+    offline_after = max(15, int(os.getenv(
+        "AI_WORK_OS_WORKER_OFFLINE_AFTER_SECONDS", str(heartbeat_interval * 3)
+    )))
+    with SessionLocal() as db:
+        records = list(db.scalars(select(Worker).order_by(Worker.last_heartbeat_at.desc())))
+        items = []
+        for record in records:
+            last_seen = record.last_heartbeat_at
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=now.tzinfo)
+            age_seconds = max(0, int((now - last_seen).total_seconds()))
+            active_tasks = list(db.scalars(
+                select(Task).where(Task.worker_id == record.worker_id, Task.status == "running")
+                .order_by(Task.started_at, Task.id)
+            ))
+            task_items, expired_tasks = [], []
+            for task in active_tasks:
+                lease = task.lease_expires_at
+                if lease is not None and lease.tzinfo is None:
+                    lease = lease.replace(tzinfo=now.tzinfo)
+                lease_expired = lease is not None and lease <= now
+                if lease_expired:
+                    expired_tasks.append(task.id)
+                task_items.append({
+                    "id": task.id, "title": task.title, "status": task.status,
+                    "started_at": task.started_at, "lease_expires_at": task.lease_expires_at,
+                    "lease_expired": lease_expired,
+                })
+            if expired_tasks:
+                display_status = "lease_expired"
+            elif record.status == "offline" or age_seconds > offline_after:
+                display_status = "offline"
+            elif active_tasks:
+                display_status = "busy"
+            else:
+                display_status = "idle"
+            items.append({
+                "worker_id": record.worker_id, "hostname": record.hostname, "pid": record.pid,
+                "started_at": record.started_at, "last_heartbeat_at": record.last_heartbeat_at,
+                "heartbeat_age_seconds": age_seconds, "status": display_status,
+                "reported_status": record.status, "concurrency": record.concurrency,
+                "active_task_count": len(active_tasks), "active_tasks": task_items,
+            })
+        counts = {status: sum(1 for item in items if item["status"] == status)
+                  for status in ("idle", "busy", "offline", "lease_expired")}
+        return {"total": len(items), "by_status": counts, "workers": items}
 
 
 @app.get("/health")

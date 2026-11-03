@@ -45,6 +45,7 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - `GET /` — task console
 - `GET /health`
 - `GET /stats`
+- `GET /insights?period_days=30` — read-only task/workflow timing, success, throughput, reported Claude usage/cost, and current worker snapshot
 - `POST /tasks`
 - `GET /tasks`
 - `GET /tasks/{task_id}`
@@ -97,3 +98,10 @@ curl -X POST http://127.0.0.1:8000/workflows \
 A workflow task is claimable only after every direct prerequisite has succeeded and its own retry backoff has expired. A prerequisite waiting for retry remains non-terminal and does not release dependents. When a prerequisite fails, is cancelled, or is blocked, queued descendants become `blocked` with a recorded reason. Cancelling one member only blocks its own descendants; independent branches keep running. Workflow status is aggregated from member task states: it stays `queued`/`running` while any member is still queued or running, becomes `succeeded` only when every member succeeded, becomes `failed` when a member failed or a descendant was blocked by a failed ancestor, and becomes `cancelled` when members were cancelled (or blocked by a cancelled ancestor) and none failed. Explicitly cancelled workflows are terminal; reconciliation never reopens them. Dependencies are immutable after creation; create a new workflow to change the DAG. Existing `POST /tasks` remains available for standalone tasks.
 
 The dashboard supports creating workflows with prerequisite selection, inspecting member task states and blocked reasons, and cancelling a workflow. Workflow tasks continue to use the existing Claude permission mode, verification, retry, and opt-in repair behavior. Workflow orchestration is not an OS sandbox; use trusted workspaces and trusted verification commands.
+
+
+## Execution insights
+
+Phase 6.5 adds a Dashboard summary and `GET /insights?period_days=30`. It reports queue wait, execution and end-to-end durations, task/workflow success rates, workflow wall-clock time, cumulative member-task execution time, and completed-task throughput. Workflow wall-clock time is kept separate from the sum of parallel task durations.
+
+Claude usage and cost are shown only when present in persisted Claude Code `result` events. Missing usage is reported as not collected; token counts are not converted into estimated dollar costs. Worker utilization is not historically available because only the latest heartbeat is retained, so the Dashboard labels worker data as a current snapshot. See [Phase 6.5 design notes](docs/phase-6-5-execution-insights.md) for metric definitions and coverage limitations.

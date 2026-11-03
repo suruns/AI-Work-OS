@@ -2047,3 +2047,85 @@ def test_task_diagnostics_prioritizes_nested_verification_timeout(tmp_path):
     assert report["classification"] == "timeout"
     assert report["confidence"] == "high"
     assert report["hypotheses"][0]["evidence_event_ids"]
+
+
+def test_execution_insights_aggregate_durations_and_reported_claude_usage(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Insights measured task",
+        "prompt": "fixture",
+        "workspace_path": str(tmp_path),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    now = utcnow()
+    started = now - timedelta(minutes=3)
+    finished = now - timedelta(minutes=1)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "succeeded"
+        task.created_at = now - timedelta(minutes=5)
+        task.started_at = started
+        task.finished_at = finished
+        workflow = Workflow(
+            title="Insights workflow", status="succeeded",
+            created_at=now - timedelta(minutes=6),
+            started_at=now - timedelta(minutes=4),
+            finished_at=finished,
+        )
+        db.add(workflow)
+        db.flush()
+        task.workflow_id = workflow.id
+        db.add(TaskEvent(task_id=task_id, event_type="claude.result", occurred_at=finished, payload={
+            "total_cost_usd": 0.012345,
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 10,
+            },
+        }))
+        db.commit()
+
+    response = client.get("/insights?period_days=30")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tasks"]["total"] >= 1
+    assert data["tasks"]["by_status"]["succeeded"] >= 1
+    assert data["tasks"]["queue_wait_ms"]["samples"] >= 1
+    assert data["tasks"]["execution_ms"]["samples"] >= 1
+    assert data["tasks"]["end_to_end_ms"]["samples"] >= 1
+    assert data["workflows"]["wall_clock_ms"]["samples"] >= 1
+    assert data["workflows"]["cumulative_task_execution_ms"] >= 120000
+    assert data["usage"]["cost_usd"] >= 0.012345
+    assert data["usage"]["token_totals"]["input_tokens"] >= 120
+    assert data["usage"]["token_totals"]["output_tokens"] >= 45
+    assert data["usage"]["availability"] == "reported"
+    assert data["workers"]["historical_utilization_available"] is False
+
+
+def test_execution_insights_never_estimate_missing_cost_or_usage(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "No usage metadata task",
+        "prompt": "fixture",
+        "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        # This module uses a shared test database. Move every prior fixture
+        # outside the selected window so earlier usage events cannot affect
+        # the assertion that an empty window reports no collected usage.
+        cutoff = utcnow() - timedelta(days=8)
+        for existing in db.query(Task).all():
+            existing.created_at = cutoff
+        db.add(TaskEvent(task_id=task_id, event_type="claude.result", payload={
+            "result": "completed without usage metadata",
+        }))
+        db.commit()
+
+    response = client.get("/insights?period_days=7")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["usage"]["cost_usd"] is None
+    assert data["usage"]["tasks_with_reported_cost"] == 0
+    assert data["usage"]["tasks_with_reported_usage"] == 0
+    assert data["usage"]["availability"] == "not_collected"

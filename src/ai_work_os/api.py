@@ -27,9 +27,189 @@ def dashboard():
 @app.get("/stats")
 def task_stats() -> dict:
     with SessionLocal() as db:
-        rows = db.execute(select(Task.status, __import__("sqlalchemy").func.count()).group_by(Task.status)).all()
+        rows = db.execute(select(Task.status, func.count()).group_by(Task.status)).all()
         counts = {status: count for status, count in rows}
         return {"total": sum(counts.values()), "by_status": counts}
+
+
+def _duration_sample(start, end) -> int | None:
+    if start is None or end is None:
+        return None
+    from datetime import timezone
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if end < start:
+        return None
+    return int((end - start).total_seconds() * 1000)
+
+
+def _token_counts(value: object) -> dict[str, int]:
+    """Extract only documented Claude usage token counters from result payloads."""
+    keys = {
+        "input_tokens", "output_tokens",
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+    }
+    totals = {key: 0 for key in keys}
+    found = set()
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in keys and isinstance(child, (int, float)) and not isinstance(child, bool):
+                    if child >= 0:
+                        totals[key] += int(child)
+                        found.add(key)
+                elif isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return {key: totals[key] for key in sorted(found)}
+
+
+@app.get("/insights")
+def execution_insights(period_days: int = Query(default=30, ge=1, le=365)) -> dict:
+    """Aggregate persisted task/workflow timings and Claude-reported usage; never estimate cost."""
+    from datetime import timedelta
+    now = utcnow()
+    since = now - timedelta(days=period_days)
+    with SessionLocal() as db:
+        tasks = list(db.scalars(select(Task).where(Task.created_at >= since)))
+        workflows = list(db.scalars(select(Workflow).where(Workflow.created_at >= since)))
+        task_ids = [task.id for task in tasks]
+        events = list(db.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id.in_(task_ids),
+                TaskEvent.event_type == "claude.result",
+            ).order_by(TaskEvent.occurred_at, TaskEvent.id)
+        )) if task_ids else []
+
+        by_status: dict[str, int] = {}
+        for task in tasks:
+            by_status[task.status] = by_status.get(task.status, 0) + 1
+
+        queue_samples = [
+            value for task in tasks
+            if (value := _duration_sample(task.created_at, task.started_at or (
+                task.finished_at if task.status == "cancelled" else None
+            ))) is not None
+        ]
+        execution_samples = [
+            value for task in tasks
+            if task.started_at is not None and task.finished_at is not None
+            and (value := _duration_sample(task.started_at, task.finished_at)) is not None
+        ]
+        end_to_end_samples = [
+            value for task in tasks
+            if task.finished_at is not None
+            and (value := _duration_sample(task.created_at, task.finished_at)) is not None
+        ]
+        terminal = [task for task in tasks if task.status in {"succeeded", "failed", "cancelled", "blocked"}]
+        successful = sum(task.status == "succeeded" for task in terminal)
+
+        workflow_durations = [
+            value for workflow in workflows
+            if workflow.started_at is not None and workflow.finished_at is not None
+            and (value := _duration_sample(workflow.started_at, workflow.finished_at)) is not None
+        ]
+        workflow_end_to_end = [
+            value for workflow in workflows
+            if workflow.finished_at is not None
+            and (value := _duration_sample(workflow.created_at, workflow.finished_at)) is not None
+        ]
+        workflow_task_durations = [
+            _duration_sample(task.started_at, task.finished_at)
+            for task in tasks if task.workflow_id and task.started_at and task.finished_at
+        ]
+        workflow_task_durations = [value for value in workflow_task_durations if value is not None]
+
+        cost_total = 0.0
+        cost_events = 0
+        usage_events = 0
+        token_totals = {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        }
+        usage_tasks: set[str] = set()
+        cost_tasks: set[str] = set()
+        for event in events:
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            cost = payload.get("total_cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+                cost_total += float(cost)
+                cost_events += 1
+                cost_tasks.add(event.task_id)
+            usage = payload.get("usage")
+            extracted = _token_counts(usage)
+            if extracted:
+                usage_events += 1
+                usage_tasks.add(event.task_id)
+                for key, value in extracted.items():
+                    token_totals[key] += value
+
+        def average(values: list[int]) -> float | None:
+            return round(sum(values) / len(values), 1) if values else None
+
+        worker_data = list_workers()
+        worker_snapshot = {
+            "observed_at": now,
+            "registered": worker_data["total"],
+            "by_status": worker_data["by_status"],
+            "busy_slots": sum(item["active_task_count"] for item in worker_data["workers"]),
+            "reported_capacity": sum(item["concurrency"] for item in worker_data["workers"]),
+            "historical_utilization_available": False,
+        }
+        return {
+            "period_days": period_days,
+            "since": since,
+            "until": now,
+            "tasks": {
+                "total": len(tasks), "by_status": by_status,
+                "terminal": len(terminal),
+                "success_rate": round(successful / len(terminal), 4) if terminal else None,
+                "completed_per_day": round(len(terminal) / period_days, 2),
+                "queue_wait_ms": {"average": average(queue_samples), "samples": len(queue_samples)},
+                "execution_ms": {"average": average(execution_samples), "samples": len(execution_samples)},
+                "end_to_end_ms": {"average": average(end_to_end_samples), "samples": len(end_to_end_samples)},
+            },
+            "workflows": {
+                "total": len(workflows),
+                "by_status": {status: sum(item.status == status for item in workflows)
+                              for status in sorted({item.status for item in workflows})},
+                "success_rate": (
+                    round(sum(item.status == "succeeded" for item in workflows
+                              if item.status in {"succeeded", "failed", "cancelled"}) /
+                          sum(item.status in {"succeeded", "failed", "cancelled"} for item in workflows), 4)
+                    if any(item.status in {"succeeded", "failed", "cancelled"} for item in workflows) else None
+                ),
+                "wall_clock_ms": {"average": average(workflow_durations), "samples": len(workflow_durations)},
+                "end_to_end_ms": {"average": average(workflow_end_to_end), "samples": len(workflow_end_to_end)},
+                "cumulative_task_execution_ms": sum(workflow_task_durations),
+                "cumulative_task_execution_note": "Sum of member task execution time; parallel DAG tasks overlap and this is not workflow wall-clock duration.",
+            },
+            "usage": {
+                "cost_usd": round(cost_total, 6) if cost_events else None,
+                "cost_source": "Claude Code result.total_cost_usd",
+                "cost_result_events": cost_events,
+                "tasks_with_reported_cost": len(cost_tasks),
+                "token_totals": token_totals,
+                "tasks_with_reported_usage": len(usage_tasks),
+                "usage_result_events": usage_events,
+                "availability": "reported" if cost_events or usage_tasks else "not_collected",
+                "note": "Only values emitted in persisted Claude Code result events are included. Missing values are not estimated; no model-price conversion is applied.",
+            },
+            "workers": worker_snapshot,
+            "limitations": [
+                "Metrics include tasks and workflows created within the selected period.",
+                "Duration averages include only records with both required timestamps; queued tasks are not execution samples.",
+                "Worker data is a current last-known snapshot, not historical utilization; heartbeat history is not retained.",
+                "Token and cost coverage depends on Claude Code result events that contain usage and total_cost_usd.",
+            ],
+        }
 
 
 

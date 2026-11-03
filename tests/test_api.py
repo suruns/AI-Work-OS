@@ -2111,6 +2111,10 @@ def test_execution_insights_never_estimate_missing_cost_or_usage(tmp_path):
     })
     task_id = created.json()["id"]
     with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        # Keep this fixture outside the selected window so earlier tests' real
+        # usage records cannot affect the no-usage assertion.
+        task.created_at = utcnow() - timedelta(days=8)
         db.add(TaskEvent(task_id=task_id, event_type="claude.result", payload={
             "result": "completed without usage metadata",
         }))

@@ -29,7 +29,9 @@
     <div class="insight-card"><div class="muted small">Reported input / output tokens</div><div class="n" id="i-tokens">Not collected</div><div class="muted small" id="i-token-coverage"></div></div>
     <div class="insight-card"><div class="muted small">Worker snapshot</div><div class="n" id="i-workers">—</div><div class="muted small" id="i-worker-note">Current last-known status; not historical utilization</div></div>
   </div>
-  <div class="muted small" id="i-limitations" style="margin-top:12px"></div>
+  <div class="muted small" id="i-distribution" style="margin-top:12px"></div>
+  <div class="muted small" id="i-workflow-breakdown" style="margin-top:5px"></div>
+  <div class="muted small" id="i-limitations" style="margin-top:8px"></div>
 </section>
 <section class="panel" style="margin-bottom:16px">
   <div class="task-head"><h2 style="margin:0">Worker monitor</h2><span id="worker-count" class="muted small">0 registered</span></div>
@@ -95,7 +97,9 @@ function renderInsights(data){
  $("i-tokens").textContent=hasTokens?(Number(tokens.input_tokens||0).toLocaleString()+" / "+Number(tokens.output_tokens||0).toLocaleString()):"Not collected";
  $("i-token-coverage").textContent=(usage.tasks_with_reported_usage||0)+" tasks with usage";
  $("i-workers").textContent=(workers.by_status?.busy||0)+" busy / "+(workers.by_status?.idle||0)+" idle";
- $("i-worker-note").textContent=(workers.registered||0)+" registered · current snapshot only";
+ $("i-worker-note").textContent=(workers.registered||0)+" registered · "+(workers.by_status?.offline||0)+" offline · "+(workers.by_status?.lease_expired||0)+" lease expired · snapshot only";
+ $("i-distribution").textContent="Task states: "+Object.entries(tasks.by_status||{}).map(([k,v])=>k+" "+v).join(" · ");
+ $("i-workflow-breakdown").textContent="Workflow states: "+Object.entries(workflows.by_status||{}).map(([k,v])=>k+" "+v).join(" · ")+" · Member task execution total: "+duration(workflows.cumulative_task_execution_ms);
  $("i-limitations").textContent=(data.limitations||[]).join(" · ");
 }
 async function loadInsights(){try{const data=await api("/insights?period_days="+encodeURIComponent($("insights-period").value));renderInsights(data)}catch(e){$("i-limitations").textContent="Insights unavailable: "+e.message}}

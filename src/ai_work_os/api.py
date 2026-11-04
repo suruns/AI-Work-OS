@@ -831,7 +831,15 @@ def cancel_task(task_id: str) -> Task:
             if queued_result.rowcount == 1:
                 db.add(TaskEvent(
                     task_id=task_id, event_type="task.cancelled",
-                    payload={"status": "cancelled", "cancelled_before_start": True},
+                    payload={
+                        "status": "cancelled",
+                        "action": "cancel",
+                        "reason": "cancelled_before_start",
+                        "cancelled_before_start": True,
+                        "requested_by": "api_client",
+                        "control_surface": "task_api",
+                        "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
+                    },
                 ))
             else:
                 running_result = db.execute(

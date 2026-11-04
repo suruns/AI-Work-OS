@@ -2129,3 +2129,58 @@ def test_execution_insights_never_estimate_missing_cost_or_usage(tmp_path):
     assert data["usage"]["tasks_with_reported_cost"] == 0
     assert data["usage"]["tasks_with_reported_usage"] == 0
     assert data["usage"]["availability"] == "not_collected"
+
+
+def test_session_inventory_and_detail_expose_real_capabilities(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Session inventory", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    session_id = "session-phase-6-6-test"
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        task.session_id = session_id
+        db.add(TaskEvent(
+            task_id=task_id,
+            event_type="agent.session.started",
+            payload={"session_id": session_id, "worker_id": "worker-test", "attempt": 1},
+        ))
+        db.commit()
+
+    listed = client.get("/sessions")
+    assert listed.status_code == 200
+    session = next(item for item in listed.json() if item["session_id"] == session_id)
+    assert session["task_id"] == task_id
+    assert session["controls"] == {"cancel": True, "pause": False, "resume": False}
+
+    detail = client.get(f"/sessions/{session_id}")
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert payload["task_id"] == task_id
+    assert any(event["event_type"] == "agent.session.started" for event in payload["events"])
+    assert any("Pause/resume are not supported" in item for item in payload["limitations"])
+
+
+def test_running_task_cancel_records_request_surface(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Audited running cancel", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        task.worker_id = "worker-test"
+        db.commit()
+
+    response = client.post(f"/tasks/{task_id}/cancel")
+    assert response.status_code == 200
+    events = client.get(f"/tasks/{task_id}/events").json()
+    requested = [event for event in events if event["event_type"] == "task.cancel_requested"]
+    assert len(requested) == 1
+    assert requested[0]["payload"]["action"] == "cancel"
+    assert requested[0]["payload"]["requested_by"] == "api_client"
+    assert requested[0]["payload"]["control_surface"] == "task_api"

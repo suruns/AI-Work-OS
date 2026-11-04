@@ -7,16 +7,17 @@ Phase 6.6 adds a session inventory and explicit execution-control capability rep
 ## Session lifecycle
 
 - The worker observes `session_id` from Claude Code `stream-json` events, rather than waiting for the final result event.
-- The latest observed session ID is persisted on the Task row immediately, so a running task can appear in `GET /sessions`.
-- Each invocation emits `agent.session.started` and, after the CLI process exits, `agent.session.ended` with the observed ID, worker, attempt, exit code, and terminal reason.
-- Existing `claude.*` events remain the underlying source evidence. Task events retain earlier invocation IDs across retries; the Task row and session inventory expose the latest invocation ID.
+- The latest observed session ID is persisted on the Task row immediately for compatibility with Task detail.
+- Each invocation emits `agent.session.started` and `agent.session.ended` with the observed ID, worker, attempt, exit code, and terminal reason.
+- The session inventory is indexed from persisted `agent.session.started` events, so prior invocation IDs remain queryable after retries even though the Task row stores only the latest ID.
+- Session-scoped CLI/lifecycle events are filtered by exact session ID. Task-level cancellation audit is returned separately as `task_events`.
 
 ## API
 
 - `GET /sessions?limit=100`: list tasks with an observed session ID (limit 1–500).
 - `GET /sessions/{session_id}`: return its task association and persisted lifecycle/control events.
-- Existing `POST /tasks/{task_id}/cancel` remains the cancellation command. A running cancellation request records the API surface and action in `task.cancel_requested`.
-- After the worker has completed the cancellation path and is finalizing the task, it emits `agent.control.acknowledged`. The event distinguishes a request from worker acknowledgement.
+- Existing `POST /tasks/{task_id}/cancel` remains the cancellation command. Task and Workflow cancellation use the same `task.cancel_requested` event shape, with `control_surface` identifying `task_api` or `workflow_api`.
+- After the worker has completed the cancellation path and is finalizing the task, it emits `agent.control.acknowledged`. This records worker acknowledgement separately from the request; process-tree status is `stopped` only when the POSIX process group is independently verified absent, otherwise `not_verified`.
 
 Session responses expose capabilities explicitly:
 - `cancel`: available while the associated task is queued or running.
@@ -32,6 +33,7 @@ The observed Claude Code session ID is useful for correlation and diagnostics; i
 
 - Cancellation request and worker acknowledgement are separate persisted events.
 - The current API has no authentication. `requested_by: api_client` identifies the API surface only; it is not a verified human identity. No claim of user-level attribution is made.
+- A worker acknowledgement does not by itself prove that descendants have exited; `process_tree_stopped` is true only after process-group absence is verified.
 - Existing permission modes are unchanged. This phase does not widen Claude Code permissions or auto-approve tool actions.
 - Worker lease renewal, orphan recovery, retry policy, and process-group termination remain authoritative and unchanged.
 

@@ -2308,23 +2308,27 @@ def test_workflow_cancel_uses_shared_audit_event_shape(tmp_path):
 def test_terminate_process_tree_handles_exited_group_leader(tmp_path):
     if os.name != "posix":
         return
-    import os
     import time
 
-    marker = tmp_path / "child-finished"
-    script = (
-        "import subprocess,sys\n"
-        "subprocess.Popen([sys.executable, '-c', "
-        + repr("import time,pathlib; time.sleep(2); pathlib.Path(" + repr(str(marker)) + ").write_text('alive')") 
-        + "])\n"
-    )
-    proc = asyncio.run(asyncio.create_subprocess_exec(
-        sys.executable, "-c", script, start_new_session=True,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    ))
-    asyncio.run(proc.wait())
-    assert proc.returncode == 0
-    verified = asyncio.run(worker.terminate_process_tree(proc, grace_seconds=0.1))
-    assert verified is True
-    time.sleep(2.1)
-    assert not marker.exists()
+    async def scenario():
+        marker = tmp_path / "child-finished"
+        child_code = (
+            "import time,pathlib; time.sleep(2); "
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        script = (
+            "import subprocess,sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script, start_new_session=True,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        assert proc.returncode == 0
+        verified = await worker.terminate_process_tree(proc, grace_seconds=0.1)
+        await asyncio.sleep(2.1)
+        assert not marker.exists()
+        assert verified == (not worker.process_group_exists(proc.pid))
+
+    asyncio.run(scenario())

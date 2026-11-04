@@ -723,6 +723,17 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                                 "exit_code": proc.returncode,
                             })
                             break
+                # A cancellation can race with the leader's natural exit. Check
+                # the persisted request after the wait loop and still clean up
+                # descendants in the process group before finalizing the task.
+                with SessionLocal() as db:
+                    current = db.get(Task, task_id)
+                    cancel_requested_after_exit = bool(current and current.cancel_requested)
+                if cancel_requested_after_exit and terminal_reason is None:
+                    process_tree_stopped = await terminate_process_tree(proc)
+                    terminal_reason = "cancelled"
+                    error_summary = "Cancelled by request"
+                    add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
             except asyncio.CancelledError:
                 process_tree_stopped = await terminate_process_tree(proc)
                 terminal_reason = "worker_interrupted"

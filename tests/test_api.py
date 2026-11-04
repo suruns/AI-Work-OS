@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -2161,6 +2162,7 @@ def test_session_inventory_and_detail_expose_real_capabilities(tmp_path):
     payload = detail.json()
     assert payload["task_id"] == task_id
     assert any(event["event_type"] == "agent.session.started" for event in payload["events"])
+    assert payload["task_events"] == []
     assert any("Pause/resume are not supported" in item for item in payload["limitations"])
 
 
@@ -2221,3 +2223,108 @@ def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeyp
     session = client.get("/sessions/session-lifecycle-unique")
     assert session.status_code == 200
     assert session.json()["task_id"] == task_id
+
+
+
+def test_sessions_include_prior_attempts_and_keep_invocation_events_separate(tmp_path):
+    task_id = client.post("/tasks", json={
+        "title": "Session retry history", "prompt": "retry", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    base = utcnow()
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        task.session_id = "session-B"
+        db.add_all([
+            TaskEvent(task_id=task_id, occurred_at=base, event_type="agent.session.started",
+                      payload={"session_id": "session-A", "attempt": 1, "worker_id": "worker-a"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=1),
+                      event_type="claude.result", payload={"session_id": "session-A", "result": "first"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=2),
+                      event_type="agent.session.ended", payload={"session_id": "session-A", "attempt": 1}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=3),
+                      event_type="agent.session.started",
+                      payload={"session_id": "session-B", "attempt": 2, "worker_id": "worker-b"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=4),
+                      event_type="claude.result", payload={"session_id": "session-B", "result": "second"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=5),
+                      event_type="agent.session.ended", payload={"session_id": "session-B", "attempt": 2}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=6),
+                      event_type="task.cancel_requested",
+                      payload={"action": "cancel", "control_surface": "workflow_api"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=7),
+                      event_type="executor.finished", payload={"attempt": 1, "status": "failed"}),
+        ])
+        db.commit()
+
+    listed = client.get("/sessions").json()
+    listed_ids = {item["session_id"] for item in listed if item["task_id"] == task_id}
+    assert {"session-A", "session-B"} <= listed_ids
+    for session_id, other_id in (("session-A", "session-B"), ("session-B", "session-A")):
+        response = client.get(f"/sessions/{session_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert {event["payload"].get("session_id") for event in data["events"]} == {session_id}
+        assert all(event["event_type"] != "executor.finished" for event in data["events"])
+        assert len(data["task_events"]) == 1
+        assert data["task_events"][0]["scope"] == "task"
+        assert data["task_events"][0]["event_type"] == "task.cancel_requested"
+
+
+def test_workflow_cancel_uses_shared_audit_event_shape(tmp_path):
+    created = client.post("/workflows", json={
+        "title": "Workflow cancellation audit",
+        "tasks": [{"key": "one", "title": "Running", "prompt": "wait",
+                   "workspace_path": str(tmp_path)}],
+    })
+    workflow_id = created.json()["id"]
+    task_id = created.json()["tasks"][0]["task"]["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        task.worker_id = "worker-test"
+        db.commit()
+
+    response = client.post(f"/workflows/{workflow_id}/cancel")
+    assert response.status_code == 200
+    events = client.get(f"/tasks/{task_id}/events").json()
+    request_event = next(event for event in events if event["event_type"] == "task.cancel_requested")
+    assert request_event["payload"]["action"] == "cancel"
+    assert request_event["payload"]["reason"] == "workflow_cancelled"
+    assert request_event["payload"]["requested_by"] == "api_client"
+    assert request_event["payload"]["control_surface"] == "workflow_api"
+    session_id = "workflow-cancel-session"
+    with SessionLocal() as db:
+        db.add(TaskEvent(task_id=task_id, event_type="agent.session.started",
+                         payload={"session_id": session_id, "attempt": 1}))
+        db.commit()
+    detail = client.get(f"/sessions/{session_id}").json()
+    assert detail["events"] == []
+    assert any(event["event_type"] == "task.cancel_requested"
+               for event in detail["task_events"])
+
+
+def test_terminate_process_tree_handles_exited_group_leader(tmp_path):
+    if os.name != "posix":
+        return
+    import os
+    import time
+
+    marker = tmp_path / "child-finished"
+    script = (
+        "import subprocess,sys\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        + repr("import time,pathlib; time.sleep(2); pathlib.Path(" + repr(str(marker)) + ").write_text('alive')") 
+        + "])\n"
+    )
+    proc = asyncio.run(asyncio.create_subprocess_exec(
+        sys.executable, "-c", script, start_new_session=True,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    ))
+    asyncio.run(proc.wait())
+    assert proc.returncode == 0
+    verified = asyncio.run(worker.terminate_process_tree(proc, grace_seconds=0.1))
+    assert verified is True
+    time.sleep(2.1)
+    assert not marker.exists()

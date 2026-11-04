@@ -2191,9 +2191,9 @@ def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeyp
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json\\n"
-        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-lifecycle-unique'}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-lifecycle-unique'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)

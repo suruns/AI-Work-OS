@@ -2190,7 +2190,13 @@ def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeyp
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    _write_fake_claude(fake_claude)
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json\\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-lifecycle-unique'}))\\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
 
@@ -2204,14 +2210,14 @@ def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeyp
 
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "succeeded"
-    assert task["session_id"] == "fake-session"
+    assert task["session_id"] == "session-lifecycle-unique"
     events = client.get(f"/tasks/{task_id}/events").json()
     lifecycle = [event for event in events if event["event_type"].startswith("agent.session.")]
     assert [event["event_type"] for event in lifecycle] == [
         "agent.session.started", "agent.session.ended",
     ]
-    assert lifecycle[0]["payload"]["session_id"] == "fake-session"
+    assert lifecycle[0]["payload"]["session_id"] == "session-lifecycle-unique"
     assert lifecycle[1]["payload"]["status"] == "completed"
-    session = client.get("/sessions/fake-session")
+    session = client.get("/sessions/session-lifecycle-unique")
     assert session.status_code == 200
     assert session.json()["task_id"] == task_id

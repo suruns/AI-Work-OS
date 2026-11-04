@@ -1206,7 +1206,7 @@ def test_workflow_cancel_requests_running_worker_shutdown_without_releasing_leas
         assert current.worker_id is None
         assert current.lease_expires_at is None
     events = client.get(f"/tasks/{task_id}/events").json()
-    assert any(event["event_type"] == "task.cancellation_requested" for event in events)
+    assert any(event["event_type"] == "task.cancel_requested" for event in events)
     assert events[-1]["event_type"] == "executor.finished"
     assert events[-1]["payload"]["status"] == "cancelled"
 
@@ -1480,7 +1480,7 @@ def test_workflow_cancel_is_terminal_and_does_not_rewrite_events(tmp_path):
                     ).count() for key in ("A", "C")
                 ),
                 "running_requests": db.query(TaskEvent).filter(
-                    TaskEvent.task_id == ids["B"], TaskEvent.event_type == "task.cancellation_requested",
+                    TaskEvent.task_id == ids["B"], TaskEvent.event_type == "task.cancel_requested",
                 ).count(),
             }
 
@@ -2300,7 +2300,7 @@ def test_workflow_cancel_uses_shared_audit_event_shape(tmp_path):
                          payload={"session_id": session_id, "attempt": 1}))
         db.commit()
     detail = client.get(f"/sessions/{session_id}").json()
-    assert detail["events"] == []
+    assert [event["event_type"] for event in detail["events"]] == ["agent.session.started"]
     assert any(event["event_type"] == "task.cancel_requested"
                for event in detail["task_events"])
 
@@ -2312,13 +2312,15 @@ def test_terminate_process_tree_handles_exited_group_leader(tmp_path):
 
     async def scenario():
         marker = tmp_path / "child-finished"
-        child_code = (
-            "import time,pathlib; time.sleep(2); "
-            f"pathlib.Path({str(marker)!r}).write_text('alive')"
-        )
+        pid_file = tmp_path / "child.pid"
         script = (
-            "import subprocess,sys\n"
-            f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+            "import os,pathlib,time\n"
+            "pid=os.fork()\n"
+            "if pid == 0:\n"
+            " time.sleep(2)\n"
+            f" pathlib.Path({str(marker)!r}).write_text('alive')\n"
+            " os._exit(0)\n"
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(pid))\n"
         )
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-c", script, start_new_session=True,
@@ -2326,6 +2328,8 @@ def test_terminate_process_tree_handles_exited_group_leader(tmp_path):
         )
         await proc.wait()
         assert proc.returncode == 0
+        child_pid = int(pid_file.read_text())
+        assert os.getpgid(child_pid) == proc.pid
         verified = await worker.terminate_process_tree(proc, grace_seconds=0.1)
         await asyncio.sleep(2.1)
         assert not marker.exists()

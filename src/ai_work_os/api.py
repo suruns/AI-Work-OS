@@ -1055,8 +1055,14 @@ def cancel_workflow(workflow_id: str) -> dict:
                 .values(cancel_requested=1)
             )
             if running_result.rowcount == 1:
-                db.add(TaskEvent(task_id=task_id, event_type="task.cancellation_requested", payload={
-                    "reason": "workflow_cancelled", "workflow_id": workflow_id,
+                db.add(TaskEvent(task_id=task_id, event_type="task.cancel_requested", payload={
+                    "status": "requested",
+                    "action": "cancel",
+                    "reason": "workflow_cancelled",
+                    "workflow_id": workflow_id,
+                    "requested_by": "api_client",
+                    "control_surface": "workflow_api",
+                    "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
                 }))
         db.commit()
         db.refresh(workflow)
@@ -1065,91 +1071,118 @@ def cancel_workflow(workflow_id: str) -> dict:
 
 @app.get("/sessions")
 def list_agent_sessions(limit: int = Query(default=100, ge=1, le=500)) -> list[dict]:
-    """List Claude Code sessions observed from persisted stream-json session IDs.
-
-    A task row retains its latest invocation session ID; every invocation lifecycle
-    remains available in the task event stream. Pause/resume are deliberately
-    unsupported because this CLI adapter has no reliable suspend/resume contract.
-    """
+    """List distinct Claude Code sessions from persisted invocation lifecycle events."""
     with SessionLocal() as db:
-        tasks = list(db.scalars(
-            select(Task)
-            .where(Task.session_id.is_not(None))
-            .order_by(Task.started_at.desc(), Task.created_at.desc())
-            .limit(limit)
+        started_events = list(db.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.event_type == "agent.session.started")
+            .order_by(TaskEvent.occurred_at.desc(), TaskEvent.id.desc())
         ))
-        return [
-            {
-                "session_id": task.session_id,
+        sessions = []
+        seen: set[str] = set()
+        for event in started_events:
+            session_id = (event.payload or {}).get("session_id")
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            task = db.get(Task, event.task_id)
+            if task is None:
+                continue
+            sessions.append({
+                "session_id": session_id,
                 "task_id": task.id,
                 "task_title": task.title,
                 "workflow_id": task.workflow_id,
                 "status": task.status,
-                "started_at": task.started_at,
+                "started_at": event.occurred_at,
                 "finished_at": task.finished_at,
-                "worker_id": task.worker_id,
+                "worker_id": (event.payload or {}).get("worker_id") or task.worker_id,
+                "attempt": (event.payload or {}).get("attempt"),
                 "controls": {
                     "cancel": task.status in {"queued", "running"},
                     "pause": False,
                     "resume": False,
                 },
                 "limitations": [
-                    "Session IDs are observed from Claude Code stream-json events.",
-                    "Only the latest invocation session ID is exposed on the task row; prior invocation IDs remain in task events.",
+                    "Session IDs are indexed from persisted agent.session.started events, including prior task attempts.",
                     "Pause and resume are unavailable for this CLI adapter.",
                 ],
-            }
-            for task in tasks
-        ]
+            })
+            if len(sessions) >= limit:
+                break
+        return sessions
 
 
 @app.get("/sessions/{session_id}")
 def get_agent_session(session_id: str) -> dict:
-    """Return the task and lifecycle events associated with an observed session."""
+    """Return one invocation's events separately from task-scoped control audit."""
     with SessionLocal() as db:
-        task = db.scalar(select(Task).where(Task.session_id == session_id))
-        if task is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        events = list(db.scalars(
-            select(TaskEvent)
-            .where(TaskEvent.task_id == task.id)
+        started = list(db.scalars(
+            select(TaskEvent).where(TaskEvent.event_type == "agent.session.started")
             .order_by(TaskEvent.occurred_at, TaskEvent.id)
         ))
-        session_events = [
-            {
+        matching = [
+            event for event in started
+            if (event.payload or {}).get("session_id") == session_id
+        ]
+        if not matching:
+            raise HTTPException(status_code=404, detail="session not found")
+        task_ids = {event.task_id for event in matching}
+        if len(task_ids) != 1:
+            raise HTTPException(status_code=409, detail="session ID is associated with multiple tasks")
+        task = db.get(Task, next(iter(task_ids)))
+        if task is None:
+            raise HTTPException(status_code=404, detail="session not found")
+
+        events = list(db.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.occurred_at, TaskEvent.id)
+        ))
+        session_events = []
+        task_events = []
+        for event in events:
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            item = {
                 "id": event.id,
                 "occurred_at": event.occurred_at,
                 "event_type": event.event_type,
-                "payload": event.payload,
+                "scope": "session",
+                "payload": payload,
             }
-            for event in events
             if (
                 event.event_type.startswith("agent.session.")
-                and event.payload.get("session_id") == session_id
-            )
-            or (
-                event.event_type.startswith("claude.")
-                and event.payload.get("session_id") == session_id
-            )
-            or event.event_type in {"task.cancel_requested", "executor.cancelled", "executor.finished", "agent.control.acknowledged"}
-        ]
+                or event.event_type.startswith("claude.")
+            ) and payload.get("session_id") == session_id:
+                session_events.append(item)
+            elif event.event_type in {"task.cancel_requested", "task.cancelled"}:
+                task_events.append({**item, "scope": "task"})
+            elif (
+                event.event_type == "agent.control.acknowledged"
+                and payload.get("session_id") == session_id
+            ):
+                session_events.append(item)
+
+        started_payload = matching[0].payload or {}
         return {
             "session_id": session_id,
             "task_id": task.id,
             "task_title": task.title,
             "workflow_id": task.workflow_id,
             "status": task.status,
-            "started_at": task.started_at,
+            "started_at": matching[0].occurred_at,
             "finished_at": task.finished_at,
-            "worker_id": task.worker_id,
+            "worker_id": started_payload.get("worker_id") or task.worker_id,
+            "attempt": started_payload.get("attempt"),
             "controls": {
                 "cancel": task.status in {"queued", "running"},
                 "pause": False,
                 "resume": False,
             },
             "events": session_events,
+            "task_events": task_events,
             "limitations": [
                 "Pause/resume are not supported; no signal-based suspension is exposed as a resumable session.",
+                "Task-scoped cancellation audit is returned separately and is not attributed to a specific invocation.",
                 "The API has no authentication, so control audit records identify the API surface, not a verified human operator.",
             ],
         }

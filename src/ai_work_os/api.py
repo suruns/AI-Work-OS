@@ -1123,12 +1123,15 @@ def get_agent_session(session_id: str) -> dict:
                 "payload": event.payload,
             }
             for event in events
-            if event.event_type.startswith("agent.session.")
+            if (
+                event.event_type.startswith("agent.session.")
+                and event.payload.get("session_id") == session_id
+            )
             or (
                 event.event_type.startswith("claude.")
                 and event.payload.get("session_id") == session_id
             )
-            or event.event_type in {"task.cancel_requested", "executor.cancelled", "executor.finished"}
+            or event.event_type in {"task.cancel_requested", "executor.cancelled", "executor.finished", "agent.control.acknowledged"}
         ]
         return {
             "session_id": session_id,

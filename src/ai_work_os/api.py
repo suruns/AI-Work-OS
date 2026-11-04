@@ -842,7 +842,13 @@ def cancel_task(task_id: str) -> Task:
                 if running_result.rowcount == 1:
                     db.add(TaskEvent(
                         task_id=task_id, event_type="task.cancel_requested",
-                        payload={"status": "running"},
+                        payload={
+                            "status": "running",
+                            "action": "cancel",
+                            "requested_by": "api_client",
+                            "control_surface": "task_api",
+                            "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
+                        },
                     ))
             db.commit()
             db.refresh(task)
@@ -1055,3 +1061,92 @@ def cancel_workflow(workflow_id: str) -> dict:
         db.commit()
         db.refresh(workflow)
         return _workflow_payload(db, workflow)
+
+
+@app.get("/sessions")
+def list_agent_sessions(limit: int = Query(default=100, ge=1, le=500)) -> list[dict]:
+    """List Claude Code sessions observed from persisted stream-json session IDs.
+
+    A task row retains its latest invocation session ID; every invocation lifecycle
+    remains available in the task event stream. Pause/resume are deliberately
+    unsupported because this CLI adapter has no reliable suspend/resume contract.
+    """
+    with SessionLocal() as db:
+        tasks = list(db.scalars(
+            select(Task)
+            .where(Task.session_id.is_not(None))
+            .order_by(Task.started_at.desc(), Task.created_at.desc())
+            .limit(limit)
+        ))
+        return [
+            {
+                "session_id": task.session_id,
+                "task_id": task.id,
+                "task_title": task.title,
+                "workflow_id": task.workflow_id,
+                "status": task.status,
+                "started_at": task.started_at,
+                "finished_at": task.finished_at,
+                "worker_id": task.worker_id,
+                "controls": {
+                    "cancel": task.status in {"queued", "running"},
+                    "pause": False,
+                    "resume": False,
+                },
+                "limitations": [
+                    "Session IDs are observed from Claude Code stream-json events.",
+                    "Only the latest invocation session ID is exposed on the task row; prior invocation IDs remain in task events.",
+                    "Pause and resume are unavailable for this CLI adapter.",
+                ],
+            }
+            for task in tasks
+        ]
+
+
+@app.get("/sessions/{session_id}")
+def get_agent_session(session_id: str) -> dict:
+    """Return the task and lifecycle events associated with an observed session."""
+    with SessionLocal() as db:
+        task = db.scalar(select(Task).where(Task.session_id == session_id))
+        if task is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        events = list(db.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.occurred_at, TaskEvent.id)
+        ))
+        session_events = [
+            {
+                "id": event.id,
+                "occurred_at": event.occurred_at,
+                "event_type": event.event_type,
+                "payload": event.payload,
+            }
+            for event in events
+            if event.event_type.startswith("agent.session.")
+            or (
+                event.event_type.startswith("claude.")
+                and event.payload.get("session_id") == session_id
+            )
+            or event.event_type in {"task.cancel_requested", "executor.cancelled", "executor.finished"}
+        ]
+        return {
+            "session_id": session_id,
+            "task_id": task.id,
+            "task_title": task.title,
+            "workflow_id": task.workflow_id,
+            "status": task.status,
+            "started_at": task.started_at,
+            "finished_at": task.finished_at,
+            "worker_id": task.worker_id,
+            "controls": {
+                "cancel": task.status in {"queued", "running"},
+                "pause": False,
+                "resume": False,
+            },
+            "events": session_events,
+            "limitations": [
+                "Pause/resume are not supported; no signal-based suspension is exposed as a resumable session.",
+                "The API has no authentication, so control audit records identify the API surface, not a verified human operator.",
+            ],
+        }

@@ -843,7 +843,7 @@ def cancel_task(task_id: str) -> Task:
                     db.add(TaskEvent(
                         task_id=task_id, event_type="task.cancel_requested",
                         payload={
-                            "status": "running",
+                            "status": "requested",
                             "action": "cancel",
                             "requested_by": "api_client",
                             "control_surface": "task_api",
@@ -1046,7 +1046,14 @@ def cancel_workflow(workflow_id: str) -> dict:
             )
             if queued_result.rowcount == 1:
                 db.add(TaskEvent(task_id=task_id, event_type="task.cancelled", payload={
-                    "status": "cancelled", "cancelled_before_start": True, "workflow_id": workflow_id,
+                    "status": "cancelled",
+                    "action": "cancel",
+                    "reason": "workflow_cancelled",
+                    "cancelled_before_start": True,
+                    "workflow_id": workflow_id,
+                    "requested_by": "api_client",
+                    "control_surface": "workflow_api",
+                    "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
                 }))
                 continue
             running_result = db.execute(

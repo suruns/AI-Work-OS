@@ -391,7 +391,7 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
     )
     blocked = task.status == "blocked" or bool(task.blocked_reason)
     cancelled = task.status == "cancelled" or any(
-        name in {"task.cancelled", "task.cancellation_requested"} for name in event_types
+        name in {"task.cancelled", "task.cancel_requested", "task.cancellation_requested"} for name in event_types
     )
 
     if blocked:
@@ -468,7 +468,7 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
     elif classification == "cancelled":
         hypotheses.append({
             "message": "The task was cancelled or had cancellation requested.",
-            "evidence_event_ids": [e.id for e in events if e.event_type in {"task.cancelled", "task.cancellation_requested"}],
+            "evidence_event_ids": [e.id for e in events if e.event_type in {"task.cancelled", "task.cancel_requested", "task.cancellation_requested"}],
             "recommendation": "Confirm why cancellation was requested before deciding whether to create a new task.",
         })
 

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import subprocess
+import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -2305,34 +2306,26 @@ def test_workflow_cancel_uses_shared_audit_event_shape(tmp_path):
                for event in detail["task_events"])
 
 
-def test_terminate_process_tree_handles_exited_group_leader(tmp_path):
-    if os.name != "posix":
-        return
-    import time
+def test_terminate_process_tree_handles_exited_group_leader(monkeypatch):
+    from types import SimpleNamespace
 
-    async def scenario():
-        marker = tmp_path / "child-finished"
-        pid_file = tmp_path / "child.pid"
-        script = (
-            "import os,pathlib,time\n"
-            "pid=os.fork()\n"
-            "if pid == 0:\n"
-            " time.sleep(2)\n"
-            f" pathlib.Path({str(marker)!r}).write_text('alive')\n"
-            " os._exit(0)\n"
-            f"pathlib.Path({str(pid_file)!r}).write_text(str(pid))\n"
-        )
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", script, start_new_session=True,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
-        assert proc.returncode == 0
-        child_pid = int(pid_file.read_text())
-        assert os.getpgid(child_pid) == proc.pid
-        verified = await worker.terminate_process_tree(proc, grace_seconds=0.1)
-        await asyncio.sleep(2.1)
-        assert not marker.exists()
-        assert verified == (not worker.process_group_exists(proc.pid))
+    signals = []
+    group_exists = {"value": True}
 
-    asyncio.run(scenario())
+    def fake_killpg(pgid, sig):
+        assert pgid == 98765
+        if sig == 0:
+            if not group_exists["value"]:
+                raise ProcessLookupError
+            return
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_exists["value"] = False
+
+    monkeypatch.setattr(worker.os, "killpg", fake_killpg)
+    # Simulate a process whose leader has exited while its process group
+    # still contains descendants. Cleanup must not return early.
+    proc = SimpleNamespace(pid=98765, returncode=0)
+    verified = asyncio.run(worker.terminate_process_tree(proc, grace_seconds=0))
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert verified is True

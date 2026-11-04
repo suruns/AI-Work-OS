@@ -109,6 +109,11 @@ def test_cancel_queued_task_closes_lifecycle(tmp_path):
     events = client.get(f"/tasks/{task_id}/events").json()
     assert [event["event_type"] for event in events][-1] == "task.cancelled"
     assert events[-1]["payload"]["cancelled_before_start"] is True
+    assert events[-1]["payload"]["action"] == "cancel"
+    assert events[-1]["payload"]["reason"] == "cancelled_before_start"
+    assert events[-1]["payload"]["requested_by"] == "api_client"
+    assert events[-1]["payload"]["control_surface"] == "task_api"
+    assert "does not authenticate callers" in events[-1]["payload"]["note"]
 
 
 def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch):

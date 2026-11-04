@@ -627,8 +627,26 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     try:
                         event = json.loads(decoded)
                         event_type = str(event.get("type", "unknown"))
-                        if event_type == "result" and event.get("session_id"):
-                            session_id = str(event["session_id"])
+                        observed_session_id = event.get("session_id")
+                        if observed_session_id:
+                            observed_session_id = str(observed_session_id)
+                            if session_id is None:
+                                session_id = observed_session_id
+                                with SessionLocal() as db:
+                                    current = db.get(Task, task_id)
+                                    if current is not None and current.session_id != observed_session_id:
+                                        current.session_id = observed_session_id
+                                        db.add(TaskEvent(
+                                            task_id=task_id,
+                                            event_type="agent.session.started",
+                                            payload={
+                                                "session_id": observed_session_id,
+                                                "worker_id": worker_id,
+                                                "attempt": attempt_number,
+                                                "source_event_type": event_type,
+                                            },
+                                        ))
+                                        db.commit()
                         add_event(task_id, f"claude.{event_type}", event)
                     except json.JSONDecodeError:
                         add_event(task_id, "claude.non_json_output", {"line": decoded[:4000]})
@@ -676,6 +694,20 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
+
+    if session_id is not None:
+        add_event(task_id, "agent.session.ended", {
+            "session_id": session_id,
+            "worker_id": worker_id,
+            "attempt": attempt_number,
+            "exit_code": exit_code,
+            "terminal_reason": terminal_reason,
+            "status": "cancelled" if terminal_reason == "cancelled" else (
+                "timed_out" if terminal_reason == "timeout" else (
+                    "failed" if exit_code not in (0, None) or error_summary else "completed"
+                )
+            ),
+        })
 
     verification_status = "pending" if verification_commands else "not_configured"
     verification_results = []
@@ -916,6 +948,15 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         task.verification_status = verification_status
         task.worker_id = None
         task.lease_expires_at = None
+        if task.cancel_requested or terminal_reason == "cancelled":
+            db.add(TaskEvent(task_id=task_id, event_type="agent.control.acknowledged", payload={
+                "action": "cancel",
+                "status": "acknowledged",
+                "acknowledged_by": worker_id,
+                "session_id": session_id,
+                "process_tree_stopped": True,
+                "note": "The worker completed its cancellation path and is finalizing the task.",
+            }))
         db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
             "status": task.status,
             "exit_code": exit_code,

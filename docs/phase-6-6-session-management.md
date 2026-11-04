@@ -16,7 +16,7 @@ Phase 6.6 adds a session inventory and explicit execution-control capability rep
 
 - `GET /sessions?limit=100`: list tasks with an observed session ID (limit 1–500).
 - `GET /sessions/{session_id}`: return its task association and persisted lifecycle/control events.
-- Existing `POST /tasks/{task_id}/cancel` remains the cancellation command. Task and Workflow cancellation use the same `task.cancel_requested` event shape, with `control_surface` identifying `task_api` or `workflow_api`.
+- Existing `POST /tasks/{task_id}/cancel` remains the cancellation command. Running-task requests use `task.cancel_requested`; queued tasks are immediately terminal and use `task.cancelled`. Both Task and Workflow cancellation paths persist `action`, `requested_by`, `control_surface`, and the unauthenticated-API note, with `control_surface` identifying `task_api` or `workflow_api`.
 - After the worker has completed the cancellation path and is finalizing the task, it emits `agent.control.acknowledged`. This records worker acknowledgement separately from the request; process-tree status is `stopped` only when the POSIX process group is independently verified absent, otherwise `not_verified`.
 
 Session responses expose capabilities explicitly:

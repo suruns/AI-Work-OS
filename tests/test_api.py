@@ -2184,3 +2184,34 @@ def test_running_task_cancel_records_request_surface(tmp_path):
     assert requested[0]["payload"]["action"] == "cancel"
     assert requested[0]["payload"]["requested_by"] == "api_client"
     assert requested[0]["payload"]["control_surface"] == "task_api"
+
+
+def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    _write_fake_claude(fake_claude)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Session lifecycle", "prompt": "Inspect", "workspace_path": str(workspace),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    assert task["session_id"] == "fake-session"
+    events = client.get(f"/tasks/{task_id}/events").json()
+    lifecycle = [event for event in events if event["event_type"].startswith("agent.session.")]
+    assert [event["event_type"] for event in lifecycle] == [
+        "agent.session.started", "agent.session.ended",
+    ]
+    assert lifecycle[0]["payload"]["session_id"] == "fake-session"
+    assert lifecycle[1]["payload"]["status"] == "completed"
+    session = client.get("/sessions/fake-session")
+    assert session.status_code == 200
+    assert session.json()["task_id"] == task_id

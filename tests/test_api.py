@@ -83,6 +83,7 @@ def test_global_artifact_inventory_is_read_only_and_filterable(tmp_path, monkeyp
     assert {item["name"] for item in entries} == {"stdout.jsonl", "verification.json"}
     assert all(item["task_title"] == "Artifact library sample" for item in entries)
     assert all(item["workspace_path"] == str(tmp_path) for item in entries)
+    assert {item["kind"] for item in entries} == {"execution_log", "verification_report"}
 
     filtered = client.get(f"/artifacts?task_id={task_id}&kind=execution_log")
     assert filtered.status_code == 200

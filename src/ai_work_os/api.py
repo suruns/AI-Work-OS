@@ -761,6 +761,7 @@ def list_artifact_inventory(
                 continue
             items.append({
                 **artifact,
+                "kind": item_kind,
                 "task_id": task.id,
                 "task_title": task.title,
                 "task_status": task.status,

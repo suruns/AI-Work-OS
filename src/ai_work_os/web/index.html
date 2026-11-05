@@ -37,6 +37,16 @@
   <div class="task-head"><h2 style="margin:0">Worker monitor</h2><span id="worker-count" class="muted small">0 registered</span></div>
   <div id="workers" class="workers-grid" style="margin-top:12px"><div class="empty">No workers have registered yet. Start a worker with <code>python -m ai_work_os.worker</code>.</div></div>
 </section>
+<section class="panel" style="margin-bottom:16px">
+  <div class="task-head"><div><h2 style="margin:0">Artifact library</h2><div class="muted small">Read-only inventory across recent task outputs and changed workspace files</div></div><span id="artifact-library-count" class="muted small">Not loaded</span></div>
+  <form id="artifact-library-form" class="actions" style="margin-top:12px">
+    <input id="artifact-library-query" placeholder="Search file, task title, workspace path…" style="flex:1;min-width:220px">
+    <select id="artifact-library-kind" style="width:auto"><option value="">All types</option><option value="execution_log">Execution logs</option><option value="error_log">Error logs</option><option value="workspace_change_report">Workspace reports</option><option value="verification_report">Verification reports</option><option value="repair_execution_log">Repair logs</option><option value="repair_error_log">Repair errors</option><option value="workspace_file">Workspace files</option></select>
+    <button class="primary" type="submit" id="artifact-library-search">Search</button>
+  </form>
+  <div id="artifact-library-results" style="margin-top:12px"><div class="empty">Search to load artifacts from recent tasks.</div></div>
+  <div class="muted small" style="margin-top:10px">Files are never moved, renamed, or deleted by this inventory. Downloads remain scoped to each task's existing artifact permissions.</div>
+</section>
 <div class="layout">
 <section class="panel"><h2>＋ Create task</h2><form id="create-form">
 <div class="field"><label for="title">Task title</label><input id="title" name="title" required maxlength="240" placeholder="e.g. Review the API architecture"></div>
@@ -113,6 +123,24 @@ function renderWorkers(data){
 }
 function renderTasks(){ $("task-count").textContent=tasks.length+" shown";$("tasks").innerHTML=tasks.length?tasks.map(t=>'<button class="task '+(selected===t.id?'active':'')+'" data-id="'+esc(t.id)+'"><div class="task-head"><span class="task-title">'+esc(t.title)+'</span>'+pill(t.status)+'</div><div class="meta">'+esc(t.workspace_path)+'<br>'+esc(date(t.created_at))+'<br>Priority: '+esc(t.priority??0)+' · Attempt: '+esc(t.attempt_count??0)+'/'+esc(t.max_attempts??1)+'</div></button>').join(""):'<div class="empty">No tasks yet. Create your first task.</div>';$("tasks").querySelectorAll(".task[data-id]").forEach(b=>b.addEventListener("click",()=>{selected=b.dataset.id;renderTasks();loadDetail(selected)}))}
 async function refresh(){try{const [ts,st,ws,workers,insights]=await Promise.all([api("/tasks?limit=100"),api("/stats"),api("/workflows?limit=50"),api("/workers"),api("/insights?period_days="+encodeURIComponent($("insights-period").value))]);tasks=ts;renderWorkflows(ws);renderWorkers(workers);renderInsights(insights);$("s-total").textContent=st.total;$("s-queued").textContent=st.by_status.queued||0;$("s-running").textContent=st.by_status.running||0;$("s-succeeded").textContent=st.by_status.succeeded||0;$("connection").textContent="API connected";$("connection").style.color="var(--green)";if(selected&&!tasks.some(t=>t.id===selected))selected=null;if(!selected&&tasks.length)selected=tasks[0].id;renderTasks();if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow);if(selected)await loadDetail(selected);else $("detail").innerHTML='<div class="empty">Select a task to inspect its timeline.</div>'}catch(e){$("connection").textContent="API unavailable";$("connection").style.color="var(--red)";$("toast").textContent=e.message}}
+
+function renderArtifactLibrary(data){
+ const items=data?.items||[];
+ $("artifact-library-count").textContent=items.length+" shown · "+data.count+" matched"+(data.truncated?" · more available":"");
+ $("artifact-library-results").innerHTML=items.length?'<div class="artifact-list">'+items.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"workspace_file")+' · '+esc(item.size_bytes??0)+' bytes</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">Download</a></div>').join("")+'</div>':'<div class="empty">No matching artifacts found in the scanned tasks.</div>';
+ if(data.truncated)$("artifact-library-results").insertAdjacentHTML("beforeend",'<div class="muted small" style="margin-top:8px">Result limit reached. Narrow the search or increase the task scan window in the API.</div>');
+}
+async function loadArtifactLibrary(){
+ const params=new URLSearchParams({limit:"200",task_limit:"100"});
+ const q=$("artifact-library-query").value.trim(),kind=$("artifact-library-kind").value;
+ if(q)params.set("q",q);if(kind)params.set("kind",kind);
+ $("artifact-library-search").disabled=true;
+ $("artifact-library-results").innerHTML='<div class="event"><div class="muted small">Scanning recent task artifacts…</div></div>';
+ try{const data=await api("/artifacts?"+params.toString());renderArtifactLibrary(data)}
+ catch(e){$("artifact-library-results").innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
+ finally{$("artifact-library-search").disabled=false}
+}
+
 function renderTaskResult(events){
  const resultEvent=[...events].reverse().find(e=>e.event_type==="claude.result"&&typeof e.payload?.result==="string");
  if(!resultEvent)return "";
@@ -201,6 +229,7 @@ $("workflow-form").addEventListener("submit",async e=>{
  finally{$("workflow-submit").disabled=false}
 });
 addWorkflowRow();
+$("artifact-library-form").addEventListener("submit",async e=>{e.preventDefault();await loadArtifactLibrary()});
 
 $("refresh").addEventListener("click",refresh);$("insights-period").addEventListener("change",loadInsights);refresh();setInterval(refresh,5000);
 </script></body></html>

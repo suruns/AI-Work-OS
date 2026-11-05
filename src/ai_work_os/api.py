@@ -730,6 +730,54 @@ def list_task_artifacts(task_id: str) -> dict:
     }
 
 
+@app.get("/artifacts")
+def list_artifact_inventory(
+    limit: int = Query(default=100, ge=1, le=500),
+    task_limit: int = Query(default=100, ge=1, le=500),
+    task_id: str | None = None,
+    kind: str | None = Query(default=None, min_length=1, max_length=80),
+    q: str | None = Query(default=None, max_length=200),
+) -> dict:
+    """Search the read-only artifact inventory across recent tasks."""
+    with SessionLocal() as db:
+        statement = select(Task).order_by(Task.created_at.desc(), Task.id.desc()).limit(task_limit)
+        if task_id:
+            statement = statement.where(Task.id == task_id)
+        tasks = db.scalars(statement).all()
+        if task_id and not tasks:
+            raise HTTPException(status_code=404, detail="task not found")
+
+    needle = q.casefold().strip() if q else None
+    items = []
+    for task in tasks:
+        inventory = list_task_artifacts(task.id)
+        for artifact in [*inventory["artifacts"], *inventory["workspace_files"]]:
+            item_kind = artifact.get("kind", "workspace_file")
+            if kind and item_kind != kind:
+                continue
+            item_name = artifact.get("name") or artifact.get("path") or ""
+            searchable = " ".join((item_name, task.title, task.workspace_path, task.id)).casefold()
+            if needle and needle not in searchable:
+                continue
+            items.append({
+                **artifact,
+                "kind": item_kind,
+                "task_id": task.id,
+                "task_title": task.title,
+                "task_status": task.status,
+                "workspace_path": task.workspace_path,
+                "task_created_at": task.created_at,
+            })
+    return {
+        "items": items[:limit],
+        "count": len(items),
+        "scanned_tasks": len(tasks),
+        "truncated": len(items) > limit,
+        "read_only": True,
+        "note": "Inventory is derived from existing task artifacts and workspace-change reports. It does not move, rename, or delete files.",
+    }
+
+
 @app.get("/tasks/{task_id}/artifacts/{name}")
 def download_task_artifact(task_id: str, name: str):
     allowed = {

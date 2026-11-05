@@ -49,11 +49,50 @@ def test_dashboard_is_served():
     assert "function renderTaskResult(events)" in response.text
     assert "Agent result" in response.text
     assert "function renderArtifacts(data)" in response.text
+    assert "function renderArtifactLibrary(data)" in response.text
+    assert "Artifact library" in response.text
+    assert 'api("/artifacts?"' in response.text
     assert "Workspace files changed during task" in response.text
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
     assert "workflowDetailToken" in response.text
     assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
+
+
+def test_global_artifact_inventory_is_read_only_and_filterable(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    response = client.post("/tasks", json={
+        "title": "Artifact library sample",
+        "prompt": "Read only",
+        "workspace_path": str(tmp_path),
+    })
+    assert response.status_code == 201
+    task_id = response.json()["id"]
+    task_dir = api_module.STORAGE / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
+    (task_dir / "verification.json").write_text('{"status":"passed"}', encoding="utf-8")
+
+    listing = client.get("/artifacts?limit=20&task_limit=20")
+    assert listing.status_code == 200
+    payload = listing.json()
+    assert payload["read_only"] is True
+    assert payload["truncated"] is False
+    assert payload["scanned_tasks"] >= 1
+    entries = [item for item in payload["items"] if item["task_id"] == task_id]
+    assert {item["name"] for item in entries} == {"stdout.jsonl", "verification.json"}
+    assert all(item["task_title"] == "Artifact library sample" for item in entries)
+    assert all(item["workspace_path"] == str(tmp_path) for item in entries)
+    assert {item["kind"] for item in entries} == {"execution_log", "verification_report"}
+
+    filtered = client.get(f"/artifacts?task_id={task_id}&kind=execution_log")
+    assert filtered.status_code == 200
+    assert [item["name"] for item in filtered.json()["items"]] == ["stdout.jsonl"]
+    searched = client.get("/artifacts?q=library")
+    assert searched.status_code == 200
+    assert any(item["task_id"] == task_id for item in searched.json()["items"])
+    assert (task_dir / "stdout.jsonl").is_file()
+    assert (task_dir / "verification.json").is_file()
 
 
 def test_stats_shape():

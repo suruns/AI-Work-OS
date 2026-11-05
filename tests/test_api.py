@@ -1,7 +1,9 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import subprocess
+import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -107,6 +109,11 @@ def test_cancel_queued_task_closes_lifecycle(tmp_path):
     events = client.get(f"/tasks/{task_id}/events").json()
     assert [event["event_type"] for event in events][-1] == "task.cancelled"
     assert events[-1]["payload"]["cancelled_before_start"] is True
+    assert events[-1]["payload"]["action"] == "cancel"
+    assert events[-1]["payload"]["reason"] == "cancelled_before_start"
+    assert events[-1]["payload"]["requested_by"] == "api_client"
+    assert events[-1]["payload"]["control_surface"] == "task_api"
+    assert "does not authenticate callers" in events[-1]["payload"]["note"]
 
 
 def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch):
@@ -1205,7 +1212,7 @@ def test_workflow_cancel_requests_running_worker_shutdown_without_releasing_leas
         assert current.worker_id is None
         assert current.lease_expires_at is None
     events = client.get(f"/tasks/{task_id}/events").json()
-    assert any(event["event_type"] == "task.cancellation_requested" for event in events)
+    assert any(event["event_type"] == "task.cancel_requested" for event in events)
     assert events[-1]["event_type"] == "executor.finished"
     assert events[-1]["payload"]["status"] == "cancelled"
 
@@ -1479,7 +1486,7 @@ def test_workflow_cancel_is_terminal_and_does_not_rewrite_events(tmp_path):
                     ).count() for key in ("A", "C")
                 ),
                 "running_requests": db.query(TaskEvent).filter(
-                    TaskEvent.task_id == ids["B"], TaskEvent.event_type == "task.cancellation_requested",
+                    TaskEvent.task_id == ids["B"], TaskEvent.event_type == "task.cancel_requested",
                 ).count(),
             }
 
@@ -2129,3 +2136,201 @@ def test_execution_insights_never_estimate_missing_cost_or_usage(tmp_path):
     assert data["usage"]["tasks_with_reported_cost"] == 0
     assert data["usage"]["tasks_with_reported_usage"] == 0
     assert data["usage"]["availability"] == "not_collected"
+
+
+def test_session_inventory_and_detail_expose_real_capabilities(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Session inventory", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+    session_id = "session-phase-6-6-test"
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        task.session_id = session_id
+        db.add(TaskEvent(
+            task_id=task_id,
+            event_type="agent.session.started",
+            payload={"session_id": session_id, "worker_id": "worker-test", "attempt": 1},
+        ))
+        db.commit()
+
+    listed = client.get("/sessions")
+    assert listed.status_code == 200
+    session = next(item for item in listed.json() if item["session_id"] == session_id)
+    assert session["task_id"] == task_id
+    assert session["controls"] == {"cancel": True, "pause": False, "resume": False}
+
+    detail = client.get(f"/sessions/{session_id}")
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert payload["task_id"] == task_id
+    assert any(event["event_type"] == "agent.session.started" for event in payload["events"])
+    assert payload["task_events"] == []
+    assert any("Pause/resume are not supported" in item for item in payload["limitations"])
+
+
+def test_running_task_cancel_records_request_surface(tmp_path):
+    created = client.post("/tasks", json={
+        "title": "Audited running cancel", "prompt": "Inspect", "workspace_path": str(tmp_path),
+    })
+    task_id = created.json()["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        task.worker_id = "worker-test"
+        db.commit()
+
+    response = client.post(f"/tasks/{task_id}/cancel")
+    assert response.status_code == 200
+    events = client.get(f"/tasks/{task_id}/events").json()
+    requested = [event for event in events if event["event_type"] == "task.cancel_requested"]
+    assert len(requested) == 1
+    assert requested[0]["payload"]["action"] == "cancel"
+    assert requested[0]["payload"]["requested_by"] == "api_client"
+    assert requested[0]["payload"]["control_surface"] == "task_api"
+
+
+def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-lifecycle-unique'}))\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "Session lifecycle", "prompt": "Inspect", "workspace_path": str(workspace),
+    })
+    assert created.status_code == 201
+    task_id = created.json()["id"]
+
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    assert task["session_id"] == "session-lifecycle-unique"
+    events = client.get(f"/tasks/{task_id}/events").json()
+    lifecycle = [event for event in events if event["event_type"].startswith("agent.session.")]
+    assert [event["event_type"] for event in lifecycle] == [
+        "agent.session.started", "agent.session.ended",
+    ]
+    assert lifecycle[0]["payload"]["session_id"] == "session-lifecycle-unique"
+    assert lifecycle[1]["payload"]["status"] == "completed"
+    session = client.get("/sessions/session-lifecycle-unique")
+    assert session.status_code == 200
+    assert session.json()["task_id"] == task_id
+
+
+
+def test_sessions_include_prior_attempts_and_keep_invocation_events_separate(tmp_path):
+    task_id = client.post("/tasks", json={
+        "title": "Session retry history", "prompt": "retry", "workspace_path": str(tmp_path),
+    }).json()["id"]
+    base = utcnow()
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        task.session_id = "session-B"
+        db.add_all([
+            TaskEvent(task_id=task_id, occurred_at=base, event_type="agent.session.started",
+                      payload={"session_id": "session-A", "attempt": 1, "worker_id": "worker-a"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=1),
+                      event_type="claude.result", payload={"session_id": "session-A", "result": "first"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=2),
+                      event_type="agent.session.ended", payload={"session_id": "session-A", "attempt": 1}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=3),
+                      event_type="agent.session.started",
+                      payload={"session_id": "session-B", "attempt": 2, "worker_id": "worker-b"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=4),
+                      event_type="claude.result", payload={"session_id": "session-B", "result": "second"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=5),
+                      event_type="agent.session.ended", payload={"session_id": "session-B", "attempt": 2}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=6),
+                      event_type="task.cancel_requested",
+                      payload={"action": "cancel", "control_surface": "workflow_api"}),
+            TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=7),
+                      event_type="executor.finished", payload={"attempt": 1, "status": "failed"}),
+        ])
+        db.commit()
+
+    listed = client.get("/sessions").json()
+    listed_ids = {item["session_id"] for item in listed if item["task_id"] == task_id}
+    assert {"session-A", "session-B"} <= listed_ids
+    for session_id, other_id in (("session-A", "session-B"), ("session-B", "session-A")):
+        response = client.get(f"/sessions/{session_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert {event["payload"].get("session_id") for event in data["events"]} == {session_id}
+        assert all(event["event_type"] != "executor.finished" for event in data["events"])
+        assert len(data["task_events"]) == 1
+        assert data["task_events"][0]["scope"] == "task"
+        assert data["task_events"][0]["event_type"] == "task.cancel_requested"
+
+
+def test_workflow_cancel_uses_shared_audit_event_shape(tmp_path):
+    created = client.post("/workflows", json={
+        "title": "Workflow cancellation audit",
+        "tasks": [{"key": "one", "title": "Running", "prompt": "wait",
+                   "workspace_path": str(tmp_path)}],
+    })
+    workflow_id = created.json()["id"]
+    task_id = created.json()["tasks"][0]["task"]["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "running"
+        task.started_at = utcnow()
+        task.worker_id = "worker-test"
+        db.commit()
+
+    response = client.post(f"/workflows/{workflow_id}/cancel")
+    assert response.status_code == 200
+    events = client.get(f"/tasks/{task_id}/events").json()
+    request_event = next(event for event in events if event["event_type"] == "task.cancel_requested")
+    assert request_event["payload"]["action"] == "cancel"
+    assert request_event["payload"]["reason"] == "workflow_cancelled"
+    assert request_event["payload"]["requested_by"] == "api_client"
+    assert request_event["payload"]["control_surface"] == "workflow_api"
+    session_id = "workflow-cancel-session"
+    with SessionLocal() as db:
+        db.add(TaskEvent(task_id=task_id, event_type="agent.session.started",
+                         payload={"session_id": session_id, "attempt": 1}))
+        db.commit()
+    detail = client.get(f"/sessions/{session_id}").json()
+    assert [event["event_type"] for event in detail["events"]] == ["agent.session.started"]
+    assert any(event["event_type"] == "task.cancel_requested"
+               for event in detail["task_events"])
+
+
+def test_terminate_process_tree_handles_exited_group_leader(monkeypatch):
+    from types import SimpleNamespace
+
+    signals = []
+    group_exists = {"value": True}
+
+    def fake_killpg(pgid, sig):
+        assert pgid == 98765
+        if sig == 0:
+            if not group_exists["value"]:
+                raise ProcessLookupError
+            return
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_exists["value"] = False
+
+    monkeypatch.setattr(worker.os, "killpg", fake_killpg)
+    # Simulate a process whose leader has exited while its process group
+    # still contains descendants. Cleanup must not return early.
+    proc = SimpleNamespace(pid=98765, returncode=0)
+    verified = asyncio.run(worker.terminate_process_tree(proc, grace_seconds=0))
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert verified is True

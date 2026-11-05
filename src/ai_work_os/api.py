@@ -391,7 +391,7 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
     )
     blocked = task.status == "blocked" or bool(task.blocked_reason)
     cancelled = task.status == "cancelled" or any(
-        name in {"task.cancelled", "task.cancellation_requested"} for name in event_types
+        name in {"task.cancelled", "task.cancel_requested", "task.cancellation_requested"} for name in event_types
     )
 
     if blocked:
@@ -468,7 +468,7 @@ def _diagnose_task(task: Task, events: list[TaskEvent]) -> dict:
     elif classification == "cancelled":
         hypotheses.append({
             "message": "The task was cancelled or had cancellation requested.",
-            "evidence_event_ids": [e.id for e in events if e.event_type in {"task.cancelled", "task.cancellation_requested"}],
+            "evidence_event_ids": [e.id for e in events if e.event_type in {"task.cancelled", "task.cancel_requested", "task.cancellation_requested"}],
             "recommendation": "Confirm why cancellation was requested before deciding whether to create a new task.",
         })
 
@@ -831,7 +831,15 @@ def cancel_task(task_id: str) -> Task:
             if queued_result.rowcount == 1:
                 db.add(TaskEvent(
                     task_id=task_id, event_type="task.cancelled",
-                    payload={"status": "cancelled", "cancelled_before_start": True},
+                    payload={
+                        "status": "cancelled",
+                        "action": "cancel",
+                        "reason": "cancelled_before_start",
+                        "cancelled_before_start": True,
+                        "requested_by": "api_client",
+                        "control_surface": "task_api",
+                        "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
+                    },
                 ))
             else:
                 running_result = db.execute(
@@ -842,7 +850,13 @@ def cancel_task(task_id: str) -> Task:
                 if running_result.rowcount == 1:
                     db.add(TaskEvent(
                         task_id=task_id, event_type="task.cancel_requested",
-                        payload={"status": "running"},
+                        payload={
+                            "status": "requested",
+                            "action": "cancel",
+                            "requested_by": "api_client",
+                            "control_surface": "task_api",
+                            "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
+                        },
                     ))
             db.commit()
             db.refresh(task)
@@ -1040,7 +1054,14 @@ def cancel_workflow(workflow_id: str) -> dict:
             )
             if queued_result.rowcount == 1:
                 db.add(TaskEvent(task_id=task_id, event_type="task.cancelled", payload={
-                    "status": "cancelled", "cancelled_before_start": True, "workflow_id": workflow_id,
+                    "status": "cancelled",
+                    "action": "cancel",
+                    "reason": "workflow_cancelled",
+                    "cancelled_before_start": True,
+                    "workflow_id": workflow_id,
+                    "requested_by": "api_client",
+                    "control_surface": "workflow_api",
+                    "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
                 }))
                 continue
             running_result = db.execute(
@@ -1049,9 +1070,134 @@ def cancel_workflow(workflow_id: str) -> dict:
                 .values(cancel_requested=1)
             )
             if running_result.rowcount == 1:
-                db.add(TaskEvent(task_id=task_id, event_type="task.cancellation_requested", payload={
-                    "reason": "workflow_cancelled", "workflow_id": workflow_id,
+                db.add(TaskEvent(task_id=task_id, event_type="task.cancel_requested", payload={
+                    "status": "requested",
+                    "action": "cancel",
+                    "reason": "workflow_cancelled",
+                    "workflow_id": workflow_id,
+                    "requested_by": "api_client",
+                    "control_surface": "workflow_api",
+                    "note": "The API does not authenticate callers; requested_by identifies the interface, not a verified human identity.",
                 }))
         db.commit()
         db.refresh(workflow)
         return _workflow_payload(db, workflow)
+
+
+@app.get("/sessions")
+def list_agent_sessions(limit: int = Query(default=100, ge=1, le=500)) -> list[dict]:
+    """List distinct Claude Code sessions from persisted invocation lifecycle events."""
+    with SessionLocal() as db:
+        started_events = list(db.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.event_type == "agent.session.started")
+            .order_by(TaskEvent.occurred_at.desc(), TaskEvent.id.desc())
+        ))
+        sessions = []
+        seen: set[str] = set()
+        for event in started_events:
+            session_id = (event.payload or {}).get("session_id")
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            task = db.get(Task, event.task_id)
+            if task is None:
+                continue
+            sessions.append({
+                "session_id": session_id,
+                "task_id": task.id,
+                "task_title": task.title,
+                "workflow_id": task.workflow_id,
+                "status": task.status,
+                "started_at": event.occurred_at,
+                "finished_at": task.finished_at,
+                "worker_id": (event.payload or {}).get("worker_id") or task.worker_id,
+                "attempt": (event.payload or {}).get("attempt"),
+                "controls": {
+                    "cancel": task.status in {"queued", "running"},
+                    "pause": False,
+                    "resume": False,
+                },
+                "limitations": [
+                    "Session IDs are indexed from persisted agent.session.started events, including prior task attempts.",
+                    "Pause and resume are unavailable for this CLI adapter.",
+                ],
+            })
+            if len(sessions) >= limit:
+                break
+        return sessions
+
+
+@app.get("/sessions/{session_id}")
+def get_agent_session(session_id: str) -> dict:
+    """Return one invocation's events separately from task-scoped control audit."""
+    with SessionLocal() as db:
+        started = list(db.scalars(
+            select(TaskEvent).where(TaskEvent.event_type == "agent.session.started")
+            .order_by(TaskEvent.occurred_at, TaskEvent.id)
+        ))
+        matching = [
+            event for event in started
+            if (event.payload or {}).get("session_id") == session_id
+        ]
+        if not matching:
+            raise HTTPException(status_code=404, detail="session not found")
+        task_ids = {event.task_id for event in matching}
+        if len(task_ids) != 1:
+            raise HTTPException(status_code=409, detail="session ID is associated with multiple tasks")
+        task = db.get(Task, next(iter(task_ids)))
+        if task is None:
+            raise HTTPException(status_code=404, detail="session not found")
+
+        events = list(db.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.occurred_at, TaskEvent.id)
+        ))
+        session_events = []
+        task_events = []
+        for event in events:
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            item = {
+                "id": event.id,
+                "occurred_at": event.occurred_at,
+                "event_type": event.event_type,
+                "scope": "session",
+                "payload": payload,
+            }
+            if (
+                event.event_type.startswith("agent.session.")
+                or event.event_type.startswith("claude.")
+            ) and payload.get("session_id") == session_id:
+                session_events.append(item)
+            elif event.event_type in {"task.cancel_requested", "task.cancelled"}:
+                task_events.append({**item, "scope": "task"})
+            elif (
+                event.event_type == "agent.control.acknowledged"
+                and payload.get("session_id") == session_id
+            ):
+                session_events.append(item)
+
+        started_payload = matching[0].payload or {}
+        return {
+            "session_id": session_id,
+            "task_id": task.id,
+            "task_title": task.title,
+            "workflow_id": task.workflow_id,
+            "status": task.status,
+            "started_at": matching[0].occurred_at,
+            "finished_at": task.finished_at,
+            "worker_id": started_payload.get("worker_id") or task.worker_id,
+            "attempt": started_payload.get("attempt"),
+            "controls": {
+                "cancel": task.status in {"queued", "running"},
+                "pause": False,
+                "resume": False,
+            },
+            "events": session_events,
+            "task_events": task_events,
+            "limitations": [
+                "Pause/resume are not supported; no signal-based suspension is exposed as a resumable session.",
+                "Task-scoped cancellation audit is returned separately and is not attributed to a specific invocation.",
+                "The API has no authentication, so control audit records identify the API surface, not a verified human operator.",
+            ],
+        }

@@ -77,31 +77,71 @@ def build_command(prompt: str, permission_mode: str) -> list[str]:
     return command
 
 
-async def terminate_process_tree(proc: asyncio.subprocess.Process, grace_seconds: float = 5.0) -> None:
-    """Stop the agent and any subprocesses it spawned, escalating if needed."""
-    if proc.returncode is not None:
-        return
+def process_group_exists(pgid: int) -> bool:
+    """Return whether a POSIX process group still exists (including unverified access)."""
     try:
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGTERM)
-        else:
-            proc.terminate()
+        os.killpg(pgid, 0)
+        return True
     except ProcessLookupError:
-        pass
-    except (PermissionError, OSError):
-        if proc.returncode is None:
-            proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
-    except asyncio.TimeoutError:
+        return False
+    except PermissionError:
+        return True
+
+
+async def terminate_process_tree(
+    proc: asyncio.subprocess.Process, grace_seconds: float = 5.0
+) -> bool:
+    """Terminate the whole process group, even when its leader has already exited.
+
+    Returns True only when POSIX confirms the group no longer exists. On platforms
+    without process-group probing, False means termination could not be verified.
+    """
+    if os.name == "posix":
+        pgid = proc.pid  # subprocesses are launched with start_new_session=True
         try:
-            if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
+            os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        await proc.wait()
+        except (PermissionError, OSError):
+            return False
+
+        if proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+            except asyncio.TimeoutError:
+                pass
+
+        deadline = asyncio.get_running_loop().time() + grace_seconds
+        while process_group_exists(pgid) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        if process_group_exists(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except (PermissionError, OSError):
+                return False
+            if proc.returncode is None:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    return False
+            verify_deadline = asyncio.get_running_loop().time() + 1.0
+            while process_group_exists(pgid) and asyncio.get_running_loop().time() < verify_deadline:
+                await asyncio.sleep(0.05)
+        return not process_group_exists(pgid)
+
+    if proc.returncode is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    return False
 
 
 async def _git_output(workspace: Path, *args: str) -> bytes:
@@ -606,6 +646,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     })
     exit_code, error_summary, session_id = None, None, None
     terminal_reason = None
+    process_tree_stopped: bool | None = None
 
     try:
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
@@ -627,8 +668,26 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     try:
                         event = json.loads(decoded)
                         event_type = str(event.get("type", "unknown"))
-                        if event_type == "result" and event.get("session_id"):
-                            session_id = str(event["session_id"])
+                        observed_session_id = event.get("session_id")
+                        if observed_session_id:
+                            observed_session_id = str(observed_session_id)
+                            if session_id is None:
+                                session_id = observed_session_id
+                                with SessionLocal() as db:
+                                    current = db.get(Task, task_id)
+                                    if current is not None and current.session_id != observed_session_id:
+                                        current.session_id = observed_session_id
+                                        db.add(TaskEvent(
+                                            task_id=task_id,
+                                            event_type="agent.session.started",
+                                            payload={
+                                                "session_id": observed_session_id,
+                                                "worker_id": worker_id,
+                                                "attempt": attempt_number,
+                                                "source_event_type": event_type,
+                                            },
+                                        ))
+                                        db.commit()
                         add_event(task_id, f"claude.{event_type}", event)
                     except json.JSONDecodeError:
                         add_event(task_id, "claude.non_json_output", {"line": decoded[:4000]})
@@ -650,13 +709,13 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                             current = db.get(Task, task_id)
                             cancel_requested = bool(current and current.cancel_requested)
                         if cancel_requested:
-                            await terminate_process_tree(proc)
+                            process_tree_stopped = await terminate_process_tree(proc)
                             terminal_reason = "cancelled"
                             error_summary = "Cancelled by request"
                             add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
                             break
                         if asyncio.get_running_loop().time() >= deadline:
-                            await terminate_process_tree(proc)
+                            process_tree_stopped = await terminate_process_tree(proc)
                             terminal_reason = "timeout"
                             error_summary = f"Task timed out after {MAX_TASK_SECONDS} seconds"
                             add_event(task_id, "executor.timed_out", {
@@ -664,8 +723,19 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                                 "exit_code": proc.returncode,
                             })
                             break
+                # A cancellation can race with the leader's natural exit. Check
+                # the persisted request after the wait loop and still clean up
+                # descendants in the process group before finalizing the task.
+                with SessionLocal() as db:
+                    current = db.get(Task, task_id)
+                    cancel_requested_after_exit = bool(current and current.cancel_requested)
+                if cancel_requested_after_exit and terminal_reason is None:
+                    process_tree_stopped = await terminate_process_tree(proc)
+                    terminal_reason = "cancelled"
+                    error_summary = "Cancelled by request"
+                    add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
             except asyncio.CancelledError:
-                await terminate_process_tree(proc)
+                process_tree_stopped = await terminate_process_tree(proc)
                 terminal_reason = "worker_interrupted"
                 error_summary = "Worker interrupted; Claude subprocess tree terminated"
                 add_event(task_id, "executor.interrupted", {"reason": "worker_shutdown"})
@@ -676,6 +746,20 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
+
+    if session_id is not None:
+        add_event(task_id, "agent.session.ended", {
+            "session_id": session_id,
+            "worker_id": worker_id,
+            "attempt": attempt_number,
+            "exit_code": exit_code,
+            "terminal_reason": terminal_reason,
+            "status": "cancelled" if terminal_reason == "cancelled" else (
+                "timed_out" if terminal_reason == "timeout" else (
+                    "failed" if exit_code not in (0, None) or error_summary else "completed"
+                )
+            ),
+        })
 
     verification_status = "pending" if verification_commands else "not_configured"
     verification_results = []
@@ -916,6 +1000,16 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         task.verification_status = verification_status
         task.worker_id = None
         task.lease_expires_at = None
+        if task.cancel_requested or terminal_reason == "cancelled":
+            db.add(TaskEvent(task_id=task_id, event_type="agent.control.acknowledged", payload={
+                "action": "cancel",
+                "status": "acknowledged",
+                "acknowledged_by": worker_id,
+                "session_id": session_id,
+                "process_tree_stopped": process_tree_stopped is True,
+                "process_tree_status": "stopped" if process_tree_stopped is True else "not_verified",
+                "note": "The worker completed its cancellation path; process-tree termination is reported as stopped only when the process group was independently verified absent.",
+            }))
         db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
             "status": task.status,
             "exit_code": exit_code,

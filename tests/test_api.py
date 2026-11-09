@@ -2400,7 +2400,7 @@ def test_repair_runner_cleans_inherited_anthropic_model_override(tmp_path, monke
     task_dir.mkdir(parents=True)
 
     passed, _, error = asyncio.run(worker.run_repair_attempt(
-        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, [],
+        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, ["true"],
     ))
 
     assert passed is True

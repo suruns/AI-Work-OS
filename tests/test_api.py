@@ -49,7 +49,7 @@ def test_dashboard_is_served():
     assert "function renderTaskResult(events)" in response.text
     assert "Agent result" in response.text
     assert "function renderArtifacts(data)" in response.text
-    assert "function renderArtifactLibrary(data)" in response.text
+    assert "function renderArtifactLibrary(data,append=false)" in response.text
     assert "Artifact library" in response.text
     assert 'api("/artifacts?"' in response.text
     assert "Workspace files changed during task" in response.text
@@ -93,6 +93,54 @@ def test_global_artifact_inventory_is_read_only_and_filterable(tmp_path, monkeyp
     assert any(item["task_id"] == task_id for item in searched.json()["items"])
     assert (task_dir / "stdout.jsonl").is_file()
     assert (task_dir / "verification.json").is_file()
+
+
+def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created_ids = []
+    for index in range(3):
+        response = client.post("/tasks", json={
+            "title": f"Cursor page {index}",
+            "prompt": "Read only",
+            "workspace_path": str(tmp_path),
+        })
+        assert response.status_code == 201
+        task_id = response.json()["id"]
+        created_ids.append(task_id)
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            task.created_at = utcnow() + timedelta(seconds=index + 1)
+            db.commit()
+        task_dir = api_module.STORAGE / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\\n', encoding="utf-8")
+
+    first = client.get("/artifacts?limit=20&task_limit=1").json()
+    assert first["scanned_tasks"] == 1
+    assert first["has_more_tasks"] is True
+    assert first["next_cursor_task_id"] == first["items"][0]["task_id"]
+
+    second = client.get(
+        f"/artifacts?limit=20&task_limit=1&before_task_id={first['next_cursor_task_id']}"
+    ).json()
+    assert second["scanned_tasks"] == 1
+    assert second["has_more_tasks"] is True
+    assert first["items"][0]["task_id"] != second["items"][0]["task_id"]
+
+    third = client.get(
+        f"/artifacts?limit=20&task_limit=1&before_task_id={second['next_cursor_task_id']}"
+    ).json()
+    page_ids = [first["items"][0]["task_id"], second["items"][0]["task_id"], third["items"][0]["task_id"]]
+    assert len(set(page_ids)) == 3
+    assert set(page_ids) == set(created_ids)
+    # The cursor identifies the final task scanned on this page. If older
+    # tasks remain in the shared database, that task can be one of our fixtures.
+    assert third["has_more_tasks"] == (third["next_cursor_task_id"] is not None)
+    assert third["next_cursor_task_id"] == (
+        third["items"][0]["task_id"] if third["has_more_tasks"] else None
+    )
+    assert client.get("/artifacts?task_id=missing&before_task_id=bad").status_code == 400
+    assert client.get("/artifacts?before_task_id=missing").status_code == 404
 
 
 def test_stats_shape():

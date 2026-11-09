@@ -39,7 +39,8 @@ The global inventory accepts `before_task_id` to continue from the task at the e
 - `task_limit` bounds the number of tasks inspected on each request (1–500).
 - `limit` bounds returned artifact items on each request (1–500).
 - `has_more_tasks` indicates whether another task page exists.
-- `next_cursor_task_id` is the final task in the current page when another page exists; pass it as `before_task_id` on the next request.
+- `next_cursor_task_id` is the final task in the current page when another page exists and the item limit was not reached; pass it as `before_task_id` on the next request.
+- If `truncated` is true, the task page contains more matching artifacts than `limit`; no continuation cursor is returned because advancing would skip items. Narrow the search and restart from the first page.
 - `task_id` and `before_task_id` are mutually exclusive.
 - `count` remains the number of matching items discovered in the current task page, not a global total.
 

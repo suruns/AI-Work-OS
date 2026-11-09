@@ -133,8 +133,8 @@ function renderArtifactLibrary(data,append=false){
  $("artifact-library-count").textContent=artifactItems.length+" shown · "+artifactScannedTasks+" tasks scanned";
  $("artifact-library-results").innerHTML=artifactItems.length?'<div class="artifact-list">'+artifactItems.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"workspace_file")+' · '+esc(item.size_bytes??0)+' bytes</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">Download</a></div>').join("")+'</div>':'<div class="empty">No matching artifacts found in the scanned tasks.</div>';
  if(data.truncated)$("artifact-library-results").insertAdjacentHTML("beforeend",'<div class="muted small" style="margin-top:8px">This page reached its result limit. Narrow the search to see more matches within these tasks.</div>');
- $("artifact-library-more").hidden=!data.has_more_tasks;
- $("artifact-library-page-note").textContent=data.has_more_tasks?"More older tasks are available.":("End of task history · "+artifactScannedTasks+" tasks scanned");
+ $("artifact-library-more").hidden=!data.next_cursor_task_id;
+ $("artifact-library-page-note").textContent=data.truncated?"This page reached the item limit. Narrow the search and start again to avoid skipping matches.":(data.has_more_tasks?"More older tasks are available.":"End of task history · "+artifactScannedTasks+" tasks scanned");
 }
 async function loadArtifactLibrary(append=false){
  const params=new URLSearchParams({limit:"200",task_limit:"100"});

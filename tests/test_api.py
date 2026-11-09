@@ -107,6 +107,10 @@ def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch
         assert response.status_code == 201
         task_id = response.json()["id"]
         created_ids.append(task_id)
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            task.created_at = utcnow() + timedelta(seconds=index + 1)
+            db.commit()
         task_dir = api_module.STORAGE / "tasks" / task_id
         task_dir.mkdir(parents=True)
         (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\\n', encoding="utf-8")
@@ -126,11 +130,12 @@ def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch
     third = client.get(
         f"/artifacts?limit=20&task_limit=1&before_task_id={second['next_cursor_task_id']}"
     ).json()
-    assert third["has_more_tasks"] is True or third["next_cursor_task_id"] is None
     page_ids = [first["items"][0]["task_id"], second["items"][0]["task_id"], third["items"][0]["task_id"]]
     assert len(set(page_ids)) == 3
     assert set(page_ids) == set(created_ids)
+    assert third["next_cursor_task_id"] is None
     assert client.get("/artifacts?task_id=missing&before_task_id=bad").status_code == 400
+    assert client.get("/artifacts?before_task_id=missing").status_code == 404
 
 
 def test_stats_shape():

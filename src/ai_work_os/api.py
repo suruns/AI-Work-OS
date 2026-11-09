@@ -788,7 +788,7 @@ def list_artifact_inventory(
         "scanned_tasks": len(tasks),
         "truncated": len(items) > limit,
         "has_more_tasks": has_more_tasks,
-        "next_cursor_task_id": tasks[-1].id if has_more_tasks and tasks else None,
+        "next_cursor_task_id": tasks[-1].id if has_more_tasks and tasks and len(items) <= limit else None,
         "read_only": True,
         "note": "Inventory is derived from existing task artifacts and workspace-change reports. It does not move, rename, or delete files.",
     }

@@ -30,3 +30,17 @@ The Artifact library panel supports a manual search across recent task outputs a
 - The inventory is bounded to the most recent `task_limit` tasks. Increase that parameter or filter by task ID when searching older history.
 - The API remains intended for a trusted local developer machine; authentication and multi-user isolation are out of scope.
 - No database table, migration, dependency, or background scanner is added.
+
+
+## Phase 6.8 — Stable task-cursor pagination
+
+The global inventory accepts `before_task_id` to continue from the task at the end of the previous page. Tasks are ordered by `created_at DESC, id DESC`; the cursor applies a keyset boundary on both fields, so newly created tasks do not shift older pages.
+
+- `task_limit` bounds the number of tasks inspected on each request (1–500).
+- `limit` bounds returned artifact items on each request (1–500).
+- `has_more_tasks` indicates whether another task page exists.
+- `next_cursor_task_id` is the final task in the current page when another page exists; pass it as `before_task_id` on the next request.
+- `task_id` and `before_task_id` are mutually exclusive.
+- `count` remains the number of matching items discovered in the current task page, not a global total.
+
+The Dashboard loads older task pages on demand. Each request is bounded and does not run as part of the five-second task refresh loop. This is keyset pagination over tasks rather than an offset into individual artifacts, avoiding duplicate/skip behavior when newer tasks are added between page requests.

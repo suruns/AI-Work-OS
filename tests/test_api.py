@@ -95,6 +95,44 @@ def test_global_artifact_inventory_is_read_only_and_filterable(tmp_path, monkeyp
     assert (task_dir / "verification.json").is_file()
 
 
+def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")
+    created_ids = []
+    for index in range(3):
+        response = client.post("/tasks", json={
+            "title": f"Cursor page {index}",
+            "prompt": "Read only",
+            "workspace_path": str(tmp_path),
+        })
+        assert response.status_code == 201
+        task_id = response.json()["id"]
+        created_ids.append(task_id)
+        task_dir = api_module.STORAGE / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\\n', encoding="utf-8")
+
+    first = client.get("/artifacts?limit=20&task_limit=1").json()
+    assert first["scanned_tasks"] == 1
+    assert first["has_more_tasks"] is True
+    assert first["next_cursor_task_id"] == first["items"][0]["task_id"]
+
+    second = client.get(
+        f"/artifacts?limit=20&task_limit=1&before_task_id={first['next_cursor_task_id']}"
+    ).json()
+    assert second["scanned_tasks"] == 1
+    assert second["has_more_tasks"] is True
+    assert first["items"][0]["task_id"] != second["items"][0]["task_id"]
+
+    third = client.get(
+        f"/artifacts?limit=20&task_limit=1&before_task_id={second['next_cursor_task_id']}"
+    ).json()
+    assert third["has_more_tasks"] is True or third["next_cursor_task_id"] is None
+    page_ids = [first["items"][0]["task_id"], second["items"][0]["task_id"], third["items"][0]["task_id"]]
+    assert len(set(page_ids)) == 3
+    assert set(page_ids) == set(created_ids)
+    assert client.get("/artifacts?task_id=missing&before_task_id=bad").status_code == 400
+
+
 def test_stats_shape():
     response = client.get("/stats")
     assert response.status_code == 200

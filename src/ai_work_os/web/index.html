@@ -45,7 +45,8 @@
     <button class="primary" type="submit" id="artifact-library-search">Search</button>
   </form>
   <div id="artifact-library-results" style="margin-top:12px"><div class="empty">Search to load artifacts from recent tasks.</div></div>
-  <div class="muted small" style="margin-top:10px">Files are never moved, renamed, or deleted by this inventory. Downloads remain scoped to each task's existing artifact permissions.</div>
+  <div class="actions" style="margin-top:10px"><button type="button" id="artifact-library-more" hidden>Load older tasks</button><span id="artifact-library-page-note" class="muted small"></span></div>
+  <div class="muted small" style="margin-top:10px">Search pages are bounded to recent tasks. Load older tasks to continue; the cursor remains stable when newer tasks are created. Files are never moved, renamed, or deleted.</div>
 </section>
 <div class="layout">
 <section class="panel"><h2>＋ Create task</h2><form id="create-form">
@@ -124,21 +125,27 @@ function renderWorkers(data){
 function renderTasks(){ $("task-count").textContent=tasks.length+" shown";$("tasks").innerHTML=tasks.length?tasks.map(t=>'<button class="task '+(selected===t.id?'active':'')+'" data-id="'+esc(t.id)+'"><div class="task-head"><span class="task-title">'+esc(t.title)+'</span>'+pill(t.status)+'</div><div class="meta">'+esc(t.workspace_path)+'<br>'+esc(date(t.created_at))+'<br>Priority: '+esc(t.priority??0)+' · Attempt: '+esc(t.attempt_count??0)+'/'+esc(t.max_attempts??1)+'</div></button>').join(""):'<div class="empty">No tasks yet. Create your first task.</div>';$("tasks").querySelectorAll(".task[data-id]").forEach(b=>b.addEventListener("click",()=>{selected=b.dataset.id;renderTasks();loadDetail(selected)}))}
 async function refresh(){try{const [ts,st,ws,workers,insights]=await Promise.all([api("/tasks?limit=100"),api("/stats"),api("/workflows?limit=50"),api("/workers"),api("/insights?period_days="+encodeURIComponent($("insights-period").value))]);tasks=ts;renderWorkflows(ws);renderWorkers(workers);renderInsights(insights);$("s-total").textContent=st.total;$("s-queued").textContent=st.by_status.queued||0;$("s-running").textContent=st.by_status.running||0;$("s-succeeded").textContent=st.by_status.succeeded||0;$("connection").textContent="API connected";$("connection").style.color="var(--green)";if(selected&&!tasks.some(t=>t.id===selected))selected=null;if(!selected&&tasks.length)selected=tasks[0].id;renderTasks();if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow);if(selected)await loadDetail(selected);else $("detail").innerHTML='<div class="empty">Select a task to inspect its timeline.</div>'}catch(e){$("connection").textContent="API unavailable";$("connection").style.color="var(--red)";$("toast").textContent=e.message}}
 
-function renderArtifactLibrary(data){
- const items=data?.items||[];
- $("artifact-library-count").textContent=items.length+" shown · "+data.count+" matched"+(data.truncated?" · more available":"");
- $("artifact-library-results").innerHTML=items.length?'<div class="artifact-list">'+items.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"workspace_file")+' · '+esc(item.size_bytes??0)+' bytes</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">Download</a></div>').join("")+'</div>':'<div class="empty">No matching artifacts found in the scanned tasks.</div>';
- if(data.truncated)$("artifact-library-results").insertAdjacentHTML("beforeend",'<div class="muted small" style="margin-top:8px">Result limit reached. Narrow the search or increase the task scan window in the API.</div>');
+let artifactCursor=null,artifactItems=[],artifactScannedTasks=0;
+function renderArtifactLibrary(data,append=false){
+ const pageItems=data?.items||[];
+ artifactItems=append?[...artifactItems,...pageItems]:pageItems;
+ artifactScannedTasks+=data?.scanned_tasks||0;
+ $("artifact-library-count").textContent=artifactItems.length+" shown · "+artifactScannedTasks+" tasks scanned";
+ $("artifact-library-results").innerHTML=artifactItems.length?'<div class="artifact-list">'+artifactItems.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"workspace_file")+' · '+esc(item.size_bytes??0)+' bytes</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">Download</a></div>').join("")+'</div>':'<div class="empty">No matching artifacts found in the scanned tasks.</div>';
+ if(data.truncated)$("artifact-library-results").insertAdjacentHTML("beforeend",'<div class="muted small" style="margin-top:8px">This page reached its result limit. Narrow the search to see more matches within these tasks.</div>');
+ $("artifact-library-more").hidden=!data.has_more_tasks;
+ $("artifact-library-page-note").textContent=data.has_more_tasks?"More older tasks are available.":("End of task history · "+artifactScannedTasks+" tasks scanned");
 }
-async function loadArtifactLibrary(){
+async function loadArtifactLibrary(append=false){
  const params=new URLSearchParams({limit:"200",task_limit:"100"});
  const q=$("artifact-library-query").value.trim(),kind=$("artifact-library-kind").value;
  if(q)params.set("q",q);if(kind)params.set("kind",kind);
- $("artifact-library-search").disabled=true;
- $("artifact-library-results").innerHTML='<div class="event"><div class="muted small">Scanning recent task artifacts…</div></div>';
- try{const data=await api("/artifacts?"+params.toString());renderArtifactLibrary(data)}
+ if(append&&artifactCursor)params.set("before_task_id",artifactCursor);
+ $("artifact-library-search").disabled=true;$("artifact-library-more").disabled=true;
+ if(!append){artifactCursor=null;artifactItems=[];artifactScannedTasks=0;$("artifact-library-results").innerHTML='<div class="event"><div class="muted small">Scanning recent task artifacts…</div></div>'}
+ try{const data=await api("/artifacts?"+params.toString());artifactCursor=data.next_cursor_task_id;renderArtifactLibrary(data,append)}
  catch(e){$("artifact-library-results").innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
- finally{$("artifact-library-search").disabled=false}
+ finally{$("artifact-library-search").disabled=false;$("artifact-library-more").disabled=false}
 }
 
 function renderTaskResult(events){
@@ -230,6 +237,7 @@ $("workflow-form").addEventListener("submit",async e=>{
 });
 addWorkflowRow();
 $("artifact-library-form").addEventListener("submit",async e=>{e.preventDefault();await loadArtifactLibrary()});
+$("artifact-library-more").addEventListener("click",()=>loadArtifactLibrary(true));
 
 $("refresh").addEventListener("click",refresh);$("insights-period").addEventListener("change",loadInsights);refresh();setInterval(refresh,5000);
 </script></body></html>

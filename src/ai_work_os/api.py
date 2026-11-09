@@ -734,16 +734,30 @@ def list_task_artifacts(task_id: str) -> dict:
 def list_artifact_inventory(
     limit: int = Query(default=100, ge=1, le=500),
     task_limit: int = Query(default=100, ge=1, le=500),
+    before_task_id: str | None = Query(default=None, min_length=1, max_length=36),
     task_id: str | None = None,
     kind: str | None = Query(default=None, min_length=1, max_length=80),
     q: str | None = Query(default=None, max_length=200),
 ) -> dict:
-    """Search the read-only artifact inventory across recent tasks."""
+    """Search a bounded, stable page of the read-only artifact inventory."""
+    if task_id and before_task_id:
+        raise HTTPException(status_code=400, detail="task_id and before_task_id cannot be combined")
     with SessionLocal() as db:
-        statement = select(Task).order_by(Task.created_at.desc(), Task.id.desc()).limit(task_limit)
+        statement = select(Task)
         if task_id:
             statement = statement.where(Task.id == task_id)
-        tasks = db.scalars(statement).all()
+        if before_task_id:
+            cursor_task = db.get(Task, before_task_id)
+            if not cursor_task:
+                raise HTTPException(status_code=404, detail="artifact pagination cursor task not found")
+            statement = statement.where(
+                (Task.created_at < cursor_task.created_at)
+                | ((Task.created_at == cursor_task.created_at) & (Task.id < cursor_task.id))
+            )
+        statement = statement.order_by(Task.created_at.desc(), Task.id.desc()).limit(task_limit + 1)
+        page = db.scalars(statement).all()
+        has_more_tasks = len(page) > task_limit
+        tasks = page[:task_limit]
         if task_id and not tasks:
             raise HTTPException(status_code=404, detail="task not found")
 
@@ -773,6 +787,8 @@ def list_artifact_inventory(
         "count": len(items),
         "scanned_tasks": len(tasks),
         "truncated": len(items) > limit,
+        "has_more_tasks": has_more_tasks,
+        "next_cursor_task_id": tasks[-1].id if has_more_tasks and tasks else None,
         "read_only": True,
         "note": "Inventory is derived from existing task artifacts and workspace-change reports. It does not move, rename, or delete files.",
     }

@@ -35,6 +35,7 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 ## Safety
 - Never run this service against untrusted workspaces.
 - The worker does not add --dangerously-skip-permissions or bypassPermissions.
+- The worker removes an inherited `ANTHROPIC_MODEL` override from the Claude subprocess environment.
 - CLI output is stored under storage/tasks/<task-id>/; it may contain source code or secrets. Protect this directory.
 - Bind the API to localhost unless authentication and network controls have been configured.
 - New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use local Claude Code settings" only when the task is expected to edit files; that mode deliberately leaves permission behavior to the CLI's local configuration.

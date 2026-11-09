@@ -2281,6 +2281,95 @@ def test_running_task_cancel_records_request_surface(tmp_path):
     assert requested[0]["payload"]["control_surface"] == "task_api"
 
 
+def test_worker_rejects_zero_exit_without_terminal_output(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json\\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'session-incomplete'}))\\n"
+        "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'partial'}], 'stop_reason': None}}))\\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Incomplete output must fail", "prompt": "Inspect",
+        "workspace_path": str(workspace), "max_attempts": 2,
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["exit_code"] == 0
+    assert "without a terminal result event" in task["error_summary"]
+    assert task["attempt_count"] == 1
+    events = client.get(f"/tasks/{task_id}/events").json()
+    validated = [event for event in events if event["event_type"] == "executor.output_validated"]
+    assert len(validated) == 1
+    assert validated[0]["payload"]["complete"] is False
+    finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
+    assert finished["payload"]["status"] == "failed"
+    assert finished["payload"]["terminal_reason"] == "incomplete_output"
+    ended = [event for event in events if event["event_type"] == "agent.session.ended"][-1]
+    assert ended["payload"]["status"] == "failed"
+
+
+def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json, os, sys\\n"
+        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-clean-model-env'}))\\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-flash")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Clean inherited model override", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    stderr = (tmp_path / "storage" / "tasks" / task_id / "stderr.log").read_text()
+    assert "ANTHROPIC_MODEL=None" in stderr
+
+
+def test_worker_accepts_final_assistant_text_without_result_event(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json\\n"
+        "print(json.dumps({'type': 'assistant', 'session_id': 'session-final-assistant', "
+        "'message': {'content': [{'type': 'text', 'text': 'Completed report'}], 'stop_reason': 'end_turn'}}))\\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Final assistant output", "prompt": "Inspect", "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    events = client.get(f"/tasks/{task_id}/events").json()
+    validated = [event for event in events if event["event_type"] == "executor.output_validated"][-1]
+    assert validated["payload"]["completion_signal"] == "final_assistant_text"
+
+
 def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

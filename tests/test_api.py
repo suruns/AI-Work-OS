@@ -133,7 +133,11 @@ def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch
     page_ids = [first["items"][0]["task_id"], second["items"][0]["task_id"], third["items"][0]["task_id"]]
     assert len(set(page_ids)) == 3
     assert set(page_ids) == set(created_ids)
-    assert third["next_cursor_task_id"] is None
+    # The shared test database may contain older tasks from preceding tests.
+    # A continuation cursor is valid in that case; it must simply point past
+    # the three fixture tasks already covered by these pages.
+    assert third["has_more_tasks"] == (third["next_cursor_task_id"] is not None)
+    assert third["next_cursor_task_id"] not in created_ids
     assert client.get("/artifacts?task_id=missing&before_task_id=bad").status_code == 400
     assert client.get("/artifacts?before_task_id=missing").status_code == 404
 

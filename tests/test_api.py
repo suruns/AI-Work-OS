@@ -2346,10 +2346,10 @@ def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeyp
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json\\n"
+        "#!/usr/bin/env python3\n"
+        "import json\n"
         "print(json.dumps({'type': 'result', 'result': '', 'is_error': False, "
-        "'stop_reason': 'tool_use', 'session_id': 'session-tool-use-result'}))\\n",
+        "'stop_reason': 'tool_use', 'session_id': 'session-tool-use-result'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
@@ -2381,10 +2381,10 @@ def test_repair_runner_cleans_inherited_anthropic_model_override(tmp_path, monke
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json, os, sys\\n"
-        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\\n"
-        "print(json.dumps({'type': 'result', 'result': 'finished'}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)

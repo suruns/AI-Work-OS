@@ -680,7 +680,14 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                         event = json.loads(decoded)
                         event_type = str(event.get("type", "unknown"))
                         if event_type == "result" and not bool(event.get("is_error", False)):
-                            result_event_seen = True
+                            # A result event is the normal terminal envelope. If the
+                            # CLI includes an explicit stop reason, only natural turn
+                            # completion is accepted; tool-use handoffs are not final.
+                            stop_reason = event.get("stop_reason")
+                            if stop_reason is None:
+                                stop_reason = (event.get("message") or {}).get("stop_reason")
+                            if stop_reason in (None, "end_turn"):
+                                result_event_seen = True
                         if event_type == "assistant":
                             message = event.get("message") or {}
                             content = message.get("content") or []

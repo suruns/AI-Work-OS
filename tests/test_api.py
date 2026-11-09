@@ -70,7 +70,7 @@ def test_global_artifact_inventory_is_read_only_and_filterable(tmp_path, monkeyp
     task_id = response.json()["id"]
     task_dir = api_module.STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True)
-    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
+    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\n', encoding="utf-8")
     (task_dir / "verification.json").write_text('{"status":"passed"}', encoding="utf-8")
 
     listing = client.get("/artifacts?limit=20&task_limit=20")
@@ -113,7 +113,7 @@ def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch
             db.commit()
         task_dir = api_module.STORAGE / "tasks" / task_id
         task_dir.mkdir(parents=True)
-        (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\\n', encoding="utf-8")
+        (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\n', encoding="utf-8")
 
     first = client.get("/artifacts?limit=20&task_limit=1").json()
     assert first["scanned_tasks"] == 1
@@ -2286,10 +2286,10 @@ def test_worker_rejects_zero_exit_without_terminal_output(tmp_path, monkeypatch)
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json\\n"
-        "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'session-incomplete'}))\\n"
-        "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'partial'}], 'stop_reason': None}}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'session-incomplete'}))\n"
+        "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'partial'}], 'stop_reason': None}}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
@@ -2322,10 +2322,10 @@ def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json, os, sys\\n"
-        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\\n"
-        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-clean-model-env'}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-clean-model-env'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
@@ -2349,10 +2349,10 @@ def test_worker_accepts_final_assistant_text_without_result_event(tmp_path, monk
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json\\n"
+        "#!/usr/bin/env python3\n"
+        "import json\n"
         "print(json.dumps({'type': 'assistant', 'session_id': 'session-final-assistant', "
-        "'message': {'content': [{'type': 'text', 'text': 'Completed report'}], 'stop_reason': 'end_turn'}}))\\n",
+        "'message': {'content': [{'type': 'text', 'text': 'Completed report'}], 'stop_reason': 'end_turn'}}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)

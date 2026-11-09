@@ -49,7 +49,7 @@ def test_dashboard_is_served():
     assert "function renderTaskResult(events)" in response.text
     assert "Agent result" in response.text
     assert "function renderArtifacts(data)" in response.text
-    assert "function renderArtifactLibrary(data)" in response.text
+    assert "function renderArtifactLibrary(data,append=false)" in response.text
     assert "Artifact library" in response.text
     assert 'api("/artifacts?"' in response.text
     assert "Workspace files changed during task" in response.text

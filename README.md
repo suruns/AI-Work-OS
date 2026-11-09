@@ -105,3 +105,8 @@ The dashboard supports creating workflows with prerequisite selection, inspectin
 Phase 6.5 adds a Dashboard summary and `GET /insights?period_days=30`. It reports queue wait, execution and end-to-end durations, task/workflow success rates, workflow wall-clock time, cumulative member-task execution time, and completed-task throughput. Workflow wall-clock time is kept separate from the sum of parallel task durations.
 
 Claude usage and cost are shown only when present in persisted Claude Code `result` events. Missing usage is reported as not collected; token counts are not converted into estimated dollar costs. Worker utilization is not historically available because only the latest heartbeat is retained, so the Dashboard labels worker data as a current snapshot. See [Phase 6.5 design notes](docs/phase-6-5-execution-insights.md) for metric definitions and coverage limitations.
+
+
+## Artifact library
+
+Phase 6.7 adds a read-only `GET /artifacts` inventory and Dashboard search across recent task-owned logs/reports and workspace files already recorded by task change reports. It does not move, rename, archive, or delete files. See [Phase 6.7 design notes](docs/phase-6-7-artifact-library.md) for filters and limitations.

@@ -2349,6 +2349,23 @@ def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch
     assert "BASE_URL=https://provider.example" in stderr
 
 
+def test_claude_setting_sources_can_be_explicitly_overridden(monkeypatch):
+    from ai_work_os.worker import claude_setting_sources, build_command
+
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,project")
+    assert claude_setting_sources() == ["user", "project"]
+    command = build_command("inspect", "configured")
+    assert command[command.index("--setting-sources") + 1] == "user,project"
+
+
+def test_claude_setting_sources_reject_invalid_values(monkeypatch):
+    from ai_work_os.worker import claude_setting_sources
+
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,managed")
+    with pytest.raises(ValueError, match="AI_WORK_OS_CLAUDE_SETTING_SOURCES"):
+        claude_setting_sources()
+
+
 def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2617,6 +2634,8 @@ def test_worker_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
     task_dir = tmp_path / "storage" / "tasks" / task_id
     stderr = (task_dir / "stderr.log").read_text(encoding="utf-8")
     assert "--strict-mcp-config" in stderr
+    assert "--setting-sources" in stderr
+    assert "project,local" in stderr
     assert "--disallowedTools" in stderr
     assert "mcp__*" in stderr
     assert 'MCP_CONFIG={"mcpServers": {}}' in stderr
@@ -2624,6 +2643,14 @@ def test_worker_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
     assert config_path.exists()
     assert config_path.stat().st_mode & 0o777 == 0o600
     events = client.get(f"/tasks/{task_id}/events").json()
+    settings_events = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_configured"
+    ]
+    assert len(settings_events) == 1
+    assert settings_events[0]["payload"]["policy"] == "exclude_user"
+    assert settings_events[0]["payload"]["setting_sources"] == ["project", "local"]
+    assert settings_events[0]["payload"]["execution_kind"] == "task"
     isolated = [event for event in events if event["event_type"] == "executor.mcp_isolation_configured"]
     assert len(isolated) == 1
     assert isolated[0]["payload"]["policy"] == "deny_all"

@@ -492,7 +492,7 @@ async def run_repair_attempt(
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
-    mcp_config_path: Path | None = None
+    mcp_config_path: Path | None = task_dir / "mcp-config.isolated.json"
     repair_started = False
     try:
         mcp_config_path = write_isolated_mcp_config(task_dir)
@@ -569,10 +569,11 @@ async def run_repair_attempt(
                 "repair_attempt": repair_number,
                 "max_repair_attempts": max_repair_attempts,
                 "mcp_policy": "deny_all",
-                "mcp_config_path": None,
+                "mcp_config_path": str(mcp_config_path) if mcp_config_path else None,
             })
             add_event(task_id, "executor.mcp_isolation_failed", {
                 "policy": "deny_all",
+                "config_path": str(mcp_config_path) if mcp_config_path else None,
                 "execution_kind": "repair",
                 "repair_attempt": repair_number,
                 "error": error,

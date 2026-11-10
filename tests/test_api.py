@@ -2353,9 +2353,21 @@ def test_claude_setting_sources_can_be_explicitly_overridden(monkeypatch):
     from ai_work_os.worker import claude_setting_sources, build_command
 
     monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,project")
+    monkeypatch.setattr(worker, "CLAUDE_MODEL", "deepseek-flash")
     assert claude_setting_sources() == ["user", "project"]
     command = build_command("inspect", "configured")
     assert command[command.index("--setting-sources") + 1] == "user,project"
+    assert command[command.index("--model") + 1] == "deepseek-flash"
+
+
+def test_worker_model_default_mappings_are_explicit_and_not_inherited(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "inherited-opus")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "inherited-sonnet")
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_DEFAULT_OPUS_MODEL", "worker-opus")
+    child_env = worker.claude_subprocess_env()
+    assert child_env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "worker-opus"
+    assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in child_env
+    assert "AI_WORK_OS_CLAUDE_DEFAULT_OPUS_MODEL" not in child_env
 
 
 def test_claude_setting_sources_reject_invalid_values(monkeypatch):

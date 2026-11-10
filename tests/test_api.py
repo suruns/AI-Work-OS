@@ -346,6 +346,7 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan.json()["permission_mode"] == "plan"
     plan_command = build_command("inspect", "plan")
     assert plan_command[-2:] == ["--permission-mode", "plan"]
+    assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
     configured = client.post("/tasks", json={
         "title": "Local configured mode",
@@ -357,6 +358,7 @@ def test_permission_modes_are_persisted_and_applied():
     assert configured.json()["permission_mode"] == "configured"
     configured_command = build_command("inspect", "configured")
     assert "--permission-mode" not in configured_command
+    assert configured_command[configured_command.index("--setting-sources") + 1] == "project,local"
 
 
 def test_event_timeline_compacts_thinking_tokens_but_preserves_raw_access(tmp_path):
@@ -2321,12 +2323,17 @@ def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch
     fake_claude.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\n"
+        "print('MODEL_ENV=' + json.dumps({k: v for k, v in os.environ.items() if k == 'ANTHROPIC_MODEL' or (k.startswith('ANTHROPIC_DEFAULT_') and k.endswith('_MODEL'))}), file=sys.stderr)\n"
+        "print('BASE_URL=' + str(os.environ.get('ANTHROPIC_BASE_URL')), file=sys.stderr)\n"
         "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-clean-model-env'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
     monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-flash")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "user-opus")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "user-sonnet")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "user-haiku")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://provider.example")
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
     created = client.post("/tasks", json={
@@ -2338,7 +2345,8 @@ def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "succeeded"
     stderr = (tmp_path / "storage" / "tasks" / task_id / "stderr.log").read_text()
-    assert "ANTHROPIC_MODEL=None" in stderr
+    assert "MODEL_ENV={}" in stderr
+    assert "BASE_URL=https://provider.example" in stderr
 
 
 def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeypatch):
@@ -2667,6 +2675,16 @@ def test_repair_runner_starts_with_deny_all_mcp_configuration(tmp_path, monkeypa
     assert len(started) == 1
     assert started[0]["payload"]["mcp_policy"] == "deny_all"
     assert started[0]["payload"]["mcp_config_path"] == str(config_path)
+    assert started[0]["payload"]["settings_policy"] == "exclude_user"
+    assert started[0]["payload"]["setting_sources"] == ["project", "local"]
+    settings_events = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_configured"
+    ]
+    assert len(settings_events) == 1
+    assert settings_events[0]["payload"]["policy"] == "exclude_user"
+    assert settings_events[0]["payload"]["setting_sources"] == ["project", "local"]
+    assert settings_events[0]["payload"]["execution_kind"] == "repair"
     isolated = [
         event for event in events
         if event["event_type"] == "executor.mcp_isolation_configured"

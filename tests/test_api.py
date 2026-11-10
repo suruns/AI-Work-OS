@@ -2726,13 +2726,15 @@ def test_repair_fails_closed_when_isolated_mcp_config_cannot_be_written(tmp_path
     events = client.get(f"/tasks/{task_id}/events").json()
     started = [event for event in events if event["event_type"] == "repair.started"]
     assert started[-1]["payload"]["mcp_policy"] == "deny_all"
-    assert started[-1]["payload"]["mcp_config_path"] is None
+    expected_config_path = str(task_dir / "mcp-config.isolated.json")
+    assert started[-1]["payload"]["mcp_config_path"] == expected_config_path
     isolation_failures = [
         event for event in events
         if event["event_type"] == "executor.mcp_isolation_failed"
     ]
     assert len(isolation_failures) == 1
     assert isolation_failures[0]["payload"]["execution_kind"] == "repair"
+    assert isolation_failures[0]["payload"]["config_path"] == expected_config_path
     assert "simulated repair config storage failure" in isolation_failures[0]["payload"]["error"]
     finished = [event for event in events if event["event_type"] == "repair.finished"]
     assert finished[-1]["payload"]["status"] == "error"

@@ -622,16 +622,19 @@ async def run_repair_attempt(
             add_event(task_id, "repair.started", {
                 "repair_attempt": repair_number,
                 "max_repair_attempts": max_repair_attempts,
+                "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+                "setting_sources": setting_sources,
                 "mcp_policy": "deny_all",
                 "mcp_config_path": str(mcp_config_path) if mcp_config_path else None,
             })
-            add_event(task_id, "executor.mcp_isolation_failed", {
-                "policy": "deny_all",
-                "config_path": str(mcp_config_path) if mcp_config_path else None,
-                "execution_kind": "repair",
-                "repair_attempt": repair_number,
-                "error": error,
-            })
+            if setting_sources:
+                add_event(task_id, "executor.mcp_isolation_failed", {
+                    "policy": "deny_all",
+                    "config_path": str(mcp_config_path) if mcp_config_path else None,
+                    "execution_kind": "repair",
+                    "repair_attempt": repair_number,
+                    "error": error,
+                })
         add_event(task_id, "repair.finished", {
             "repair_attempt": repair_number,
             "status": "error",

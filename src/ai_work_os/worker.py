@@ -528,6 +528,7 @@ async def run_repair_attempt(
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
     mcp_config_path: Path | None = task_dir / "mcp-config.isolated.json"
+    setting_sources: list[str] = []
     repair_started = False
     try:
         try:

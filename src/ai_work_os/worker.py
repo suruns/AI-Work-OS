@@ -535,7 +535,8 @@ async def run_repair_attempt(
         except Exception as exc:
             add_event(task_id, "executor.settings_isolation_failed", {
                 "policy": "exclude_user",
-                "execution_kind": "task",
+                "execution_kind": "repair",
+                "repair_attempt": repair_number,
                 "error": f"{type(exc).__name__}: {exc}",
             })
             raise
@@ -751,7 +752,15 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     final_assistant_text_seen = False
 
     try:
-        setting_sources = claude_setting_sources()
+        try:
+            setting_sources = claude_setting_sources()
+        except Exception as exc:
+            add_event(task_id, "executor.settings_isolation_failed", {
+                "policy": "exclude_user",
+                "execution_kind": "task",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            raise
         mcp_config_path = write_isolated_mcp_config(task_dir)
         command = build_command(prompt, permission_mode, mcp_config_path, setting_sources)
         logged_command = [

@@ -2659,8 +2659,22 @@ def test_repair_runner_starts_with_deny_all_mcp_configuration(tmp_path, monkeypa
     assert "--disallowedTools" in stderr
     assert "mcp__*" in stderr
     assert 'MCP_CONFIG={"mcpServers": {}}' in stderr
-    assert (task_dir / "mcp-config.isolated.json").exists()
-
+    config_path = task_dir / "mcp-config.isolated.json"
+    assert config_path.exists()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    events = client.get(f"/tasks/{task_id}/events").json()
+    started = [event for event in events if event["event_type"] == "repair.started"]
+    assert len(started) == 1
+    assert started[0]["payload"]["mcp_policy"] == "deny_all"
+    assert started[0]["payload"]["mcp_config_path"] == str(config_path)
+    isolated = [
+        event for event in events
+        if event["event_type"] == "executor.mcp_isolation_configured"
+    ]
+    assert len(isolated) == 1
+    assert isolated[0]["payload"]["policy"] == "deny_all"
+    assert isolated[0]["payload"]["config_path"] == str(config_path)
+    assert isolated[0]["payload"]["execution_kind"] == "repair"
 
 
 def test_worker_fails_task_when_isolated_mcp_config_cannot_be_written(tmp_path, monkeypatch):
@@ -2710,5 +2724,15 @@ def test_repair_fails_closed_when_isolated_mcp_config_cannot_be_written(tmp_path
     assert passed is False
     assert error and "simulated repair config storage failure" in error
     events = client.get(f"/tasks/{task_id}/events").json()
+    started = [event for event in events if event["event_type"] == "repair.started"]
+    assert started[-1]["payload"]["mcp_policy"] == "deny_all"
+    assert started[-1]["payload"]["mcp_config_path"] is None
+    isolation_failures = [
+        event for event in events
+        if event["event_type"] == "executor.mcp_isolation_failed"
+    ]
+    assert len(isolation_failures) == 1
+    assert isolation_failures[0]["payload"]["execution_kind"] == "repair"
+    assert "simulated repair config storage failure" in isolation_failures[0]["payload"]["error"]
     finished = [event for event in events if event["event_type"] == "repair.finished"]
     assert finished[-1]["payload"]["status"] == "error"

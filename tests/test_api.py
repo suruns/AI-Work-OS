@@ -2366,6 +2366,47 @@ def test_claude_setting_sources_reject_invalid_values(monkeypatch):
         claude_setting_sources()
 
 
+def test_worker_fails_closed_when_claude_setting_sources_are_invalid(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "cli-started"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        + f"Path({str(marker)!r}).write_text('started')\n"
+        + "print('{}')\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,managed")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Reject invalid Claude settings policy",
+        "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+
+    asyncio.run(worker.execute_task(task_id))
+
+    assert client.get(f"/tasks/{task_id}").json()["status"] == "failed"
+    assert not marker.exists()
+    events = client.get(f"/tasks/{task_id}/events").json()
+    failures = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["payload"]["execution_kind"] == "task"
+    assert "user,managed" == failures[0]["payload"]["requested_sources"]
+    assert not [
+        event for event in events
+        if event["event_type"] == "executor.mcp_isolation_failed"
+    ]
+
+
 def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

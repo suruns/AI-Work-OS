@@ -752,6 +752,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
     workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
     mcp_config_path: Path | None = None
+    mcp_config_attempted = False
     exit_code, error_summary, session_id = None, None, None
     terminal_reason = None
     process_tree_stopped: bool | None = None
@@ -769,6 +770,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 "error": f"{type(exc).__name__}: {exc}",
             })
             raise
+        mcp_config_attempted = True
         mcp_config_path = write_isolated_mcp_config(task_dir)
         command = build_command(prompt, permission_mode, mcp_config_path, setting_sources)
         logged_command = [
@@ -925,7 +927,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
-        if mcp_config_path is None:
+        if mcp_config_attempted and mcp_config_path is None:
             add_event(task_id, "executor.mcp_isolation_failed", {
                 "policy": "deny_all",
                 "error": error_summary,

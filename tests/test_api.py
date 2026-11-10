@@ -2420,6 +2420,54 @@ def test_worker_fails_closed_when_claude_setting_sources_are_invalid(tmp_path, m
     ]
 
 
+def test_repair_fails_closed_when_claude_setting_sources_are_invalid(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "repair-cli-started"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        + f"Path({str(marker)!r}).write_text('started')\n"
+        + "print('{}')\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "managed")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Reject invalid repair settings policy",
+        "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+
+    passed, _, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, ["true"],
+    ))
+
+    assert passed is False
+    assert error and "AI_WORK_OS_CLAUDE_SETTING_SOURCES" in error
+    assert not marker.exists()
+    events = client.get(f"/tasks/{task_id}/events").json()
+    started = [event for event in events if event["event_type"] == "repair.started"]
+    assert len(started) == 1
+    assert started[0]["payload"]["settings_policy"] == "configuration_failed"
+    failures = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["payload"]["execution_kind"] == "repair"
+    assert not [
+        event for event in events
+        if event["event_type"] == "executor.mcp_isolation_failed"
+    ]
+
+
 def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

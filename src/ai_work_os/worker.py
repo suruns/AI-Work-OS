@@ -70,6 +70,13 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def claude_subprocess_env() -> dict[str, str]:
+    """Avoid inheriting a parent-shell model override unsupported by Claude Code."""
+    child_env = os.environ.copy()
+    child_env.pop("ANTHROPIC_MODEL", None)
+    return child_env
+
+
 def build_command(prompt: str, permission_mode: str) -> list[str]:
     command = [CLAUDE_BIN, "-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
     if permission_mode == "plan":
@@ -473,6 +480,7 @@ async def run_repair_attempt(
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(workspace),
+                env=claude_subprocess_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -647,19 +655,22 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     exit_code, error_summary, session_id = None, None, None
     terminal_reason = None
     process_tree_stopped: bool | None = None
+    result_event_seen = False
+    final_assistant_text_seen = False
 
     try:
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(workspace),
+                env=claude_subprocess_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
             )
 
             async def read_stdout() -> None:
-                nonlocal session_id
+                nonlocal session_id, result_event_seen, final_assistant_text_seen
                 assert proc.stdout is not None
                 while line := await proc.stdout.readline():
                     decoded = line.decode("utf-8", errors="replace")
@@ -668,6 +679,25 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     try:
                         event = json.loads(decoded)
                         event_type = str(event.get("type", "unknown"))
+                        if event_type == "result" and not bool(event.get("is_error", False)):
+                            # A result event is the normal terminal envelope. If the
+                            # CLI includes an explicit stop reason, only natural turn
+                            # completion is accepted; tool-use handoffs are not final.
+                            stop_reason = event.get("stop_reason")
+                            if stop_reason is None:
+                                stop_reason = (event.get("message") or {}).get("stop_reason")
+                            if stop_reason in (None, "end_turn"):
+                                result_event_seen = True
+                        if event_type == "assistant":
+                            message = event.get("message") or {}
+                            content = message.get("content") or []
+                            has_text = any(
+                                isinstance(block, dict) and block.get("type") == "text"
+                                and bool(str(block.get("text", "")).strip())
+                                for block in content
+                            )
+                            if message.get("stop_reason") == "end_turn" and has_text:
+                                final_assistant_text_seen = True
                         observed_session_id = event.get("session_id")
                         if observed_session_id:
                             observed_session_id = str(observed_session_id)
@@ -747,6 +777,24 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
 
+    output_complete = result_event_seen or final_assistant_text_seen
+    completion_signal = "result" if result_event_seen else (
+        "final_assistant_text" if final_assistant_text_seen else None
+    )
+    if exit_code == 0 and error_summary is None and terminal_reason is None and not output_complete:
+        terminal_reason = "incomplete_output"
+        error_summary = (
+            "Claude Code exited with status 0 without a terminal result event "
+            "or a final assistant message."
+        )
+    add_event(task_id, "executor.output_validated", {
+        "complete": output_complete,
+        "completion_signal": completion_signal,
+        "result_event_seen": result_event_seen,
+        "final_assistant_text_seen": final_assistant_text_seen,
+        "exit_code": exit_code,
+    })
+
     if session_id is not None:
         add_event(task_id, "agent.session.ended", {
             "session_id": session_id,
@@ -756,7 +804,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "terminal_reason": terminal_reason,
             "status": "cancelled" if terminal_reason == "cancelled" else (
                 "timed_out" if terminal_reason == "timeout" else (
-                    "failed" if exit_code not in (0, None) or error_summary else "completed"
+                    "failed" if exit_code not in (0, None) or error_summary or not output_complete else "completed"
                 )
             ),
         })
@@ -977,7 +1025,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             task.status = "succeeded"
             task.finished_at = now()
             task.error_summary = None
-        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason not in {"timeout", "worker_interrupted", "verification_failed"}:
+        elif task.attempt_count > 0 and task.attempt_count < task.max_attempts and terminal_reason not in {"timeout", "worker_interrupted", "verification_failed", "incomplete_output"}:
             delay = RETRY_BASE_DELAY_SECONDS * (2 ** max(0, task.attempt_count - 1))
             task.status = "queued"
             task.finished_at = None
@@ -1016,6 +1064,8 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "session_id": session_id,
             "error_summary": task.error_summary,
             "verification_status": task.verification_status,
+            "output_complete": output_complete,
+            "completion_signal": completion_signal,
             "terminal_reason": "retry_scheduled" if retry_scheduled else (terminal_reason or ("success" if task.status == "succeeded" else "error")),
             "attempt": task.attempt_count,
             "max_attempts": task.max_attempts,

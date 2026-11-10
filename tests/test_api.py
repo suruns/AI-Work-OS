@@ -70,7 +70,7 @@ def test_global_artifact_inventory_is_read_only_and_filterable(tmp_path, monkeyp
     task_id = response.json()["id"]
     task_dir = api_module.STORAGE / "tasks" / task_id
     task_dir.mkdir(parents=True)
-    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\\n', encoding="utf-8")
+    (task_dir / "stdout.jsonl").write_text('{"type":"result"}\n', encoding="utf-8")
     (task_dir / "verification.json").write_text('{"status":"passed"}', encoding="utf-8")
 
     listing = client.get("/artifacts?limit=20&task_limit=20")
@@ -113,7 +113,7 @@ def test_global_artifact_inventory_uses_stable_task_cursor(tmp_path, monkeypatch
             db.commit()
         task_dir = api_module.STORAGE / "tasks" / task_id
         task_dir.mkdir(parents=True)
-        (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\\n', encoding="utf-8")
+        (task_dir / "stdout.jsonl").write_text(f'{{"page":{index}}}\n', encoding="utf-8")
 
     first = client.get("/artifacts?limit=20&task_limit=1").json()
     assert first["scanned_tasks"] == 1
@@ -748,8 +748,7 @@ def test_task_verification_passes_and_records_artifact(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    fake_claude.chmod(0o755)
+    _write_fake_claude(fake_claude)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
 
@@ -782,8 +781,7 @@ def test_task_verification_failure_fails_task_without_retrying_agent(tmp_path, m
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    fake_claude.chmod(0o755)
+    _write_fake_claude(fake_claude)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
 
@@ -1885,8 +1883,7 @@ def test_cancel_during_verification_terminates_command_and_records_results(tmp_p
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
-    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    fake_claude.chmod(0o755)
+    _write_fake_claude(fake_claude)
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
     created = client.post("/tasks", json={
@@ -2279,6 +2276,163 @@ def test_running_task_cancel_records_request_surface(tmp_path):
     assert requested[0]["payload"]["action"] == "cancel"
     assert requested[0]["payload"]["requested_by"] == "api_client"
     assert requested[0]["payload"]["control_surface"] == "task_api"
+
+
+def test_worker_rejects_zero_exit_without_terminal_output(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'session-incomplete'}))\n"
+        "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'partial'}], 'stop_reason': None}}))\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Incomplete output must fail", "prompt": "Inspect",
+        "workspace_path": str(workspace), "max_attempts": 2,
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["exit_code"] == 0
+    assert "without a terminal result event" in task["error_summary"]
+    assert task["attempt_count"] == 1
+    events = client.get(f"/tasks/{task_id}/events").json()
+    validated = [event for event in events if event["event_type"] == "executor.output_validated"]
+    assert len(validated) == 1
+    assert validated[0]["payload"]["complete"] is False
+    finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
+    assert finished["payload"]["status"] == "failed"
+    assert finished["payload"]["terminal_reason"] == "incomplete_output"
+    ended = [event for event in events if event["event_type"] == "agent.session.ended"][-1]
+    assert ended["payload"]["status"] == "failed"
+
+
+def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-clean-model-env'}))\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-flash")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Clean inherited model override", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    stderr = (tmp_path / "storage" / "tasks" / task_id / "stderr.log").read_text()
+    assert "ANTHROPIC_MODEL=None" in stderr
+
+
+def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'result', 'result': '', 'is_error': False, "
+        "'stop_reason': 'tool_use', 'session_id': 'session-tool-use-result'}))\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Tool use is not final output", "prompt": "Inspect",
+        "workspace_path": str(workspace), "max_attempts": 2,
+    })
+    task_id = created.json()["id"]
+
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert task["attempt_count"] == 1
+    assert task["error_summary"] and "without a terminal result event" in task["error_summary"]
+    events = client.get(f"/tasks/{task_id}/events").json()
+    validated = [event for event in events if event["event_type"] == "executor.output_validated"][-1]
+    assert validated["payload"]["result_event_seen"] is False
+    assert validated["payload"]["complete"] is False
+    finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
+    assert finished["payload"]["terminal_reason"] == "incomplete_output"
+    assert not any(event["event_type"] == "executor.retry_scheduled" for event in events)
+
+
+def test_repair_runner_cleans_inherited_anthropic_model_override(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\n"
+        "print(json.dumps({'type': 'result', 'result': 'finished'}))\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-flash")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Repair model environment", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+
+    passed, _, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, ["true"],
+    ))
+
+    assert passed is True
+    assert error is None
+    stderr = (task_dir / "repair-01.stderr.log").read_text(encoding="utf-8")
+    assert "ANTHROPIC_MODEL=None" in stderr
+
+
+def test_worker_accepts_final_assistant_text_without_result_event(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'assistant', 'session_id': 'session-final-assistant', "
+        "'message': {'content': [{'type': 'text', 'text': 'Completed report'}], 'stop_reason': 'end_turn'}}))\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Final assistant output", "prompt": "Inspect", "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    events = client.get(f"/tasks/{task_id}/events").json()
+    validated = [event for event in events if event["event_type"] == "executor.output_validated"][-1]
+    assert validated["payload"]["completion_signal"] == "final_assistant_text"
 
 
 def test_worker_persists_session_id_and_emits_lifecycle_events(tmp_path, monkeypatch):

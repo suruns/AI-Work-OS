@@ -534,7 +534,8 @@ async def run_repair_attempt(
             setting_sources = claude_setting_sources()
         except Exception as exc:
             add_event(task_id, "executor.settings_isolation_failed", {
-                "policy": "exclude_user",
+                "policy": "configuration_failed",
+                "requested_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local"),
                 "execution_kind": "repair",
                 "repair_attempt": repair_number,
                 "error": f"{type(exc).__name__}: {exc}",
@@ -622,7 +623,10 @@ async def run_repair_attempt(
             add_event(task_id, "repair.started", {
                 "repair_attempt": repair_number,
                 "max_repair_attempts": max_repair_attempts,
-                "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+                "settings_policy": (
+                    "configuration_failed" if not setting_sources
+                    else ("exclude_user" if "user" not in setting_sources else "include_user")
+                ),
                 "setting_sources": setting_sources,
                 "mcp_policy": "deny_all",
                 "mcp_config_path": str(mcp_config_path) if mcp_config_path else None,
@@ -759,7 +763,8 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             setting_sources = claude_setting_sources()
         except Exception as exc:
             add_event(task_id, "executor.settings_isolation_failed", {
-                "policy": "exclude_user",
+                "policy": "configuration_failed",
+                "requested_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local"),
                 "execution_kind": "task",
                 "error": f"{type(exc).__name__}: {exc}",
             })

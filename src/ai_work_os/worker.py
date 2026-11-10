@@ -65,11 +65,6 @@ RETRY_BASE_DELAY_SECONDS = max(0.0, float(os.getenv("AI_WORK_OS_RETRY_BASE_DELAY
 WORKER_LEASE_SECONDS = max(30, int(os.getenv("AI_WORK_OS_WORKER_LEASE_SECONDS", "60")))
 WORKER_HEARTBEAT_SECONDS = max(5, min(WORKER_LEASE_SECONDS // 2, int(os.getenv("AI_WORK_OS_WORKER_HEARTBEAT_SECONDS", "10"))))
 CLAUDE_MODEL = os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None
-CLAUDE_DEFAULT_MODEL_ENV = {
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "AI_WORK_OS_CLAUDE_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "AI_WORK_OS_CLAUDE_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "AI_WORK_OS_CLAUDE_DEFAULT_HAIKU_MODEL",
-}
 
 
 def now() -> datetime:
@@ -108,15 +103,7 @@ def claude_subprocess_env() -> dict[str, str]:
     child_env = os.environ.copy()
     for key in model_override_env_keys(child_env):
         child_env.pop(key, None)
-    # Explicit Worker-owned model mappings replace settings-file model defaults.
-    for target_key, source_key in CLAUDE_DEFAULT_MODEL_ENV.items():
-        value = os.getenv(source_key, "").strip()
-        if value:
-            child_env[target_key] = value
-        else:
-            child_env.pop(target_key, None)
-    for source_key in ("AI_WORK_OS_CLAUDE_MODEL", *CLAUDE_DEFAULT_MODEL_ENV.values()):
-        child_env.pop(source_key, None)
+    child_env.pop("AI_WORK_OS_CLAUDE_MODEL", None)
     return child_env
 
 

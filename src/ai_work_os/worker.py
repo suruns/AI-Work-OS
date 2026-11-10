@@ -78,10 +78,18 @@ def claude_subprocess_env() -> dict[str, str]:
 
 
 def write_isolated_mcp_config(task_dir: Path) -> Path:
-    """Write an explicit empty MCP configuration for a deny-by-default invocation."""
+    """Create an empty MCP config without a permissive first-write window."""
     path = task_dir / "mcp-config.isolated.json"
-    path.write_text(json.dumps({"mcpServers": {}}, separators=(",", ":")) + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(json.dumps({"mcpServers": {}}, separators=(",", ":")) + "\n")
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return path
 
 
@@ -484,13 +492,25 @@ async def run_repair_attempt(
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
-    add_event(task_id, "repair.started", {
-        "repair_attempt": repair_number,
-        "max_repair_attempts": max_repair_attempts,
-        "mcp_policy": "deny_all",
-    })
+    mcp_config_path: Path | None = task_dir / "mcp-config.isolated.json"
+    repair_started = False
     try:
         mcp_config_path = write_isolated_mcp_config(task_dir)
+        add_event(task_id, "repair.started", {
+            "repair_attempt": repair_number,
+            "max_repair_attempts": max_repair_attempts,
+            "mcp_policy": "deny_all",
+            "mcp_config_path": str(mcp_config_path),
+        })
+        repair_started = True
+        add_event(task_id, "executor.mcp_isolation_configured", {
+            "policy": "deny_all",
+            "config_path": str(mcp_config_path),
+            "configured_server_count": 0,
+            "disallowed_tool_pattern": "mcp__*",
+            "execution_kind": "repair",
+            "repair_attempt": repair_number,
+        })
         command = build_command(repair_prompt, permission_mode, mcp_config_path)
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
@@ -543,12 +563,27 @@ async def run_repair_attempt(
             })
             return False, [], reason or f"repair agent exited with {proc.returncode}"
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        if not repair_started:
+            add_event(task_id, "repair.started", {
+                "repair_attempt": repair_number,
+                "max_repair_attempts": max_repair_attempts,
+                "mcp_policy": "deny_all",
+                "mcp_config_path": str(mcp_config_path) if mcp_config_path else None,
+            })
+            add_event(task_id, "executor.mcp_isolation_failed", {
+                "policy": "deny_all",
+                "config_path": str(mcp_config_path) if mcp_config_path else None,
+                "execution_kind": "repair",
+                "repair_attempt": repair_number,
+                "error": error,
+            })
         add_event(task_id, "repair.finished", {
             "repair_attempt": repair_number,
             "status": "error",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": error,
         })
-        return False, [], f"{type(exc).__name__}: {exc}"
+        return False, [], error
 
     results = []
     for index, command_text in enumerate(verification_commands, start=1):

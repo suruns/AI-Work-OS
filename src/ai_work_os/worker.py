@@ -104,6 +104,7 @@ def claude_subprocess_env() -> dict[str, str]:
     for key in model_override_env_keys(child_env):
         child_env.pop(key, None)
     child_env.pop("AI_WORK_OS_CLAUDE_MODEL", None)
+    child_env.pop("AI_WORK_OS_CLAUDE_SETTING_SOURCES", None)
     return child_env
 
 

@@ -64,6 +64,12 @@ MAX_CONCURRENT_TASKS = max(1, int(os.getenv("AI_WORK_OS_MAX_CONCURRENT_TASKS", "
 RETRY_BASE_DELAY_SECONDS = max(0.0, float(os.getenv("AI_WORK_OS_RETRY_BASE_DELAY_SECONDS", "2")))
 WORKER_LEASE_SECONDS = max(30, int(os.getenv("AI_WORK_OS_WORKER_LEASE_SECONDS", "60")))
 WORKER_HEARTBEAT_SECONDS = max(5, min(WORKER_LEASE_SECONDS // 2, int(os.getenv("AI_WORK_OS_WORKER_HEARTBEAT_SECONDS", "10"))))
+CLAUDE_MODEL = os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None
+CLAUDE_DEFAULT_MODEL_ENV = {
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "AI_WORK_OS_CLAUDE_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "AI_WORK_OS_CLAUDE_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "AI_WORK_OS_CLAUDE_DEFAULT_HAIKU_MODEL",
+}
 
 
 def now() -> datetime:
@@ -102,6 +108,15 @@ def claude_subprocess_env() -> dict[str, str]:
     child_env = os.environ.copy()
     for key in model_override_env_keys(child_env):
         child_env.pop(key, None)
+    # Explicit Worker-owned model mappings replace settings-file model defaults.
+    for target_key, source_key in CLAUDE_DEFAULT_MODEL_ENV.items():
+        value = os.getenv(source_key, "").strip()
+        if value:
+            child_env[target_key] = value
+        else:
+            child_env.pop(target_key, None)
+    for source_key in ("AI_WORK_OS_CLAUDE_MODEL", *CLAUDE_DEFAULT_MODEL_ENV.values()):
+        child_env.pop(source_key, None)
     return child_env
 
 
@@ -136,6 +151,8 @@ def build_command(
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
         "--disallowedTools", "mcp__*",
     ]
+    if CLAUDE_MODEL:
+        command.extend(["--model", CLAUDE_MODEL])
     if permission_mode == "plan":
         command.extend(["--permission-mode", "plan"])
     return command
@@ -548,6 +565,8 @@ async def run_repair_attempt(
             "max_repair_attempts": max_repair_attempts,
             "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
+            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+            "configured_model": CLAUDE_MODEL,
             "mcp_policy": "deny_all",
             "mcp_config_path": str(mcp_config_path),
         })
@@ -556,6 +575,7 @@ async def run_repair_attempt(
             "policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
             "inherited_model_env_keys_removed": model_override_env_keys(os.environ),
+            "configured_model": CLAUDE_MODEL,
             "execution_kind": "repair",
             "repair_attempt": repair_number,
         })
@@ -782,6 +802,8 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
             "--disallowedTools", "mcp__*",
         ]
+        if CLAUDE_MODEL:
+            logged_command.extend(["--model", CLAUDE_MODEL])
         if permission_mode == "plan":
             logged_command.extend(["--permission-mode", "plan"])
         add_event(task_id, "executor.started", {
@@ -791,6 +813,8 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
             "model_env_policy": "strip_inherited_model_overrides",
+            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+            "configured_model": CLAUDE_MODEL,
             "mcp_policy": "deny_all",
             "mcp_config_path": str(mcp_config_path),
             "attempt": attempt_number,
@@ -802,6 +826,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
             "inherited_model_env_keys_removed": model_override_env_keys(os.environ),
+            "configured_model": CLAUDE_MODEL,
             "execution_kind": "task",
             "attempt": attempt_number,
         })

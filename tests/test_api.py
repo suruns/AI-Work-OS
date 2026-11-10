@@ -2575,3 +2575,88 @@ def test_terminate_process_tree_handles_exited_group_leader(monkeypatch):
     verified = asyncio.run(worker.terminate_process_tree(proc, grace_seconds=0))
     assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert verified is True
+
+
+
+def test_worker_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json, sys\\n"
+        "args = sys.argv[1:]\\n"
+        "config_path = args[args.index('--mcp-config') + 1]\\n"
+        "with open(config_path, encoding='utf-8') as stream: config = json.load(stream)\\n"
+        "print('ARGV=' + json.dumps(args), file=sys.stderr)\\n"
+        "print('MCP_CONFIG=' + json.dumps(config), file=sys.stderr)\\n"
+        "print(json.dumps({'type': 'result', 'result': 'done', 'session_id': 'mcp-isolation-test'}))\\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    created = client.post("/tasks", json={
+        "title": "MCP deny by default", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    stderr = (task_dir / "stderr.log").read_text(encoding="utf-8")
+    assert "--strict-mcp-config" in stderr
+    assert "--disallowedTools" in stderr
+    assert "mcp__*" in stderr
+    assert 'MCP_CONFIG={"mcpServers": {}}' in stderr
+    config_path = task_dir / "mcp-config.isolated.json"
+    assert config_path.exists()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    events = client.get(f"/tasks/{task_id}/events").json()
+    isolated = [event for event in events if event["event_type"] == "executor.mcp_isolation_configured"]
+    assert len(isolated) == 1
+    assert isolated[0]["payload"]["policy"] == "deny_all"
+    assert isolated[0]["payload"]["configured_server_count"] == 0
+
+
+def test_repair_runner_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\\n"
+        "import json, sys\\n"
+        "args = sys.argv[1:]\\n"
+        "config_path = args[args.index('--mcp-config') + 1]\\n"
+        "with open(config_path, encoding='utf-8') as stream: config = json.load(stream)\\n"
+        "print('ARGV=' + json.dumps(args), file=sys.stderr)\\n"
+        "print('MCP_CONFIG=' + json.dumps(config), file=sys.stderr)\\n"
+        "print(json.dumps({'type': 'result', 'result': 'done'}))\\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Repair MCP deny by default", "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+
+    passed, _, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, ["true"],
+    ))
+
+    assert passed is True
+    assert error is None
+    stderr = (task_dir / "repair-01.stderr.log").read_text(encoding="utf-8")
+    assert "--strict-mcp-config" in stderr
+    assert "--disallowedTools" in stderr
+    assert "mcp__*" in stderr
+    assert 'MCP_CONFIG={"mcpServers": {}}' in stderr
+    assert (task_dir / "mcp-config.isolated.json").exists()

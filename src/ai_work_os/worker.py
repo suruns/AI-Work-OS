@@ -77,8 +77,22 @@ def claude_subprocess_env() -> dict[str, str]:
     return child_env
 
 
-def build_command(prompt: str, permission_mode: str) -> list[str]:
-    command = [CLAUDE_BIN, "-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
+def write_isolated_mcp_config(task_dir: Path) -> Path:
+    """Write an explicit empty MCP configuration for a deny-by-default invocation."""
+    path = task_dir / "mcp-config.isolated.json"
+    path.write_text(json.dumps({"mcpServers": {}}, separators=(",", ":")) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def build_command(prompt: str, permission_mode: str, mcp_config_path: Path) -> list[str]:
+    command = [
+        CLAUDE_BIN, "-p", prompt,
+        "--output-format", "stream-json", "--verbose",
+        "--permission-prompts", "none",
+        "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
+        "--disallowedTools", "mcp__*",
+    ]
     if permission_mode == "plan":
         command.extend(["--permission-mode", "plan"])
     return command
@@ -470,11 +484,13 @@ async def run_repair_attempt(
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
+    mcp_config_path = write_isolated_mcp_config(task_dir)
     add_event(task_id, "repair.started", {
         "repair_attempt": repair_number,
         "max_repair_attempts": max_repair_attempts,
+        "mcp_policy": "deny_all",
     })
-    command = build_command(repair_prompt, permission_mode)
+    command = build_command(repair_prompt, permission_mode, mcp_config_path)
     try:
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
@@ -639,21 +655,35 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     stdout_path = task_dir / f"stdout.attempt-{attempt_number:03d}.jsonl"
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
     workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
-    command = build_command(prompt, permission_mode)
-    logged_command = [CLAUDE_BIN, "-p", "<prompt>", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]
+    mcp_config_path = write_isolated_mcp_config(task_dir)
+    command = build_command(prompt, permission_mode, mcp_config_path)
+    logged_command = [
+        CLAUDE_BIN, "-p", "<prompt>",
+        "--output-format", "stream-json", "--verbose",
+        "--permission-prompts", "none",
+        "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
+        "--disallowedTools", "mcp__*",
+    ]
     if permission_mode == "plan":
         logged_command.extend(["--permission-mode", "plan"])
     add_event(task_id, "executor.started", {
         "command": logged_command,
         "workspace": str(workspace),
         "permission_mode": permission_mode,
+        "mcp_policy": "deny_all",
+        "mcp_config_path": str(mcp_config_path),
         "attempt": attempt_number,
         "max_attempts": max_attempts,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     })
+    add_event(task_id, "executor.mcp_isolation_configured", {
+        "policy": "deny_all",
+        "config_path": str(mcp_config_path),
+        "configured_server_count": 0,
+        "disallowed_tool_pattern": "mcp__*",
+    })
     exit_code, error_summary, session_id = None, None, None
-    terminal_reason = None
     process_tree_stopped: bool | None = None
     result_event_seen = False
     final_assistant_text_seen = False

@@ -2371,6 +2371,7 @@ def test_worker_model_default_mappings_are_explicit_and_not_inherited(monkeypatc
 
 
 def test_claude_setting_sources_reject_invalid_values(monkeypatch):
+    import pytest
     from ai_work_os.worker import claude_setting_sources
 
     monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,managed")

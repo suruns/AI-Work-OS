@@ -484,14 +484,14 @@ async def run_repair_attempt(
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
-    mcp_config_path = write_isolated_mcp_config(task_dir)
     add_event(task_id, "repair.started", {
         "repair_attempt": repair_number,
         "max_repair_attempts": max_repair_attempts,
         "mcp_policy": "deny_all",
     })
-    command = build_command(repair_prompt, permission_mode, mcp_config_path)
     try:
+        mcp_config_path = write_isolated_mcp_config(task_dir)
+        command = build_command(repair_prompt, permission_mode, mcp_config_path)
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
                 *command,
@@ -655,34 +655,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     stdout_path = task_dir / f"stdout.attempt-{attempt_number:03d}.jsonl"
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
     workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
-    mcp_config_path = write_isolated_mcp_config(task_dir)
-    command = build_command(prompt, permission_mode, mcp_config_path)
-    logged_command = [
-        CLAUDE_BIN, "-p", "<prompt>",
-        "--output-format", "stream-json", "--verbose",
-        "--permission-prompts", "none",
-        "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
-        "--disallowedTools", "mcp__*",
-    ]
-    if permission_mode == "plan":
-        logged_command.extend(["--permission-mode", "plan"])
-    add_event(task_id, "executor.started", {
-        "command": logged_command,
-        "workspace": str(workspace),
-        "permission_mode": permission_mode,
-        "mcp_policy": "deny_all",
-        "mcp_config_path": str(mcp_config_path),
-        "attempt": attempt_number,
-        "max_attempts": max_attempts,
-        "stdout_path": str(stdout_path),
-        "stderr_path": str(stderr_path),
-    })
-    add_event(task_id, "executor.mcp_isolation_configured", {
-        "policy": "deny_all",
-        "config_path": str(mcp_config_path),
-        "configured_server_count": 0,
-        "disallowed_tool_pattern": "mcp__*",
-    })
+    mcp_config_path: Path | None = None
     exit_code, error_summary, session_id = None, None, None
     terminal_reason = None
     process_tree_stopped: bool | None = None
@@ -690,6 +663,34 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     final_assistant_text_seen = False
 
     try:
+        mcp_config_path = write_isolated_mcp_config(task_dir)
+        command = build_command(prompt, permission_mode, mcp_config_path)
+        logged_command = [
+            CLAUDE_BIN, "-p", "<prompt>",
+            "--output-format", "stream-json", "--verbose",
+            "--permission-prompts", "none",
+            "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
+            "--disallowedTools", "mcp__*",
+        ]
+        if permission_mode == "plan":
+            logged_command.extend(["--permission-mode", "plan"])
+        add_event(task_id, "executor.started", {
+            "command": logged_command,
+            "workspace": str(workspace),
+            "permission_mode": permission_mode,
+            "mcp_policy": "deny_all",
+            "mcp_config_path": str(mcp_config_path),
+            "attempt": attempt_number,
+            "max_attempts": max_attempts,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        })
+        add_event(task_id, "executor.mcp_isolation_configured", {
+            "policy": "deny_all",
+            "config_path": str(mcp_config_path),
+            "configured_server_count": 0,
+            "disallowed_tool_pattern": "mcp__*",
+        })
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
                 *command,
@@ -807,6 +808,11 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
+        if mcp_config_path is None:
+            add_event(task_id, "executor.mcp_isolation_failed", {
+                "policy": "deny_all",
+                "error": error_summary,
+            })
 
     output_complete = result_event_seen or final_assistant_text_seen
     completion_signal = "result" if result_event_seen else (

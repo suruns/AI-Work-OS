@@ -35,13 +35,14 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 ## Safety
 - Never run this service against untrusted workspaces.
 - The worker does not add --dangerously-skip-permissions or bypassPermissions.
-- The worker removes an inherited `ANTHROPIC_MODEL` override from the Claude subprocess environment. This does not prevent Claude Code from reintroducing model-related variables through the user's `~/.claude/settings.json` `env` block; model/settings isolation is not currently implemented.
+- By default, Worker starts Claude Code with `--setting-sources project,local`, excluding the user settings source (`~/.claude/settings.json`) that can re-inject model-selection variables through its `env` block. The source list can be explicitly changed with `AI_WORK_OS_CLAUDE_SETTING_SOURCES` (comma-separated subset of `user,project,local`); adding `user` opts back into user settings and can reintroduce their model overrides.
+- Worker removes inherited `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_*_MODEL` variables from the parent process environment, while preserving provider/auth variables such as `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`. Project/local settings and organization-managed settings remain active and may still supply model configuration. If provider credentials or routing are currently defined only in the user settings `env` block, move those values into the Worker service environment before excluding the user source.
 - Every normal and repair invocation uses a securely created, mode-`0600` empty MCP config with `--strict-mcp-config`, and denies `mcp__*` tools. The empty config prevents user/project MCP servers from being loaded by the Worker invocation.
 - `--disallowedTools mcp__*` is defense in depth at the tool-call layer: by itself it removes MCP tools from the model's available tool list, but does not stop a configured MCP server process from starting. The Worker avoids that startup by supplying an empty MCP configuration.
 - This MCP policy is a Claude Code CLI configuration boundary, not an OS sandbox. It does not isolate filesystem access, environment secrets, built-in tools, or arbitrary host processes. Keep the worker on trusted hosts and do not treat it as protection against a compromised CLI or execution outside this MCP boundary.
 - CLI output is stored under storage/tasks/<task-id>/; it may contain source code or secrets. Protect this directory.
 - Bind the API to localhost unless authentication and network controls have been configured.
-- New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use local Claude Code settings" only when the task is expected to edit files; that mode deliberately leaves permission behavior to the CLI's local configuration.
+- New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use project/local Claude Code settings" when the task is expected to edit files; this uses project and project-local permission settings while excluding user settings by default. Set `AI_WORK_OS_CLAUDE_SETTING_SOURCES=user,project,local` only when you intentionally want the user's global settings loaded.
 - Plan mode is a Claude Code permission control, not an OS-level sandbox. Continue to use trusted workspaces and review agent activity.
 
 ## Initial API

@@ -684,6 +684,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         "disallowed_tool_pattern": "mcp__*",
     })
     exit_code, error_summary, session_id = None, None, None
+    terminal_reason = None
     process_tree_stopped: bool | None = None
     result_event_seen = False
     final_assistant_text_seen = False

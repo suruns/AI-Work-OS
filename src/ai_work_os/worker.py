@@ -530,7 +530,15 @@ async def run_repair_attempt(
     mcp_config_path: Path | None = task_dir / "mcp-config.isolated.json"
     repair_started = False
     try:
-        setting_sources = claude_setting_sources()
+        try:
+            setting_sources = claude_setting_sources()
+        except Exception as exc:
+            add_event(task_id, "executor.settings_isolation_failed", {
+                "policy": "exclude_user",
+                "execution_kind": "task",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            raise
         mcp_config_path = write_isolated_mcp_config(task_dir)
         add_event(task_id, "repair.started", {
             "repair_attempt": repair_number,

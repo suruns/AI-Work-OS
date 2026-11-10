@@ -346,6 +346,7 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan.json()["permission_mode"] == "plan"
     plan_command = build_command("inspect", "plan")
     assert plan_command[-2:] == ["--permission-mode", "plan"]
+    assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
     configured = client.post("/tasks", json={
         "title": "Local configured mode",
@@ -357,6 +358,7 @@ def test_permission_modes_are_persisted_and_applied():
     assert configured.json()["permission_mode"] == "configured"
     configured_command = build_command("inspect", "configured")
     assert "--permission-mode" not in configured_command
+    assert configured_command[configured_command.index("--setting-sources") + 1] == "project,local"
 
 
 def test_event_timeline_compacts_thinking_tokens_but_preserves_raw_access(tmp_path):
@@ -2321,12 +2323,17 @@ def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch
     fake_claude.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        "print('ANTHROPIC_MODEL=' + str(os.environ.get('ANTHROPIC_MODEL')), file=sys.stderr)\n"
+        "print('MODEL_ENV=' + json.dumps({k: v for k, v in os.environ.items() if k == 'ANTHROPIC_MODEL' or (k.startswith('ANTHROPIC_DEFAULT_') and k.endswith('_MODEL'))}), file=sys.stderr)\n"
+        "print('BASE_URL=' + str(os.environ.get('ANTHROPIC_BASE_URL')), file=sys.stderr)\n"
         "print(json.dumps({'type': 'result', 'result': 'finished', 'session_id': 'session-clean-model-env'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
     monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-flash")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "user-opus")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "user-sonnet")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "user-haiku")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://provider.example")
     monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
     monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
     created = client.post("/tasks", json={
@@ -2338,7 +2345,117 @@ def test_worker_ignores_inherited_anthropic_model_override(tmp_path, monkeypatch
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "succeeded"
     stderr = (tmp_path / "storage" / "tasks" / task_id / "stderr.log").read_text()
-    assert "ANTHROPIC_MODEL=None" in stderr
+    assert "MODEL_ENV={}" in stderr
+    assert "BASE_URL=https://provider.example" in stderr
+
+
+def test_claude_setting_sources_can_be_explicitly_overridden(monkeypatch):
+    from ai_work_os.worker import claude_setting_sources, build_command
+
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,project")
+    monkeypatch.setattr(worker, "CLAUDE_MODEL", "deepseek-flash")
+    assert claude_setting_sources() == ["user", "project"]
+    command = build_command("inspect", "configured")
+    assert command[command.index("--setting-sources") + 1] == "user,project"
+    assert command[command.index("--model") + 1] == "deepseek-flash"
+
+
+def test_claude_setting_sources_reject_invalid_values(monkeypatch):
+    import pytest
+    from ai_work_os.worker import claude_setting_sources
+
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,managed")
+    with pytest.raises(ValueError, match="AI_WORK_OS_CLAUDE_SETTING_SOURCES"):
+        claude_setting_sources()
+
+
+def test_worker_fails_closed_when_claude_setting_sources_are_invalid(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "cli-started"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        + f"Path({str(marker)!r}).write_text('started')\n"
+        + "print('{}')\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "user,managed")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Reject invalid Claude settings policy",
+        "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+
+    asyncio.run(worker.execute_task(task_id))
+
+    assert client.get(f"/tasks/{task_id}").json()["status"] == "failed"
+    assert not marker.exists()
+    events = client.get(f"/tasks/{task_id}/events").json()
+    failures = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["payload"]["execution_kind"] == "task"
+    assert "user,managed" == failures[0]["payload"]["requested_sources"]
+    assert not [
+        event for event in events
+        if event["event_type"] == "executor.mcp_isolation_failed"
+    ]
+
+
+def test_repair_fails_closed_when_claude_setting_sources_are_invalid(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "repair-cli-started"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        + f"Path({str(marker)!r}).write_text('started')\n"
+        + "print('{}')\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "managed")
+    monkeypatch.setattr(worker, "CLAUDE_BIN", str(fake_claude))
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    created = client.post("/tasks", json={
+        "title": "Reject invalid repair settings policy",
+        "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "storage" / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+
+    passed, _, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, ["true"],
+    ))
+
+    assert passed is False
+    assert error and "AI_WORK_OS_CLAUDE_SETTING_SOURCES" in error
+    assert not marker.exists()
+    events = client.get(f"/tasks/{task_id}/events").json()
+    started = [event for event in events if event["event_type"] == "repair.started"]
+    assert len(started) == 1
+    assert started[0]["payload"]["settings_policy"] == "configuration_failed"
+    failures = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["payload"]["execution_kind"] == "repair"
+    assert not [
+        event for event in events
+        if event["event_type"] == "executor.mcp_isolation_failed"
+    ]
 
 
 def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeypatch):
@@ -2609,6 +2726,8 @@ def test_worker_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
     task_dir = tmp_path / "storage" / "tasks" / task_id
     stderr = (task_dir / "stderr.log").read_text(encoding="utf-8")
     assert "--strict-mcp-config" in stderr
+    assert "--setting-sources" in stderr
+    assert "project,local" in stderr
     assert "--disallowedTools" in stderr
     assert "mcp__*" in stderr
     assert 'MCP_CONFIG={"mcpServers": {}}' in stderr
@@ -2616,6 +2735,14 @@ def test_worker_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
     assert config_path.exists()
     assert config_path.stat().st_mode & 0o777 == 0o600
     events = client.get(f"/tasks/{task_id}/events").json()
+    settings_events = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_configured"
+    ]
+    assert len(settings_events) == 1
+    assert settings_events[0]["payload"]["policy"] == "exclude_user"
+    assert settings_events[0]["payload"]["setting_sources"] == ["project", "local"]
+    assert settings_events[0]["payload"]["execution_kind"] == "task"
     isolated = [event for event in events if event["event_type"] == "executor.mcp_isolation_configured"]
     assert len(isolated) == 1
     assert isolated[0]["payload"]["policy"] == "deny_all"
@@ -2667,6 +2794,16 @@ def test_repair_runner_starts_with_deny_all_mcp_configuration(tmp_path, monkeypa
     assert len(started) == 1
     assert started[0]["payload"]["mcp_policy"] == "deny_all"
     assert started[0]["payload"]["mcp_config_path"] == str(config_path)
+    assert started[0]["payload"]["settings_policy"] == "exclude_user"
+    assert started[0]["payload"]["setting_sources"] == ["project", "local"]
+    settings_events = [
+        event for event in events
+        if event["event_type"] == "executor.settings_isolation_configured"
+    ]
+    assert len(settings_events) == 1
+    assert settings_events[0]["payload"]["policy"] == "exclude_user"
+    assert settings_events[0]["payload"]["setting_sources"] == ["project", "local"]
+    assert settings_events[0]["payload"]["execution_kind"] == "repair"
     isolated = [
         event for event in events
         if event["event_type"] == "executor.mcp_isolation_configured"

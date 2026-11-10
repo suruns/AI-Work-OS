@@ -64,16 +64,47 @@ MAX_CONCURRENT_TASKS = max(1, int(os.getenv("AI_WORK_OS_MAX_CONCURRENT_TASKS", "
 RETRY_BASE_DELAY_SECONDS = max(0.0, float(os.getenv("AI_WORK_OS_RETRY_BASE_DELAY_SECONDS", "2")))
 WORKER_LEASE_SECONDS = max(30, int(os.getenv("AI_WORK_OS_WORKER_LEASE_SECONDS", "60")))
 WORKER_HEARTBEAT_SECONDS = max(5, min(WORKER_LEASE_SECONDS // 2, int(os.getenv("AI_WORK_OS_WORKER_HEARTBEAT_SECONDS", "10"))))
+CLAUDE_MODEL = os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None
 
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def claude_setting_sources() -> list[str]:
+    """Return the explicitly selected Claude Code settings sources.
+
+    User settings are excluded by default so ~/.claude/settings.json cannot
+    silently re-inject model-selection environment variables into Worker runs.
+    Operators may opt back into user settings through the environment.
+    """
+    raw = os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local")
+    sources = [item.strip() for item in raw.split(",") if item.strip()]
+    allowed = {"user", "project", "local"}
+    if not sources or len(sources) != len(set(sources)) or set(sources) - allowed:
+        raise ValueError(
+            "AI_WORK_OS_CLAUDE_SETTING_SOURCES must be a non-empty, comma-separated "
+            "subset of user,project,local with no duplicates"
+        )
+    return sources
+
+
+def model_override_env_keys(env: dict[str, str]) -> list[str]:
+    """List model-selection variables removed from the inherited process environment."""
+    return sorted(
+        key for key in env
+        if key == "ANTHROPIC_MODEL"
+        or (key.startswith("ANTHROPIC_DEFAULT_") and key.endswith("_MODEL"))
+    )
+
+
 def claude_subprocess_env() -> dict[str, str]:
-    """Avoid inheriting a parent-shell model override unsupported by Claude Code."""
+    """Remove inherited model overrides while preserving provider/auth environment."""
     child_env = os.environ.copy()
-    child_env.pop("ANTHROPIC_MODEL", None)
+    for key in model_override_env_keys(child_env):
+        child_env.pop(key, None)
+    child_env.pop("AI_WORK_OS_CLAUDE_MODEL", None)
+    child_env.pop("AI_WORK_OS_CLAUDE_SETTING_SOURCES", None)
     return child_env
 
 
@@ -93,14 +124,23 @@ def write_isolated_mcp_config(task_dir: Path) -> Path:
     return path
 
 
-def build_command(prompt: str, permission_mode: str, mcp_config_path: Path = Path("mcp-config.isolated.json")) -> list[str]:
+def build_command(
+    prompt: str,
+    permission_mode: str,
+    mcp_config_path: Path = Path("mcp-config.isolated.json"),
+    setting_sources: list[str] | None = None,
+) -> list[str]:
+    sources = setting_sources if setting_sources is not None else claude_setting_sources()
     command = [
         CLAUDE_BIN, "-p", prompt,
         "--output-format", "stream-json", "--verbose",
         "--permission-prompts", "none",
+        "--setting-sources", ",".join(sources),
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
         "--disallowedTools", "mcp__*",
     ]
+    if CLAUDE_MODEL:
+        command.extend(["--model", CLAUDE_MODEL])
     if permission_mode == "plan":
         command.extend(["--permission-mode", "plan"])
     return command
@@ -493,16 +533,40 @@ async def run_repair_attempt(
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
     stderr_path = task_dir / f"repair-{repair_number:02d}.stderr.log"
     mcp_config_path: Path | None = task_dir / "mcp-config.isolated.json"
+    setting_sources: list[str] = []
     repair_started = False
     try:
+        try:
+            setting_sources = claude_setting_sources()
+        except Exception as exc:
+            add_event(task_id, "executor.settings_isolation_failed", {
+                "policy": "configuration_failed",
+                "requested_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local"),
+                "execution_kind": "repair",
+                "repair_attempt": repair_number,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            raise
         mcp_config_path = write_isolated_mcp_config(task_dir)
         add_event(task_id, "repair.started", {
             "repair_attempt": repair_number,
             "max_repair_attempts": max_repair_attempts,
+            "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+            "setting_sources": setting_sources,
+            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+            "configured_model": CLAUDE_MODEL,
             "mcp_policy": "deny_all",
             "mcp_config_path": str(mcp_config_path),
         })
         repair_started = True
+        add_event(task_id, "executor.settings_isolation_configured", {
+            "policy": "exclude_user" if "user" not in setting_sources else "include_user",
+            "setting_sources": setting_sources,
+            "inherited_model_env_keys_removed": model_override_env_keys(os.environ),
+            "configured_model": CLAUDE_MODEL,
+            "execution_kind": "repair",
+            "repair_attempt": repair_number,
+        })
         add_event(task_id, "executor.mcp_isolation_configured", {
             "policy": "deny_all",
             "config_path": str(mcp_config_path),
@@ -511,7 +575,7 @@ async def run_repair_attempt(
             "execution_kind": "repair",
             "repair_attempt": repair_number,
         })
-        command = build_command(repair_prompt, permission_mode, mcp_config_path)
+        command = build_command(repair_prompt, permission_mode, mcp_config_path, setting_sources)
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
                 *command,
@@ -568,16 +632,22 @@ async def run_repair_attempt(
             add_event(task_id, "repair.started", {
                 "repair_attempt": repair_number,
                 "max_repair_attempts": max_repair_attempts,
+                "settings_policy": (
+                    "configuration_failed" if not setting_sources
+                    else ("exclude_user" if "user" not in setting_sources else "include_user")
+                ),
+                "setting_sources": setting_sources,
                 "mcp_policy": "deny_all",
                 "mcp_config_path": str(mcp_config_path) if mcp_config_path else None,
             })
-            add_event(task_id, "executor.mcp_isolation_failed", {
-                "policy": "deny_all",
-                "config_path": str(mcp_config_path) if mcp_config_path else None,
-                "execution_kind": "repair",
-                "repair_attempt": repair_number,
-                "error": error,
-            })
+            if setting_sources:
+                add_event(task_id, "executor.mcp_isolation_failed", {
+                    "policy": "deny_all",
+                    "config_path": str(mcp_config_path) if mcp_config_path else None,
+                    "execution_kind": "repair",
+                    "repair_attempt": repair_number,
+                    "error": error,
+                })
         add_event(task_id, "repair.finished", {
             "repair_attempt": repair_number,
             "status": "error",
@@ -691,6 +761,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
     workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
     mcp_config_path: Path | None = None
+    mcp_config_attempted = False
     exit_code, error_summary, session_id = None, None, None
     terminal_reason = None
     process_tree_stopped: bool | None = None
@@ -698,27 +769,54 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     final_assistant_text_seen = False
 
     try:
+        try:
+            setting_sources = claude_setting_sources()
+        except Exception as exc:
+            add_event(task_id, "executor.settings_isolation_failed", {
+                "policy": "configuration_failed",
+                "requested_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local"),
+                "execution_kind": "task",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            raise
+        mcp_config_attempted = True
         mcp_config_path = write_isolated_mcp_config(task_dir)
-        command = build_command(prompt, permission_mode, mcp_config_path)
+        command = build_command(prompt, permission_mode, mcp_config_path, setting_sources)
         logged_command = [
             CLAUDE_BIN, "-p", "<prompt>",
             "--output-format", "stream-json", "--verbose",
             "--permission-prompts", "none",
+            "--setting-sources", ",".join(setting_sources),
             "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
             "--disallowedTools", "mcp__*",
         ]
+        if CLAUDE_MODEL:
+            logged_command.extend(["--model", CLAUDE_MODEL])
         if permission_mode == "plan":
             logged_command.extend(["--permission-mode", "plan"])
         add_event(task_id, "executor.started", {
             "command": logged_command,
             "workspace": str(workspace),
             "permission_mode": permission_mode,
+            "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+            "setting_sources": setting_sources,
+            "model_env_policy": "strip_inherited_model_overrides",
+            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+            "configured_model": CLAUDE_MODEL,
             "mcp_policy": "deny_all",
             "mcp_config_path": str(mcp_config_path),
             "attempt": attempt_number,
             "max_attempts": max_attempts,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
+        })
+        add_event(task_id, "executor.settings_isolation_configured", {
+            "policy": "exclude_user" if "user" not in setting_sources else "include_user",
+            "setting_sources": setting_sources,
+            "inherited_model_env_keys_removed": model_override_env_keys(os.environ),
+            "configured_model": CLAUDE_MODEL,
+            "execution_kind": "task",
+            "attempt": attempt_number,
         })
         add_event(task_id, "executor.mcp_isolation_configured", {
             "policy": "deny_all",
@@ -843,7 +941,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
-        if mcp_config_path is None:
+        if mcp_config_attempted and mcp_config_path is None:
             add_event(task_id, "executor.mcp_isolation_failed", {
                 "policy": "deny_all",
                 "error": error_summary,

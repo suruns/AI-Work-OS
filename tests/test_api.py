@@ -2660,3 +2660,55 @@ def test_repair_runner_starts_with_deny_all_mcp_configuration(tmp_path, monkeypa
     assert "mcp__*" in stderr
     assert 'MCP_CONFIG={"mcpServers": {}}' in stderr
     assert (task_dir / "mcp-config.isolated.json").exists()
+
+
+
+def test_worker_fails_task_when_isolated_mcp_config_cannot_be_written(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+
+    def fail_config(_task_dir):
+        raise OSError("simulated config storage failure")
+
+    monkeypatch.setattr(worker, "write_isolated_mcp_config", fail_config)
+    created = client.post("/tasks", json={
+        "title": "MCP config failure is fail closed",
+        "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+
+    asyncio.run(worker.execute_task(task_id))
+
+    task = client.get(f"/tasks/{task_id}").json()
+    assert task["status"] == "failed"
+    assert "simulated config storage failure" in task["error_summary"]
+    events = client.get(f"/tasks/{task_id}/events").json()
+    assert any(event["event_type"] == "executor.mcp_isolation_failed" for event in events)
+
+
+def test_repair_fails_closed_when_isolated_mcp_config_cannot_be_written(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(worker, "write_isolated_mcp_config", lambda _task_dir: (_ for _ in ()).throw(
+        OSError("simulated repair config storage failure")
+    ))
+    created = client.post("/tasks", json={
+        "title": "Repair MCP config failure is fail closed",
+        "prompt": "Inspect",
+        "workspace_path": str(workspace),
+    })
+    task_id = created.json()["id"]
+    task_dir = tmp_path / "task-artifacts"
+    task_dir.mkdir()
+
+    passed, _, error = asyncio.run(worker.run_repair_attempt(
+        task_id, workspace, "plan", "Repair safely", task_dir, 1, 1, ["true"],
+    ))
+
+    assert passed is False
+    assert error and "simulated repair config storage failure" in error
+    events = client.get(f"/tasks/{task_id}/events").json()
+    finished = [event for event in events if event["event_type"] == "repair.finished"]
+    assert finished[-1]["payload"]["status"] == "error"

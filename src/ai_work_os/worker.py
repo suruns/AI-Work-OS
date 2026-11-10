@@ -85,7 +85,7 @@ def write_isolated_mcp_config(task_dir: Path) -> Path:
     return path
 
 
-def build_command(prompt: str, permission_mode: str, mcp_config_path: Path) -> list[str]:
+def build_command(prompt: str, permission_mode: str, mcp_config_path: Path = Path("mcp-config.isolated.json")) -> list[str]:
     command = [
         CLAUDE_BIN, "-p", prompt,
         "--output-format", "stream-json", "--verbose",

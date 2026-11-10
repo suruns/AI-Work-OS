@@ -2583,14 +2583,14 @@ def test_worker_starts_with_deny_all_mcp_configuration(tmp_path, monkeypatch):
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json, sys\\n"
-        "args = sys.argv[1:]\\n"
-        "config_path = args[args.index('--mcp-config') + 1]\\n"
-        "with open(config_path, encoding='utf-8') as stream: config = json.load(stream)\\n"
-        "print('ARGV=' + json.dumps(args), file=sys.stderr)\\n"
-        "print('MCP_CONFIG=' + json.dumps(config), file=sys.stderr)\\n"
-        "print(json.dumps({'type': 'result', 'result': 'done', 'session_id': 'mcp-isolation-test'}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "config_path = args[args.index('--mcp-config') + 1]\n"
+        "with open(config_path, encoding='utf-8') as stream: config = json.load(stream)\n"
+        "print('ARGV=' + json.dumps(args), file=sys.stderr)\n"
+        "print('MCP_CONFIG=' + json.dumps(config), file=sys.stderr)\n"
+        "print(json.dumps({'type': 'result', 'result': 'done', 'session_id': 'mcp-isolation-test'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)
@@ -2627,14 +2627,14 @@ def test_repair_runner_starts_with_deny_all_mcp_configuration(tmp_path, monkeypa
     workspace.mkdir()
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(
-        "#!/usr/bin/env python3\\n"
-        "import json, sys\\n"
-        "args = sys.argv[1:]\\n"
-        "config_path = args[args.index('--mcp-config') + 1]\\n"
-        "with open(config_path, encoding='utf-8') as stream: config = json.load(stream)\\n"
-        "print('ARGV=' + json.dumps(args), file=sys.stderr)\\n"
-        "print('MCP_CONFIG=' + json.dumps(config), file=sys.stderr)\\n"
-        "print(json.dumps({'type': 'result', 'result': 'done'}))\\n",
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "config_path = args[args.index('--mcp-config') + 1]\n"
+        "with open(config_path, encoding='utf-8') as stream: config = json.load(stream)\n"
+        "print('ARGV=' + json.dumps(args), file=sys.stderr)\n"
+        "print('MCP_CONFIG=' + json.dumps(config), file=sys.stderr)\n"
+        "print(json.dumps({'type': 'result', 'result': 'done'}))\n",
         encoding="utf-8",
     )
     fake_claude.chmod(0o755)

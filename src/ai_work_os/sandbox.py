@@ -43,7 +43,8 @@ _SYSTEM_FILES = (
 )
 _SYSTEM_DIR_MOUNTS = (
     "/etc/ssl/certs",
-    "/etc/pki",
+    "/etc/pki/ca-trust",
+    "/etc/pki/tls/certs",
 )
 
 
@@ -135,8 +136,8 @@ def _extra_runtime_paths() -> list[Path]:
             resolved = candidate.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"runtime path does not exist: {item}: {exc}") from exc
-        if resolved == Path("/") or not (resolved.is_dir() or resolved.is_file()):
-            raise SandboxError(f"runtime path must be a file or directory below /: {item}")
+        if resolved == Path("/") or not resolved.is_dir():
+            raise SandboxError(f"runtime path must be an existing directory below /: {item}")
         paths.append(resolved)
     return paths
 
@@ -311,7 +312,11 @@ def build_sandbox_invocation(
         else str(executable)
     )
     args.extend(["--chdir", "/workspace", "--"])
-    args.extend([sandbox_executable, *list(command[1:])])
+    sandbox_args = [
+        "/awos/task/mcp-config.isolated.json" if item == str(mcp_config) else item
+        for item in command[1:]
+    ]
+    args.extend([sandbox_executable, *sandbox_args])
 
     metadata = {
         "backend": "bubblewrap",

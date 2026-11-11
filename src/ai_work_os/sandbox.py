@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -15,6 +16,31 @@ AUTH_ENV_KEYS = {
 }
 SAFE_ENV_KEYS = {"LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM"}
 SYSTEM_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib64")
+
+
+_PREFLIGHTED_BWRAP: set[str] = set()
+
+
+def _preflight_bubblewrap(bwrap_path: str) -> None:
+    """Check required namespaces and a minimal system mount once per Worker process."""
+    if bwrap_path in _PREFLIGHTED_BWRAP:
+        return
+    probe = [
+        bwrap_path, "--die-with-parent", "--unshare-user", "--unshare-pid",
+        "--unshare-ipc", "--unshare-uts", "--unshare-net",
+        "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev",
+        "--tmpfs", "/tmp", "/usr/bin/true",
+    ]
+    try:
+        subprocess.run(
+            probe, check=True, capture_output=True, text=True, timeout=8,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = getattr(exc, "stderr", None)
+        suffix = f": {detail.strip()[:1000]}" if detail else ""
+        raise RuntimeError(f"Bubblewrap namespace/mount preflight failed{suffix}") from exc
+    _PREFLIGHTED_BWRAP.add(bwrap_path)
 
 
 @dataclass(frozen=True)
@@ -153,6 +179,7 @@ def build_sandbox_invocation(
     if bwrap is None:
         raise FileNotFoundError(f"Bubblewrap executable not found: {bwrap_setting}")
     bwrap_path = str(Path(bwrap).resolve(strict=True))
+    _preflight_bubblewrap(bwrap_path)
     workspace_input = Path(workspace).expanduser().absolute()
     if workspace_input.is_symlink() or workspace_input != workspace_input.resolve(strict=True):
         raise ValueError("sandbox workspace must be a canonical, non-symlink path")

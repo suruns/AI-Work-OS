@@ -109,12 +109,7 @@ Remaining local acceptance work:
 - Validate the actual Claude Code 2.1.306 launcher, Node runtime, provider authentication, and host-network DNS/certificate behavior on the operator's Fedora host.
 - Exercise read-only/read-write workspace boundaries, host home and sibling-project canaries, symlink escapes, child process inheritance, and cancellation cleanup.
 - External verification executables outside workspace/system paths require explicit `AI_WORK_OS_SANDBOX_RUNTIME_PATHS` entries.
-
-- Add host capability preflight for `bwrap`, user namespaces, and required mount paths.
-- Add opt-in `bubblewrap` mode with fail-closed startup.
-- Wrap normal, repair, and verification subprocesses.
-- Add event/audit metadata and adversarial filesystem/process tests.
-- Keep the default mode `off` until the operator's local acceptance passes.
+- The Worker performs a one-time per-process Bubblewrap preflight for user/PID/IPC/UTS/network namespaces and a minimal system mount before starting task-controlled commands.
 
 ### Phase 10.2 — hardening
 

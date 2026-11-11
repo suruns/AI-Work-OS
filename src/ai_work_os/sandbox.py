@@ -74,7 +74,6 @@ def _probe_bwrap(binary: str) -> None:
         "--unshare-ipc",
         "--unshare-uts",
         "--unshare-net",
-        "--dir", "/usr",
         "--ro-bind", "/usr", "/usr",
         "--proc", "/proc",
         "--dev", "/dev",
@@ -288,6 +287,7 @@ def build_sandbox_invocation(
     for source in _SYSTEM_DIR_MOUNTS:
         source_path = Path(source)
         if source_path.is_symlink():
+            _ensure_target_dir(args, str(source_path.parent), created)
             args.extend(["--symlink", os.readlink(source_path), source])
             created.add(source)
         elif source_path.is_dir():

@@ -61,6 +61,14 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     assert invocation.metadata["network"] == "none"
     assert "/awos/task/mcp-config.isolated.json" in invocation.command
     assert str(task_dir) in invocation.command
+    mcp_index = invocation.command.index("--mcp-config")
+    assert invocation.command[mcp_index + 1] == "/awos/task/mcp-config.isolated.json"
+    assert ["--tmpfs", "/home"] in [
+        invocation.command[i:i + 2] for i in range(len(invocation.command) - 1)
+    ]
+    assert ["--ro-bind", "/", "/"] not in [
+        invocation.command[i:i + 3] for i in range(len(invocation.command) - 2)
+    ]
 
 
 def test_configured_mode_binds_workspace_read_write(monkeypatch, tmp_path):
@@ -124,3 +132,45 @@ def test_runtime_file_is_rejected_to_avoid_mounting_its_parent(monkeypatch, tmp_
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", str(runtime_file))
     with pytest.raises(sandbox.SandboxError, match="existing directory"):
         sandbox._extra_runtime_paths()
+
+
+
+def test_host_root_workspace_is_rejected(monkeypatch, tmp_path):
+    task_dir = _task_dir(tmp_path)
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
+        with pytest.raises(sandbox.SandboxError, match="host system"):
+            sandbox.build_sandbox_invocation(
+                [sys.executable, "-V"], Path("/"), task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
+            )
+
+
+def test_workspace_must_not_contain_task_storage(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    task_dir = workspace / "storage" / "tasks" / "task-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "mcp-config.isolated.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
+        with pytest.raises(sandbox.SandboxError, match="task artifact directory"):
+            sandbox.build_sandbox_invocation(
+                [sys.executable, "-V"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
+            )
+
+
+def test_workspace_executable_symlink_cannot_expose_host_runtime(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    executable = outside / "run"
+    executable.write_text("#!/bin/sh\\necho unsafe\\n", encoding="utf-8")
+    executable.chmod(0o755)
+    (workspace / "run").symlink_to(executable)
+    task_dir = _task_dir(tmp_path)
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
+        with pytest.raises(sandbox.SandboxError, match="symlink points outside"):
+            sandbox.build_sandbox_invocation(
+                ["run"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
+            )

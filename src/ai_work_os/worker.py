@@ -301,13 +301,19 @@ async def capture_workspace_snapshot(
             parts = Path(rel).parts
             return "__pycache__" in parts or rel.endswith(".pyc")
 
+        excluded = [path.resolve() for path in (exclude_paths or [])]
+
+        def is_excluded(candidate: Path) -> bool:
+            resolved = candidate.resolve(strict=False)
+            return any(resolved == item or item in resolved.parents for item in excluded)
+
         tracked = {}
         for raw_path in filter(None, tracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
             rel_path = Path(rel)
             if rel_path.is_absolute() or ".." in rel_path.parts:
                 continue
-            if is_generated_python_cache(rel):
+            if is_generated_python_cache(rel) or is_excluded(root / rel_path):
                 continue
             patch = await _git_output(
                 root, "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", rel,
@@ -315,7 +321,6 @@ async def capture_workspace_snapshot(
             )
             tracked[rel] = hashlib.sha256(patch).hexdigest()
         untracked = {}
-        excluded = [path.resolve() for path in (exclude_paths or [])]
         for raw_path in filter(None, untracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
             rel_path = Path(rel)
@@ -333,7 +338,7 @@ async def capture_workspace_snapshot(
                 resolved_candidate = candidate.resolve(strict=False)
                 if not (resolved_candidate == root or root in resolved_candidate.parents):
                     continue
-            if any(resolved_candidate == item or item in resolved_candidate.parents for item in excluded):
+            if is_excluded(candidate):
                 continue
             try:
                 untracked[rel] = _hash_path(candidate)

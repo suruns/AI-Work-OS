@@ -202,6 +202,11 @@ def build_sandbox_invocation(
     args.append("ai-work-os")
     for directory in _target_dirs(dirs):
         args.extend(["--dir", directory])
+    if network == "host":
+        for source in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
+            path = Path(source)
+            if path.exists():
+                args.extend(["--ro-bind", str(path.resolve(strict=True)), source])
     for mount in system_mounts:
         args.extend(mount)
     for mount in runtime_mounts:

@@ -252,9 +252,13 @@ async def _git_output(
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
         raise
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed with exit code {proc.returncode}")

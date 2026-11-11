@@ -145,6 +145,13 @@ def build_command(
         command.extend(["--model", CLAUDE_MODEL])
     if permission_mode == "plan":
         command.extend(["--permission-mode", "plan"])
+    elif permission_mode == "configured":
+        # Accept Claude's native file-edit tools without an interactive approval
+        # surface. Bash and other permission-gated tools still require approval
+        # and remain denied when --permission-prompts is none.
+        command.extend(["--permission-mode", "acceptEdits"])
+    else:
+        raise ValueError(f"unsupported Claude permission mode: {permission_mode}")
     return command
 
 
@@ -227,7 +234,8 @@ async def _git_output(
     if sandboxed and sandbox_mode() == "bubblewrap":
         if task_dir is None or task_id is None:
             raise RuntimeError("sandboxed Git snapshot requires task context")
-        command = [git_bin, "-c", "core.fsmonitor=false", "-C", str(workspace), *args]
+        # The host workspace is mounted at this fixed path inside Bubblewrap.
+        command = [git_bin, "-c", "core.fsmonitor=false", "-C", "/workspace", *args]
         snapshot_env = {
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
@@ -285,14 +293,18 @@ async def capture_workspace_snapshot(
 ) -> dict:
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
-        root = Path((await _git_output(
-            workspace, "rev-parse", "--show-toplevel", sandboxed=False
+        reported_root = Path((await _git_output(
+            workspace, "rev-parse", "--show-toplevel"
         )).decode().strip()).resolve()
-        if sandbox_mode() == "bubblewrap" and root != workspace.resolve():
-            return {
-                "available": False,
-                "reason": "Sandboxed Git snapshots require the selected workspace to be the repository root.",
-            }
+        if sandbox_mode() == "bubblewrap":
+            if reported_root != Path("/workspace"):
+                return {
+                    "available": False,
+                    "reason": "Sandboxed Git snapshots require the selected workspace to be the repository root.",
+                }
+            root = workspace.resolve()
+        else:
+            root = reported_root
         git_context = {"task_dir": task_dir, "task_id": task_id}
         tracked_paths = (await _git_output(
             root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD",

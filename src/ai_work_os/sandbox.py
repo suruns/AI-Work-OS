@@ -17,8 +17,8 @@ AUTH_ENV_KEYS = {
     "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 }
-SAFE_ENV_KEYS = {
-    "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
+SAFE_ENV_KEYS = {"LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM"}
+GIT_ENV_KEYS = {
     "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_OPTIONAL_LOCKS",
     "GIT_TERMINAL_PROMPT",
 }
@@ -329,6 +329,10 @@ def build_sandbox_invocation(
     for key in SAFE_ENV_KEYS:
         if (env or {}).get(key):
             sandbox_env[key] = (env or {})[key]
+    if execution_kind == "snapshot":
+        for key in GIT_ENV_KEYS:
+            if (env or {}).get(key):
+                sandbox_env[key] = (env or {})[key]
     if execution_kind in {"task", "repair"}:
         for key in AUTH_ENV_KEYS:
             if (env or {}).get(key):

@@ -174,7 +174,7 @@ def _extra_runtime_paths() -> list[Path]:
 
 def _runtime_mounts(
     executable: Path, workspace: Path, inherited_env: Mapping[str, str]
-) -> tuple[list[tuple[Path, str]], list[str], list[str]]:
+) -> tuple[list[tuple[Path, str]], list[str], list[str], str]:
     """Resolve only executable/runtime directories and map them under /opt/awos-runtime."""
     mounts: list[tuple[Path, str]] = []
     path_entries: list[str] = []
@@ -221,8 +221,6 @@ def _runtime_mounts(
             )
         if _is_system_path(original):
             return str(original)
-        if _is_system_path(resolved):
-            return str(resolved)
         if _within(original, workspace):
             return "/workspace/" + original.relative_to(workspace).as_posix()
         if _within(resolved, workspace):
@@ -232,6 +230,8 @@ def _runtime_mounts(
             target_root = add_directory(root)
             selected = original if _within(original, root) else resolved
             return target_root + "/" + selected.relative_to(root).as_posix()
+        if _is_system_path(resolved):
+            return str(resolved)
         selected = resolved
         target_root = add_directory(selected if selected.is_dir() else selected.parent)
         return target_root if selected.is_dir() else target_root + "/" + selected.name
@@ -517,12 +517,14 @@ def build_sandbox_invocation(
     args.extend(["--ro-bind", str(task_root), "/awos/task"])
 
     args.extend(["--tmpfs", "/tmp", "--tmpfs", "/home", "--tmpfs", "/root"])
+    created.update({"/tmp", "/home", "/root"})
     _ensure_target_dir(args, "/tmp/awos-home", created)
 
     sandbox_args = [
         "/awos/task/mcp-config.isolated.json" if item == str(mcp_config) else item
         for item in command[1:]
     ]
+    sandbox_command: list[str]
     if shebang and shebang[0] != "/usr/bin/env" and Path(shebang[0]).is_absolute():
         raw_interpreter = Path(shebang[0])
         interpreter_resolved = raw_interpreter.resolve(strict=True)
@@ -530,6 +532,10 @@ def build_sandbox_invocation(
             sandbox_interpreter = "/workspace/" + raw_interpreter.relative_to(workspace_root).as_posix()
         elif _is_system_path(raw_interpreter):
             sandbox_interpreter = str(raw_interpreter)
+        elif _is_system_path(interpreter_resolved):
+            sandbox_interpreter = str(interpreter_resolved)
+        elif _within(interpreter_resolved, workspace_root):
+            sandbox_interpreter = "/workspace/" + interpreter_resolved.relative_to(workspace_root).as_posix()
         else:
             # External interpreters were mounted under /opt/awos-runtime.
             for source, target in runtime_mounts:
@@ -541,16 +547,10 @@ def build_sandbox_invocation(
                     break
             else:
                 raise SandboxError(f"script interpreter is not mounted: {raw_interpreter}")
-        args.extend([sandbox_interpreter, *shebang[1:], sandbox_executable, *sandbox_args])
+        sandbox_command = [sandbox_interpreter, *shebang[1:], sandbox_executable, *sandbox_args]
     else:
-        args.extend([sandbox_executable, *sandbox_args])
-    args.extend(["--chdir", "/workspace"]) if False else None
-    # Bubblewrap's --chdir is an option and must precede the command separator.
-    separator = args.index("--") if "--" in args else -1
-    if separator < 0:
-        args.extend(["--chdir", "/workspace", "--"])
-    else:
-        args[separator:separator] = ["--chdir", "/workspace"]
+        sandbox_command = [sandbox_executable, *sandbox_args]
+    args.extend(["--chdir", "/workspace", "--", *sandbox_command])
 
     metadata = {
         "backend": "bubblewrap",

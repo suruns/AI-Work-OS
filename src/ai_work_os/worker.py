@@ -304,8 +304,13 @@ async def capture_workspace_snapshot(
         excluded = [path.resolve() for path in (exclude_paths or [])]
 
         def is_excluded(candidate: Path) -> bool:
+            absolute = candidate.absolute()
             resolved = candidate.resolve(strict=False)
-            return any(resolved == item or item in resolved.parents for item in excluded)
+            return any(
+                absolute == item or item in absolute.parents
+                or resolved == item or item in resolved.parents
+                for item in excluded
+            )
 
         tracked = {}
         for raw_path in filter(None, tracked_paths):

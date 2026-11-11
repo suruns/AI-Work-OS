@@ -37,7 +37,7 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_NETWORK", "none")
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
-    with patch.object(sandbox, "_probe_bwrap"):
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
         invocation = sandbox.build_sandbox_invocation(
             [sys.executable, "-V"],
             workspace,
@@ -87,7 +87,7 @@ def test_workspace_symlink_is_rejected(monkeypatch, tmp_path):
     link.symlink_to(target, target_is_directory=True)
     task_dir = _task_dir(tmp_path)
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
-    with patch.object(sandbox, "_probe_bwrap"):
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
         with pytest.raises(sandbox.SandboxError, match="must not be a symlink"):
             sandbox.build_sandbox_invocation(
                 [sys.executable, "-V"], link, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
@@ -110,4 +110,15 @@ def test_missing_bwrap_fails_closed(monkeypatch, tmp_path):
 def test_runtime_paths_must_be_absolute_and_exist(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", "relative/path")
     with pytest.raises(sandbox.SandboxError, match="absolute"):
+        sandbox._extra_runtime_paths()
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", str(tmp_path / "missing"))
+    with pytest.raises(sandbox.SandboxError, match="does not exist"):
+        sandbox._extra_runtime_paths()
+
+
+def test_runtime_file_is_rejected_to_avoid_mounting_its_parent(monkeypatch, tmp_path):
+    runtime_file = tmp_path / "token-like-file"
+    runtime_file.write_text("not a runtime directory", encoding="utf-8")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", str(runtime_file))
+    with pytest.raises(sandbox.SandboxError, match="existing directory"):
         sandbox._extra_runtime_paths()

@@ -39,7 +39,7 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox, "_probe_invocation"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
         invocation = sandbox.build_sandbox_invocation(
-            [sys.executable, "-V"],
+            [sys.executable, "-V", "--mcp-config", str(task_dir / "mcp-config.isolated.json")],
             workspace,
             task_dir,
             "plan",
@@ -165,7 +165,7 @@ def test_workspace_executable_symlink_cannot_expose_host_runtime(monkeypatch, tm
     outside = tmp_path / "outside"
     outside.mkdir()
     executable = outside / "run"
-    executable.write_text("#!/bin/sh\\necho unsafe\\n", encoding="utf-8")
+    executable.write_text("#!/bin/sh\necho unsafe\n", encoding="utf-8")
     executable.chmod(0o755)
     (workspace / "run").symlink_to(executable)
     task_dir = _task_dir(tmp_path)
@@ -185,7 +185,7 @@ def test_workspace_venv_shebang_is_rewritten_to_sandbox_path(monkeypatch, tmp_pa
     interpreter = bin_dir / "python"
     interpreter.symlink_to(sys.executable)
     script = workspace / "run"
-    script.write_text(f"#!{interpreter}\\nprint('ok')\\n", encoding="utf-8")
+    script.write_text(f"#!{interpreter}\nprint('ok')\n", encoding="utf-8")
     script.chmod(0o755)
     task_dir = _task_dir(tmp_path)
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
@@ -209,10 +209,10 @@ def test_claude_node_runtime_and_package_are_mounted_read_only(monkeypatch, tmp_
     bin_dir.mkdir(parents=True)
     package_dir.mkdir(parents=True)
     node_file = bin_dir / "node"
-    node_file.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    node_file.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     node_file.chmod(0o755)
     cli_file = package_dir / "cli.js"
-    cli_file.write_text("#!/usr/bin/env node\\n", encoding="utf-8")
+    cli_file.write_text("#!/usr/bin/env node\n", encoding="utf-8")
     cli_file.chmod(0o755)
     claude_link = bin_dir / "claude"
     claude_link.symlink_to(cli_file)

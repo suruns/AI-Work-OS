@@ -166,7 +166,10 @@ def test_mcp_config_argv_is_rewritten_to_sandbox_mount(tmp_path, monkeypatch):
     )
     index = result.command.index("--mcp-config")
     assert result.command[index + 1] == "/awos/task/mcp-config.isolated.json"
-    assert str(config.resolve()) not in result.command
+    command_separator = result.command.index("--")
+    claude_argv = result.command[command_separator + 1:]
+    assert str(config.resolve()) not in claude_argv
+    assert result.command[result.command.index("--ro-bind", result.command.index("--tmpfs")) + 1] != str(config.resolve())
 
 
 def test_runtime_mounts_below_tmp_survive_tmpfs_creation(tmp_path, monkeypatch):

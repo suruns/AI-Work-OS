@@ -42,6 +42,8 @@ _SYSTEM_FILES = (
     "/etc/nsswitch.conf",
     "/etc/os-release",
     "/etc/ld.so.cache",
+    "/etc/hosts",
+    "/etc/localtime",
 )
 _SYSTEM_DIR_MOUNTS = (
     "/etc/pki/ca-trust",
@@ -92,6 +94,28 @@ def _probe_bwrap(binary: str) -> None:
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
         raise SandboxError(
             f"bubblewrap namespace/mount probe failed with exit code {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def _probe_invocation(command: list[str], env: Mapping[str, str]) -> None:
+    """Validate the exact mount plan with a trusted test binary before running task code."""
+    try:
+        separator = command.index("--")
+    except ValueError as exc:
+        raise SandboxError("sandbox command is missing its execution separator") from exc
+    probe_command = command[:separator + 1] + ["/usr/bin/test", "-x", command[separator + 1]]
+    try:
+        result = subprocess.run(
+            probe_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=10, check=False, env=dict(env),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SandboxError(f"bubblewrap mount preflight failed: {type(exc).__name__}: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        raise SandboxError(
+            f"bubblewrap mount preflight failed with exit code {result.returncode}"
             + (f": {detail}" if detail else "")
         )
 
@@ -466,4 +490,5 @@ def build_sandbox_invocation(
         "auth_env_keys": sorted(key for key in curated_env if key in _AUTH_ENV_KEYS),
         "environment_policy": "explicit_auth_allowlist",
     }
+    _probe_invocation(args, curated_env)
     return SandboxInvocation(args, curated_env, "/workspace", metadata)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -143,11 +144,26 @@ def _extra_runtime_paths() -> list[Path]:
     return paths
 
 
+def _read_shebang(path: Path) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            first_line = stream.readline(512).strip()
+    except OSError:
+        return []
+    if not first_line.startswith("#!"):
+        return []
+    try:
+        return shlex.split(first_line[2:].strip())
+    except ValueError:
+        raise SandboxError(f"cannot parse executable shebang: {path}")
+
+
 def _runtime_mounts(
     executable: Path, workspace: Path, inherited_env: Mapping[str, str]
-) -> tuple[list[Path], list[str]]:
+) -> tuple[list[Path], list[str], list[str]]:
     mounts: list[Path] = []
     path_entries: list[str] = []
+    shebang = _read_shebang(executable)
 
     def add_path(path: Path) -> None:
         resolved = path.resolve(strict=True)
@@ -155,16 +171,20 @@ def _runtime_mounts(
             return
         if _is_within(resolved, workspace):
             return
-        directory = resolved if resolved.is_dir() else resolved.parent
+        # Python virtualenvs need their site-packages as well as the bin directory.
+        venv_root = resolved.parent.parent if resolved.parent.name == "bin" else None
+        if venv_root is not None and (venv_root / "pyvenv.cfg").is_file():
+            directory = venv_root
+        else:
+            directory = resolved if resolved.is_dir() else resolved.parent
         if directory not in mounts:
             mounts.append(directory)
 
     add_path(executable)
-    try:
-        first_line = executable.open("r", encoding="utf-8", errors="replace").readline(512).strip()
-    except (OSError, UnicodeError):
-        first_line = ""
-    needs_node = "node" in first_line.lower() or executable.suffix.lower() in {".js", ".mjs", ".cjs"}
+    needs_node = (
+        "node" in " ".join(shebang).lower()
+        or executable.suffix.lower() in {".js", ".mjs", ".cjs"}
+    )
     if needs_node:
         node = shutil.which("node", path=inherited_env.get("PATH"))
         if node is None:
@@ -178,11 +198,20 @@ def _runtime_mounts(
         if str(node_dir) not in path_entries:
             path_entries.append(str(node_dir))
 
+    if shebang and len(shebang) > 0 and shebang[0] != "/usr/bin/env":
+        interpreter = Path(shebang[0])
+        if interpreter.is_absolute():
+            try:
+                interpreter_path = interpreter.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise SandboxError(f"cannot resolve script interpreter {interpreter}: {exc}") from exc
+            add_path(interpreter_path)
+
     for path in _extra_runtime_paths():
         add_path(path)
         if path.is_dir() and str(path) not in path_entries:
             path_entries.append(str(path))
-    return mounts, path_entries
+    return mounts, path_entries, shebang
 
 
 def _ensure_target_dir(args: list[str], target: str, created: set[str]) -> None:
@@ -197,7 +226,9 @@ def _ensure_target_dir(args: list[str], target: str, created: set[str]) -> None:
         created.add(str(item))
 
 
-def _curated_environment(inherited_env: Mapping[str, str], runtime_path_entries: list[str]) -> dict[str, str]:
+def _curated_environment(
+    inherited_env: Mapping[str, str], runtime_path_entries: list[str], workspace: Path
+) -> dict[str, str]:
     allowlist = set(_AUTH_ENV_KEYS)
     raw_extra = os.getenv("AI_WORK_OS_SANDBOX_ENV_ALLOWLIST", "")
     for key in filter(None, (part.strip() for part in raw_extra.split(","))):
@@ -207,8 +238,23 @@ def _curated_environment(inherited_env: Mapping[str, str], runtime_path_entries:
 
     result = {key: inherited_env[key] for key in allowlist if key in inherited_env}
     result.update({key: inherited_env[key] for key in _BASIC_ENV_KEYS if key in inherited_env})
+    workspace_path_entries: list[str] = []
+    for entry in inherited_env.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry)
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if _is_within(resolved, workspace):
+            mapped = "/workspace/" + resolved.relative_to(workspace).as_posix()
+            if mapped not in workspace_path_entries:
+                workspace_path_entries.append(mapped)
     system_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    result["PATH"] = ":".join([*runtime_path_entries, system_path])
+    result["PATH"] = ":".join([*runtime_path_entries, *workspace_path_entries, system_path])
     result["HOME"] = "/tmp/awos-home"
     result["TMPDIR"] = "/tmp"
     return result
@@ -244,15 +290,31 @@ def build_sandbox_invocation(
         raise SandboxError(f"workspace cannot be resolved: {exc}") from exc
     if not workspace_root.is_dir():
         raise SandboxError("workspace must be an existing directory")
+    protected_roots = {
+        Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/var"),
+        Path("/tmp"), Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
+        Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"), Path("/lib64"),
+        Path("/boot"), Path("/opt"),
+    }
+    resolved_protected = set()
+    for protected in protected_roots:
+        try:
+            resolved_protected.add(protected.resolve(strict=True))
+        except OSError:
+            resolved_protected.add(protected)
+    if workspace_root in resolved_protected:
+        raise SandboxError("workspace must not be a host system or home root directory")
 
     task_root = Path(task_dir).resolve(strict=True)
+    if _is_within(task_root, workspace_root):
+        raise SandboxError("workspace must not contain the task artifact directory or storage tree")
     mcp_config = task_root / "mcp-config.isolated.json"
     if mcp_config.is_symlink() or not mcp_config.is_file():
         raise SandboxError("isolated MCP config is missing or is not a regular file")
 
     executable = _resolve_executable(command, workspace_root, inherited)
-    runtime_mounts, runtime_path_entries = _runtime_mounts(executable, workspace_root, inherited)
-    curated_env = _curated_environment(inherited, runtime_path_entries)
+    runtime_mounts, runtime_path_entries, shebang = _runtime_mounts(executable, workspace_root, inherited)
+    curated_env = _curated_environment(inherited, runtime_path_entries, workspace_root)
 
     args = [
         bwrap,
@@ -332,7 +394,15 @@ def build_sandbox_invocation(
         "/awos/task/mcp-config.isolated.json" if item == str(mcp_config) else item
         for item in command[1:]
     ]
-    args.extend([sandbox_executable, *sandbox_args])
+    if shebang and shebang[0] != "/usr/bin/env" and Path(shebang[0]).is_absolute():
+        interpreter_path = Path(shebang[0]).resolve(strict=True)
+        if _is_within(interpreter_path, workspace_root):
+            sandbox_interpreter = "/workspace/" + interpreter_path.relative_to(workspace_root).as_posix()
+            args.extend([sandbox_interpreter, *shebang[1:], sandbox_executable, *sandbox_args])
+        else:
+            args.extend([sandbox_executable, *sandbox_args])
+    else:
+        args.extend([sandbox_executable, *sandbox_args])
 
     metadata = {
         "backend": "bubblewrap",

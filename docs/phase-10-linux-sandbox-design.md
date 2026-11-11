@@ -69,7 +69,7 @@ Do not assume a read-only bind of the host root is safe: it would still expose u
 - Reject a workspace that is itself a symlink or resolves to an unexpected location.
 - Treat symlinks inside the workspace as untrusted. They must not reveal host paths outside the mounted workspace.
 - Do not mount the original host workspace path into the sandbox merely to preserve its absolute pathname.
-- Keep the host-side Git snapshot/reporting code outside the sandbox; it observes the selected workspace before and after execution.
+- Keep snapshot orchestration, hashing, and report persistence on the host, but execute every Git subprocess used for before/after snapshots inside the read-only sandbox. The host must pass task context so each snapshot subprocess is attributed to the task.
 
 ## Required execution coverage
 

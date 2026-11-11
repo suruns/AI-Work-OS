@@ -276,12 +276,12 @@ def build_sandbox_invocation(
         args.extend(["--tmpfs", task_hidden_target])
     if config_target and config_source:
         args.extend(["--ro-bind", str(config_source), config_target])
-    args.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
-    args.extend([
-        "--dir", "/tmp/home", "--dir", "/tmp/home/.cache",
-        "--dir", "/tmp/home/.config", "--dir", "/tmp/home/.local",
-        "--dir", "/tmp/home/.local/share", "--dir", "/tmp/home/.claude",
-    ])
+    args.extend(["--proc", "/proc", "--dev", "/dev", "--perms", "01777", "--tmpfs", "/tmp"])
+    for directory in (
+        "/tmp/home", "/tmp/home/.cache", "/tmp/home/.config",
+        "/tmp/home/.local", "/tmp/home/.local/share", "/tmp/home/.claude",
+    ):
+        args.extend(["--dir", directory, "--chmod", "0777", directory])
     if workspace_alias:
         if _inside(workspace_path, Path("/tmp")):
             for directory in _target_dirs({str(workspace_path.parent)}):

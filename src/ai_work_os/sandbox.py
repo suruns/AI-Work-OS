@@ -109,13 +109,14 @@ def _resolve_executable(command: Sequence[str], workspace: Path, env: Mapping[st
         if located is None:
             raise SandboxError(f"executable is not available to the worker: {raw}")
         candidate = Path(located)
+    candidate = Path(os.path.abspath(candidate))
     try:
         resolved = candidate.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise SandboxError(f"cannot resolve executable {raw!r}: {exc}") from exc
     if not resolved.is_file():
         raise SandboxError(f"command is not a regular executable file: {resolved}")
-    return resolved
+    return candidate
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -166,19 +167,23 @@ def _runtime_mounts(
     shebang = _read_shebang(executable)
 
     def add_path(path: Path) -> None:
-        resolved = path.resolve(strict=True)
-        if any(_is_within(resolved, Path(root)) for root in _SYSTEM_DIRS):
-            return
-        if _is_within(resolved, workspace):
-            return
-        # Python virtualenvs need their site-packages as well as the bin directory.
-        venv_root = resolved.parent.parent if resolved.parent.name == "bin" else None
-        if venv_root is not None and (venv_root / "pyvenv.cfg").is_file():
-            directory = venv_root
-        else:
-            directory = resolved if resolved.is_dir() else resolved.parent
-        if directory not in mounts:
-            mounts.append(directory)
+        original = Path(os.path.abspath(path))
+        try:
+            resolved = original.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SandboxError(f"cannot resolve runtime path {original}: {exc}") from exc
+        for candidate in (original, resolved):
+            if any(_is_within(candidate, Path(root)) for root in _SYSTEM_DIRS):
+                continue
+            if _is_within(candidate, workspace):
+                continue
+            venv_root = candidate.parent.parent if candidate.parent.name == "bin" else None
+            if venv_root is not None and (venv_root / "pyvenv.cfg").is_file():
+                directory = venv_root
+            else:
+                directory = candidate if candidate.is_dir() else candidate.parent
+            if directory not in mounts:
+                mounts.append(directory)
 
     executable_is_workspace = _is_within(executable, workspace)
     add_path(executable)
@@ -199,8 +204,9 @@ def _runtime_mounts(
             raise SandboxError(
                 f"script requires {env_program!r}, but it was not found in the worker PATH"
             )
+        program_candidate = Path(os.path.abspath(resolved_program))
         try:
-            program_path = Path(resolved_program).resolve(strict=True)
+            program_path = program_candidate.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"cannot resolve script runtime {env_program}: {exc}") from exc
         if executable_is_workspace and not (
@@ -211,28 +217,28 @@ def _runtime_mounts(
             raise SandboxError(
                 f"workspace script requests an unapproved host interpreter: {env_program}"
             )
-        add_path(program_path)
-        if str(program_path.parent) not in path_entries:
-            path_entries.append(str(program_path.parent))
+        add_path(program_candidate)
+        if str(program_candidate.parent) not in path_entries:
+            path_entries.append(str(program_candidate.parent))
     elif needs_node:
         node = shutil.which("node", path=inherited_env.get("PATH"))
         if node is None:
             raise SandboxError("Claude Code launcher requires Node.js, but node was not found in the worker PATH")
+        node_candidate = Path(os.path.abspath(node))
         try:
-            node_path = Path(node).resolve(strict=True)
+            node_path = node_candidate.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"cannot resolve Node.js runtime: {exc}") from exc
-        add_path(node_path)
-        if str(node_path.parent) not in path_entries:
-            path_entries.append(str(node_path.parent))
+        add_path(node_candidate)
+        if str(node_candidate.parent) not in path_entries:
+            path_entries.append(str(node_candidate.parent))
 
     if shebang and shebang[0] != "/usr/bin/env" and Path(shebang[0]).is_absolute():
-        interpreter = Path(shebang[0])
-        try:
-            interpreter_path = interpreter.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise SandboxError(f"cannot resolve script interpreter {interpreter}: {exc}") from exc
         raw_interpreter = Path(shebang[0])
+        try:
+            interpreter_path = raw_interpreter.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SandboxError(f"cannot resolve script interpreter {raw_interpreter}: {exc}") from exc
         if executable_is_workspace and not (
             _is_within(raw_interpreter, workspace)
             or any(_is_within(interpreter_path, Path(root)) for root in _SYSTEM_DIRS)
@@ -240,7 +246,7 @@ def _runtime_mounts(
             raise SandboxError(
                 f"workspace script references an unapproved host interpreter: {shebang[0]}"
             )
-        add_path(interpreter_path)
+        add_path(raw_interpreter)
 
     for path in _extra_runtime_paths():
         add_path(path)
@@ -437,7 +443,7 @@ def build_sandbox_invocation(
         if _is_within(raw_interpreter, workspace_root):
             sandbox_interpreter = "/workspace/" + raw_interpreter.relative_to(workspace_root).as_posix()
         else:
-            sandbox_interpreter = str(interpreter_path)
+            sandbox_interpreter = str(raw_interpreter)
         args.extend([sandbox_interpreter, *shebang[1:], sandbox_executable, *sandbox_args])
     else:
         args.extend([sandbox_executable, *sandbox_args])

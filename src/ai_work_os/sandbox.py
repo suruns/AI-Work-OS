@@ -181,11 +181,31 @@ def _runtime_mounts(
             mounts.append(directory)
 
     add_path(executable)
+    env_program = None
+    if shebang and shebang[0] == "/usr/bin/env":
+        index = 1
+        if index < len(shebang) and shebang[index] in {"-S", "--split-string"}:
+            index += 1
+        if index < len(shebang) and not shebang[index].startswith("-"):
+            env_program = shebang[index]
     needs_node = (
         "node" in " ".join(shebang).lower()
         or executable.suffix.lower() in {".js", ".mjs", ".cjs"}
     )
-    if needs_node:
+    if env_program:
+        resolved_program = shutil.which(env_program, path=inherited_env.get("PATH"))
+        if resolved_program is None:
+            raise SandboxError(
+                f"script requires {env_program!r}, but it was not found in the worker PATH"
+            )
+        try:
+            program_path = Path(resolved_program).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SandboxError(f"cannot resolve script runtime {env_program}: {exc}") from exc
+        add_path(program_path)
+        if str(program_path.parent) not in path_entries:
+            path_entries.append(str(program_path.parent))
+    elif needs_node:
         node = shutil.which("node", path=inherited_env.get("PATH"))
         if node is None:
             raise SandboxError("Claude Code launcher requires Node.js, but node was not found in the worker PATH")
@@ -194,18 +214,16 @@ def _runtime_mounts(
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"cannot resolve Node.js runtime: {exc}") from exc
         add_path(node_path)
-        node_dir = node_path.parent
-        if str(node_dir) not in path_entries:
-            path_entries.append(str(node_dir))
+        if str(node_path.parent) not in path_entries:
+            path_entries.append(str(node_path.parent))
 
-    if shebang and len(shebang) > 0 and shebang[0] != "/usr/bin/env":
+    if shebang and shebang[0] != "/usr/bin/env" and Path(shebang[0]).is_absolute():
         interpreter = Path(shebang[0])
-        if interpreter.is_absolute():
-            try:
-                interpreter_path = interpreter.resolve(strict=True)
-            except (OSError, RuntimeError) as exc:
-                raise SandboxError(f"cannot resolve script interpreter {interpreter}: {exc}") from exc
-            add_path(interpreter_path)
+        try:
+            interpreter_path = interpreter.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SandboxError(f"cannot resolve script interpreter {interpreter}: {exc}") from exc
+        add_path(interpreter_path)
 
     for path in _extra_runtime_paths():
         add_path(path)

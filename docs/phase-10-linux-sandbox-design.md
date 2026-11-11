@@ -96,7 +96,7 @@ The sandbox policy must be recorded in task events, including backend, effective
 
 ### Claude tool permission policy
 
-The Worker must not rely on a user's interactive approval surface because tasks run unattended. `plan` is passed as `--permission-mode plan`. `configured` is passed as `--permission-mode acceptEdits`, allowing Claude's native Edit/Write file tools to modify the mounted workspace without asking for interactive approval. This does not enable `bypassPermissions` or `--dangerously-skip-permissions`. Bash and other permission-gated tools still require approval and are denied when `--permission-prompts none` is active. Therefore configured-mode write acceptance must exercise Claude's native file-edit tools; a shell redirection test is a separate Bash-permission test and is expected to be denied unless a future narrowly scoped command policy is designed.
+The Worker must not rely on a user's interactive approval surface because tasks run unattended. `plan` is passed as `--permission-mode plan`. `configured` is passed as `--permission-mode acceptEdits`, allowing Claude's native Edit/Write file tools to modify the mounted workspace without asking for interactive approval. This does not enable `bypassPermissions` or `--dangerously-skip-permissions`. Configured mode explicitly removes the `Bash` tool from Claude's available tool set (and continues to deny all MCP tools), because real-host acceptance showed that `acceptEdits` can permit workspace-local shell writes. This is intentionally stricter than relying on `--permission-prompts none`: Claude cannot execute shell commands in Configured mode. The Worker still launches configured verification commands separately inside the same OS sandbox.
 
 ### Phase 10.1 — sandbox substrate
 

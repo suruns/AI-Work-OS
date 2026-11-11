@@ -503,7 +503,7 @@ def build_sandbox_invocation(
             args.extend(["--symlink", os.readlink(source_path), source])
             created.add(source)
         elif source_path.is_dir():
-            _ensure_target_dir(args, source, created)
+            _ensure_target_dir(args, str(source_path.parent), created)
             args.extend(["--ro-bind", source, source])
     for source in _SYSTEM_FILES:
         source_path = Path(source)
@@ -512,7 +512,7 @@ def build_sandbox_invocation(
             args.extend(["--symlink", os.readlink(source_path), source])
             created.add(source)
         elif source_path.is_file():
-            _ensure_target_dir(args, source, created)
+            _ensure_target_dir(args, str(source_path.parent), created)
             args.extend(["--ro-bind", source, source])
     for source in _SYSTEM_DIR_MOUNTS:
         source_path = Path(source)

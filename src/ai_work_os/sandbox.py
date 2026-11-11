@@ -300,7 +300,9 @@ def build_sandbox_invocation(
         workspace_access = "read_write"
 
     _ensure_target_dir(args, "/awos/task", created)
-    args.extend(["--ro-bind", str(mcp_config), "/awos/task/mcp-config.isolated.json"])
+    # The task directory is task-scoped and mounted read-only. This avoids exposing
+    # the storage root or other tasks while ensuring the MCP config bind target exists.
+    args.extend(["--ro-bind", str(task_root), "/awos/task"])
     args.extend(["--chdir", "/workspace", "--"])
     args.extend([str(executable), *list(command[1:])])
 
@@ -309,7 +311,7 @@ def build_sandbox_invocation(
         "network": network,
         "workspace_access": workspace_access,
         "workspace_mount": "/workspace",
-        "task_input_mount": "/awos/task/mcp-config.isolated.json",
+        "task_input_mount": "/awos/task (read-only, task-scoped)",
         "runtime_mounts": [str(path) for path in runtime_mounts],
         "system_mounts": [path for path in _SYSTEM_DIRS if Path(path).exists()],
         "auth_env_keys": sorted(key for key in curated_env if key in _AUTH_ENV_KEYS),

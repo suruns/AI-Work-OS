@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_work_os.sandbox import build_sandbox_invocation
+from ai_work_os.sandbox import _nested_mountpoints, build_sandbox_invocation
 
 
 def _fake_claude_runtime(root: Path) -> tuple[Path, Path]:
@@ -134,3 +134,14 @@ def test_task_artifacts_nested_in_workspace_are_hidden(tmp_path, monkeypatch):
     assert ["--tmpfs", "/workspace/.ai-work-os/tasks/task-1"] in tmpfs_mounts
     assert result.metadata["task_artifacts_hidden_at"] == "/workspace/.ai-work-os/tasks/task-1"
     assert "/awos/task/mcp-config.isolated.json" in result.command
+
+
+
+def test_nested_mountpoint_detection_ignores_workspace_mount_itself():
+    workspace = Path("/work/project")
+    mountinfo = (
+        "30 20 0:25 / /work/project rw,relatime - ext4 /dev/sda1 rw\n"
+        "31 30 0:26 / /work/project/.private rw,relatime - tmpfs tmpfs rw\n"
+        "32 20 0:27 / /work/other rw,relatime - ext4 /dev/sda2 rw\n"
+    )
+    assert _nested_mountpoints(workspace, mountinfo) == ["/work/project/.private"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -71,6 +72,22 @@ def _inside(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _nested_mountpoints(workspace: Path, mountinfo_text: str) -> list[str]:
+    """Return mount points nested below workspace (not the workspace mount itself)."""
+    nested: set[str] = set()
+    for line in mountinfo_text.splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        mountpoint = re.sub(
+            r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), fields[4]
+        )
+        candidate = Path(mountpoint)
+        if candidate != workspace and _inside(candidate, workspace):
+            nested.add(str(candidate))
+    return sorted(nested)
 
 
 def _target_dirs(paths: set[str]) -> list[str]:
@@ -213,6 +230,13 @@ def build_sandbox_invocation(
         _inside(workspace_path, Path(root)) for root in (*SYSTEM_ROOTS, "/etc", "/proc", "/dev")
     ):
         raise ValueError("sandbox workspace cannot be a filesystem or reserved runtime path")
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect host mount table for workspace isolation: {exc}") from exc
+    nested_mounts = _nested_mountpoints(workspace_path, mountinfo)
+    if nested_mounts:
+        raise ValueError(f"workspace contains nested mount points: {nested_mounts}")
     task_path = Path(task_dir).resolve(strict=True)
     if not task_path.is_dir():
         raise ValueError("sandbox task artifact directory must exist")

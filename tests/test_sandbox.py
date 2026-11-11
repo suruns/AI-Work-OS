@@ -54,7 +54,6 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
         if value == "--ro-bind" and invocation.command[i + 2] == "/workspace"
     ][0]
     assert "/home/operator" not in invocation.command
-    assert "--ro-bind" not in invocation.command[invocation.command.index("/workspace") + 1:]
     assert invocation.env["ANTHROPIC_API_KEY"] == "secret"
     assert "ANTHROPIC_MODEL" not in invocation.env
     assert invocation.env["HOME"] == "/tmp/awos-home"

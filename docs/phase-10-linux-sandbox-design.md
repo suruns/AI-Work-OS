@@ -101,7 +101,7 @@ Implemented in this PR:
 - Use Bubblewrap user, mount, PID, IPC, UTS, and optional network namespaces; default network mode is `none`.
 - Mount the workspace at `/workspace` (read-only for plan tasks, read-write for configured tasks), mount only the generated MCP file read-only, and keep the task artifact directory, Worker, database, and real home outside the sandbox.
 - Mount system runtime directories read-only; resolve and mount the Claude CLI package and Node executable individually when they live outside system paths.
-- Use an ephemeral `/tmp/home` and an explicit provider/auth environment allowlist. The allowlisted environment is passed via the child environment, not command-line arguments.
+- Use an ephemeral `/tmp/home` and an explicit provider/auth environment allowlist. The allowlisted environment is passed via the child environment, not command-line arguments. The sandbox keeps the unprivileged Worker UID/GID and disables nested user namespaces.
 - Preserve absolute workspace virtualenv shebangs with a sandbox-local symlink alias to `/workspace`; this does not mount the host parent directory.
 - Record `executor.sandbox_configured` / `executor.sandbox_failed` metadata for normal, repair, and verification subprocesses.
 

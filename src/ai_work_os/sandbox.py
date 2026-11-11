@@ -302,6 +302,8 @@ def build_sandbox_invocation(
         "network": network,
         "workspace_access": "read_only" if permission_mode == "plan" else "read_write",
         "workspace_mount": "/workspace", "workspace_path_alias": bool(workspace_alias),
+        "sandbox_uid": os.getuid(), "sandbox_gid": os.getgid(),
+        "nested_user_namespaces": "disabled",
         "runtime_mounts": sorted(set(visible_mounts)),
         "task_config_mount": config_target, "execution_kind": execution_kind,
     })

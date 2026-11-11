@@ -281,6 +281,8 @@ def build_sandbox_invocation(
         _ensure_target_dir(args, "/etc/resolv.conf", created)
         args.extend(["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"])
 
+    _ensure_target_dir(args, "/proc", created)
+    _ensure_target_dir(args, "/dev", created)
     args.extend(["--proc", "/proc", "--dev", "/dev"])
     args.extend(["--tmpfs", "/tmp", "--tmpfs", "/home", "--tmpfs", "/root"])
     args.extend(["--dir", "/tmp/awos-home"])
@@ -303,8 +305,13 @@ def build_sandbox_invocation(
     # The task directory is task-scoped and mounted read-only. This avoids exposing
     # the storage root or other tasks while ensuring the MCP config bind target exists.
     args.extend(["--ro-bind", str(task_root), "/awos/task"])
+    sandbox_executable = (
+        "/workspace/" + executable.relative_to(workspace_root).as_posix()
+        if _is_within(executable, workspace_root)
+        else str(executable)
+    )
     args.extend(["--chdir", "/workspace", "--"])
-    args.extend([str(executable), *list(command[1:])])
+    args.extend([sandbox_executable, *list(command[1:])])
 
     metadata = {
         "backend": "bubblewrap",

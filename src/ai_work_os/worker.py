@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import shutil
+import stat
 import shlex
 import socket
 from datetime import datetime, timezone, timedelta
@@ -12,7 +13,7 @@ from pathlib import Path
 from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
-from .sandbox import build_sandbox_invocation
+from .sandbox import build_sandbox_invocation, sandbox_mode
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
     """Persist process liveness; active task ownership remains authoritative on Task rows."""
@@ -214,9 +215,23 @@ async def terminate_process_tree(
     return False
 
 
-async def _git_output(workspace: Path, *args: str) -> bytes:
+async def _git_output(
+    workspace: Path, *args: str, task_dir: Path | None = None,
+    task_id: str | None = None, sandboxed: bool = True,
+) -> bytes:
+    command = ["git", "-C", str(workspace), *args]
+    invocation = None
+    if sandboxed and sandbox_mode() == "bubblewrap":
+        if task_dir is None or task_id is None:
+            raise RuntimeError("sandboxed Git snapshot requires task context")
+        invocation = build_task_sandbox_invocation(
+            task_id, command, workspace, task_dir, "plan", None,
+            execution_kind="snapshot",
+        )
     proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(workspace), *args,
+        *(invocation.command if invocation else command),
+        cwd=invocation.cwd if invocation else None,
+        env=invocation.env if invocation else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -233,22 +248,40 @@ async def _git_output(workspace: Path, *args: str) -> bytes:
 
 def _hash_path(path: Path) -> str:
     digest = hashlib.sha256()
-    if path.is_symlink():
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
         digest.update(b"symlink\0")
         digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
     else:
-        with path.open("rb") as stream:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
     return digest.hexdigest()
 
 
-async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] | None = None) -> dict:
+async def capture_workspace_snapshot(
+    workspace: Path, exclude_paths: list[Path] | None = None, *,
+    task_dir: Path | None = None, task_id: str | None = None,
+) -> dict:
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
-        root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
-        tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\0")
-        untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\0")
+        root = Path((await _git_output(
+            workspace, "rev-parse", "--show-toplevel", sandboxed=False
+        )).decode().strip()).resolve()
+        if sandbox_mode() == "bubblewrap" and root != workspace.resolve():
+            return {
+                "available": False,
+                "reason": "Sandboxed Git snapshots require the selected workspace to be the repository root.",
+            }
+        git_context = {"task_dir": task_dir, "task_id": task_id}
+        tracked_paths = (await _git_output(
+            root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD",
+            **git_context,
+        )).split(b"\0")
+        untracked_paths = (await _git_output(
+            root, "ls-files", "--others", "--exclude-standard", "-z", **git_context,
+        )).split(b"\0")
         def is_generated_python_cache(rel: str) -> bool:
             parts = Path(rel).parts
             return "__pycache__" in parts or rel.endswith(".pyc")
@@ -258,7 +291,10 @@ async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] 
             rel = raw_path.decode("utf-8", errors="surrogateescape")
             if is_generated_python_cache(rel):
                 continue
-            patch = await _git_output(root, "diff", "--binary", "HEAD", "--", rel)
+            patch = await _git_output(
+                root, "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", rel,
+                **git_context,
+            )
             tracked[rel] = hashlib.sha256(patch).hexdigest()
         untracked = {}
         excluded = [path.resolve() for path in (exclude_paths or [])]
@@ -275,7 +311,7 @@ async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] 
             except (FileNotFoundError, PermissionError, OSError):
                 untracked[rel] = "unreadable"
         return {"available": True, "repository_root": str(root), "tracked": tracked, "untracked": untracked}
-    except (FileNotFoundError, RuntimeError, asyncio.TimeoutError, OSError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError, asyncio.TimeoutError, OSError) as exc:
         return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
@@ -791,7 +827,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     task_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = task_dir / f"stdout.attempt-{attempt_number:03d}.jsonl"
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
-    workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
+    workspace_before = await capture_workspace_snapshot(workspace, [task_dir], task_dir=task_dir, task_id=task_id)
     mcp_config_path: Path | None = None
     mcp_config_attempted = False
     exit_code, error_summary, session_id = None, None, None
@@ -1198,7 +1234,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     except OSError:
         pass
 
-    workspace_after = await capture_workspace_snapshot(workspace, [task_dir])
+    workspace_after = await capture_workspace_snapshot(workspace, [task_dir], task_dir=task_dir, task_id=task_id)
     workspace_changes = compare_workspace_snapshots(workspace_before, workspace_after)
     workspace_report_path = task_dir / "workspace_changes.json"
     report_written = False

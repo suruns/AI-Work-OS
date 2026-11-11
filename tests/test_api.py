@@ -357,7 +357,9 @@ def test_permission_modes_are_persisted_and_applied():
     assert configured.status_code == 201
     assert configured.json()["permission_mode"] == "configured"
     configured_command = build_command("inspect", "configured")
-    assert "--permission-mode" not in configured_command
+    assert configured_command[configured_command.index("--permission-mode") + 1] == "acceptEdits"
+    assert "--dangerously-skip-permissions" not in configured_command
+    assert "bypassPermissions" not in configured_command
     assert configured_command[configured_command.index("--setting-sources") + 1] == "project,local"
 
 

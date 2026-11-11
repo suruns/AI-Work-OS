@@ -582,6 +582,22 @@ def test_bubblewrap_workspace_snapshot_passes_task_context_to_every_git_call(tmp
     assert calls[0][0] == ("rev-parse", "--show-toplevel")
 
 
+def test_bubblewrap_snapshot_explains_git_metadata_outside_workspace(tmp_path, monkeypatch):
+    async def fail_git_root(path, *args, **kwargs):
+        raise RuntimeError("git rev-parse --show-toplevel failed with exit code 128")
+
+    monkeypatch.setattr(worker, "sandbox_mode", lambda: "bubblewrap")
+    monkeypatch.setattr(worker, "_git_output", fail_git_root)
+
+    snapshot = asyncio.run(worker.capture_workspace_snapshot(
+        tmp_path, task_dir=tmp_path / "task", task_id="snapshot-task",
+    ))
+
+    assert snapshot["available"] is False
+    assert "selected workspace must itself be a Git repository root" in snapshot["reason"]
+    assert "parent-directory Git metadata is not mounted" in snapshot["reason"]
+
+
 
 def test_workspace_changes_endpoint_returns_report_and_handles_pending_report(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")

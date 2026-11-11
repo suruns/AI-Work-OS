@@ -227,8 +227,13 @@ async def _git_output(
     if sandboxed and sandbox_mode() == "bubblewrap":
         if task_dir is None or task_id is None:
             raise RuntimeError("sandboxed Git snapshot requires task context")
+        command = [git_bin, "-c", "core.fsmonitor=false", "-C", str(workspace), *args]
+        snapshot_env = {
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
+        }
         invocation = build_task_sandbox_invocation(
-            task_id, command, workspace, task_dir, "plan", None,
+            task_id, command, workspace, task_dir, "plan", snapshot_env,
             execution_kind="snapshot",
         )
     proc = await asyncio.create_subprocess_exec(

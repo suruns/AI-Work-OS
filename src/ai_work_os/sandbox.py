@@ -180,6 +180,7 @@ def _runtime_mounts(
         if directory not in mounts:
             mounts.append(directory)
 
+    executable_is_workspace = _is_within(executable, workspace)
     add_path(executable)
     env_program = None
     if shebang and shebang[0] == "/usr/bin/env":
@@ -202,6 +203,14 @@ def _runtime_mounts(
             program_path = Path(resolved_program).resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"cannot resolve script runtime {env_program}: {exc}") from exc
+        if executable_is_workspace and not (
+            any(_is_within(program_path, Path(root)) for root in _SYSTEM_DIRS)
+            or _is_within(program_path, workspace)
+            or env_program == "node"
+        ):
+            raise SandboxError(
+                f"workspace script requests an unapproved host interpreter: {env_program}"
+            )
         add_path(program_path)
         if str(program_path.parent) not in path_entries:
             path_entries.append(str(program_path.parent))
@@ -223,6 +232,14 @@ def _runtime_mounts(
             interpreter_path = interpreter.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"cannot resolve script interpreter {interpreter}: {exc}") from exc
+        raw_interpreter = Path(shebang[0])
+        if executable_is_workspace and not (
+            _is_within(raw_interpreter, workspace)
+            or any(_is_within(interpreter_path, Path(root)) for root in _SYSTEM_DIRS)
+        ):
+            raise SandboxError(
+                f"workspace script references an unapproved host interpreter: {shebang[0]}"
+            )
         add_path(interpreter_path)
 
     for path in _extra_runtime_paths():
@@ -308,24 +325,26 @@ def build_sandbox_invocation(
         raise SandboxError(f"workspace cannot be resolved: {exc}") from exc
     if not workspace_root.is_dir():
         raise SandboxError("workspace must be an existing directory")
-    protected_roots = {
-        Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/var"),
-        Path("/tmp"), Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"),
-        Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"), Path("/lib64"),
-        Path("/boot"), Path("/opt"),
-    }
-    resolved_protected = set()
+    protected_roots = [
+        Path("/etc"), Path("/var"), Path("/proc"), Path("/sys"), Path("/dev"),
+        Path("/run"), Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"),
+        Path("/lib64"), Path("/boot"), Path("/opt"), Path("/root"),
+    ]
     for protected in protected_roots:
         try:
-            resolved_protected.add(protected.resolve(strict=True))
+            protected = protected.resolve(strict=True)
         except OSError:
-            resolved_protected.add(protected)
-    if workspace_root in resolved_protected:
+            pass
+        if _is_within(workspace_root, protected):
+            raise SandboxError("workspace must not be inside a host system or root-home directory")
+    if workspace_root == Path("/") or workspace_root in {Path("/home"), Path("/tmp")}:
         raise SandboxError("workspace must not be a host system or home root directory")
+    if workspace_root.parent == Path("/home"):
+        raise SandboxError("workspace must be a project directory below the user's home, not the home directory itself")
 
     task_root = Path(task_dir).resolve(strict=True)
-    if _is_within(task_root, workspace_root):
-        raise SandboxError("workspace must not contain the task artifact directory or storage tree")
+    if _is_within(task_root, workspace_root) or _is_within(workspace_root, task_root):
+        raise SandboxError("workspace and task artifact directory/storage tree must be separate")
     mcp_config = task_root / "mcp-config.isolated.json"
     if mcp_config.is_symlink() or not mcp_config.is_file():
         raise SandboxError("isolated MCP config is missing or is not a regular file")
@@ -414,11 +433,12 @@ def build_sandbox_invocation(
     ]
     if shebang and shebang[0] != "/usr/bin/env" and Path(shebang[0]).is_absolute():
         interpreter_path = Path(shebang[0]).resolve(strict=True)
-        if _is_within(interpreter_path, workspace_root):
-            sandbox_interpreter = "/workspace/" + interpreter_path.relative_to(workspace_root).as_posix()
-            args.extend([sandbox_interpreter, *shebang[1:], sandbox_executable, *sandbox_args])
+        raw_interpreter = Path(shebang[0])
+        if _is_within(raw_interpreter, workspace_root):
+            sandbox_interpreter = "/workspace/" + raw_interpreter.relative_to(workspace_root).as_posix()
         else:
-            args.extend([sandbox_executable, *sandbox_args])
+            sandbox_interpreter = str(interpreter_path)
+        args.extend([sandbox_interpreter, *shebang[1:], sandbox_executable, *sandbox_args])
     else:
         args.extend([sandbox_executable, *sandbox_args])
 

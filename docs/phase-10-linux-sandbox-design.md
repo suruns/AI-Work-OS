@@ -2,7 +2,7 @@
 
 ## Status
 
-Design baseline for Phase 10. No runtime isolation is enabled by this document. The current Worker still executes Claude Code and verification commands as ordinary host processes and must only be used with trusted workspaces.
+Phase 10.1 now includes an opt-in Bubblewrap backend. It remains disabled by default (`AI_WORK_OS_SANDBOX_MODE=off`) until the operator completes real-host acceptance. When disabled, subprocesses retain the existing host execution behavior; when enabled, normal Claude execution, Repair, and Verification are wrapped and fail closed on sandbox setup errors.
 
 Base commit: `3a34bb9f8c752a74f1194ffbbc72470c06b82846` (Phase 9).
 
@@ -96,7 +96,20 @@ The sandbox policy must be recorded in task events, including backend, effective
 
 ### Phase 10.1 — sandbox substrate
 
+Implemented in this PR:
 - Add a backend abstraction and a pure command/mount-plan builder.
+- Use Bubblewrap user, mount, PID, IPC, UTS, and optional network namespaces; default network mode is `none`.
+- Mount the workspace at `/workspace` (read-only for plan tasks, read-write for configured tasks), mount only the generated MCP file read-only, and keep the task artifact directory, Worker, database, and real home outside the sandbox.
+- Mount system runtime directories read-only; resolve and mount the Claude CLI package and Node executable individually when they live outside system paths.
+- Use an ephemeral `/tmp/home` and an explicit provider/auth environment allowlist. The allowlisted environment is passed via the child environment, not command-line arguments.
+- Preserve absolute workspace virtualenv shebangs with a sandbox-local symlink alias to `/workspace`; this does not mount the host parent directory.
+- Record `executor.sandbox_configured` / `executor.sandbox_failed` metadata for normal, repair, and verification subprocesses.
+
+Remaining local acceptance work:
+- Validate the actual Claude Code 2.1.306 launcher, Node runtime, provider authentication, and host-network DNS/certificate behavior on the operator's Fedora host.
+- Exercise read-only/read-write workspace boundaries, host home and sibling-project canaries, symlink escapes, child process inheritance, and cancellation cleanup.
+- External verification executables outside workspace/system paths require explicit `AI_WORK_OS_SANDBOX_RUNTIME_PATHS` entries.
+
 - Add host capability preflight for `bwrap`, user namespaces, and required mount paths.
 - Add opt-in `bubblewrap` mode with fail-closed startup.
 - Wrap normal, repair, and verification subprocesses.

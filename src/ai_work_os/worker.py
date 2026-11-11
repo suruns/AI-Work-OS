@@ -293,9 +293,22 @@ async def capture_workspace_snapshot(
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
         git_context = {"task_dir": task_dir, "task_id": task_id}
-        reported_root = Path((await _git_output(
-            workspace, "rev-parse", "--show-toplevel", **git_context
-        )).decode().strip()).resolve()
+        try:
+            reported_root = Path((await _git_output(
+                workspace, "rev-parse", "--show-toplevel", **git_context
+            )).decode().strip()).resolve()
+        except RuntimeError as exc:
+            if sandbox_mode() == "bubblewrap":
+                return {
+                    "available": False,
+                    "reason": (
+                        "Git root probe failed inside the sandbox. The selected workspace "
+                        "must itself be a Git repository root with its .git metadata inside "
+                        "the workspace; parent-directory Git metadata is not mounted. "
+                        f"Underlying error: {exc}"
+                    ),
+                }
+            raise
         if sandbox_mode() == "bubblewrap":
             if reported_root != Path("/workspace"):
                 return {

@@ -147,9 +147,10 @@ def build_command(
         command.extend(["--permission-mode", "plan"])
     elif permission_mode == "configured":
         # Accept Claude's native file-edit tools without an interactive approval
-        # surface. Bash and other permission-gated tools still require approval
-        # and remain denied when --permission-prompts is none.
+        # surface. Explicitly disallow Bash because acceptEdits may otherwise
+        # permit workspace-local shell writes in unattended execution.
         command.extend(["--permission-mode", "acceptEdits"])
+        command.extend(["--disallowedTools", "Bash"])
     else:
         raise ValueError(f"unsupported Claude permission mode: {permission_mode}")
     return command
@@ -293,8 +294,9 @@ async def capture_workspace_snapshot(
 ) -> dict:
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
+        git_context = {"task_dir": task_dir, "task_id": task_id}
         reported_root = Path((await _git_output(
-            workspace, "rev-parse", "--show-toplevel"
+            workspace, "rev-parse", "--show-toplevel", **git_context
         )).decode().strip()).resolve()
         if sandbox_mode() == "bubblewrap":
             if reported_root != Path("/workspace"):
@@ -305,7 +307,6 @@ async def capture_workspace_snapshot(
             root = workspace.resolve()
         else:
             root = reported_root
-        git_context = {"task_dir": task_dir, "task_id": task_id}
         tracked_paths = (await _git_output(
             root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD",
             **git_context,

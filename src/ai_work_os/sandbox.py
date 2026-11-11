@@ -95,10 +95,19 @@ def _system_mounts() -> tuple[list[list[str]], set[str]]:
         else:
             dirs.add(source)
             args.append(["--ro-bind", source, source])
-    for source in ("/etc/ssl", "/etc/pki"):
-        if Path(source).exists():
-            dirs.add(source)
-            args.append(["--ro-bind", source, source])
+    for source in (
+        "/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/ssl/openssl.cnf",
+        "/etc/pki/ca-trust", "/etc/pki/tls/certs",
+        "/etc/pki/tls/cert.pem", "/etc/pki/tls/ca-bundle.pem",
+    ):
+        path = Path(source)
+        if path.exists():
+            resolved = path.resolve(strict=True)
+            if path.is_dir():
+                dirs.add(source)
+            else:
+                dirs.add(str(Path(source).parent))
+            args.append(["--ro-bind", str(resolved), source])
     for source in ("/etc/passwd", "/etc/group", "/etc/localtime", "/etc/os-release"):
         path = Path(source)
         if path.exists():

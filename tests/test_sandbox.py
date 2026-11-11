@@ -17,6 +17,7 @@ def _fake_claude_runtime(root: Path) -> tuple[Path, Path]:
     node.chmod(0o755)
     cli = package / "cli.js"
     cli.write_text("process.exit(0);\n", encoding="utf-8")
+    cli.chmod(0o755)
     link = node_bin / "claude"
     link.symlink_to(cli)
     return link, node

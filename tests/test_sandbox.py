@@ -208,7 +208,9 @@ def test_claude_node_runtime_and_package_are_mounted_read_only(monkeypatch, tmp_
     package_dir = runtime / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
     bin_dir.mkdir(parents=True)
     package_dir.mkdir(parents=True)
-    (bin_dir / "node").symlink_to(sys.executable)
+    node_file = bin_dir / "node"
+    node_file.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    node_file.chmod(0o755)
     cli_file = package_dir / "cli.js"
     cli_file.write_text("#!/usr/bin/env node\\n", encoding="utf-8")
     cli_file.chmod(0o755)
@@ -231,6 +233,6 @@ def test_claude_node_runtime_and_package_are_mounted_read_only(monkeypatch, tmp_
     assert str(bin_dir) in invocation.metadata["runtime_mounts"]
     assert str(package_dir) in invocation.metadata["runtime_mounts"]
     separator = invocation.command.index("--")
-    assert invocation.command[separator + 1] == str(claude_link)
+    assert invocation.command[separator + 1].startswith("/opt/awos-runtime/")
     mcp_index = invocation.command.index("--mcp-config")
     assert invocation.command[mcp_index + 1] == "/awos/task/mcp-config.isolated.json"

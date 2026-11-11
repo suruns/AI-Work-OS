@@ -62,7 +62,7 @@ def _system_mounts() -> tuple[list[list[str]], set[str]]:
         else:
             dirs.add(source)
             args.append(["--ro-bind", source, source])
-    for source in ("/etc/ssl/certs", "/etc/pki"):
+    for source in ("/etc/ssl", "/etc/pki"):
         if Path(source).exists():
             dirs.add(source)
             args.append(["--ro-bind", source, source])
@@ -175,7 +175,7 @@ def build_sandbox_invocation(
     system_mounts, dirs = _system_mounts()
     dirs.update(runtime_dirs)
     dirs.update({"/tmp/home", "/tmp/home/.cache", "/tmp/home/.config",
-                 "/tmp/home/.local", "/tmp/home/.local/share"})
+                 "/tmp/home/.local", "/tmp/home/.local/share", "/tmp/home/.claude"})
     config_target = None
     config_source = None
     if mcp_config_path is not None:
@@ -214,7 +214,7 @@ def build_sandbox_invocation(
     args.extend([
         "--dir", "/tmp/home", "--dir", "/tmp/home/.cache",
         "--dir", "/tmp/home/.config", "--dir", "/tmp/home/.local",
-        "--dir", "/tmp/home/.local/share",
+        "--dir", "/tmp/home/.local/share", "--dir", "/tmp/home/.claude",
     ])
     if workspace_alias:
         args.extend(["--symlink", "/workspace", str(workspace_path)])

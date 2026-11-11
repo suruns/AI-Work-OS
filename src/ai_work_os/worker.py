@@ -329,7 +329,7 @@ def build_task_sandbox_invocation(
             "error": f"{type(exc).__name__}: {exc}",
             "process_started": False,
         })
-        raise
+        raise OSError(f"sandbox setup failed: {type(exc).__name__}: {exc}") from exc
     add_event(task_id, "executor.sandbox_configured", invocation.metadata)
     return invocation
 

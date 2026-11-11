@@ -1084,7 +1084,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     break
                 if timed_out or proc.returncode != 0:
                     break
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, SandboxError) as exc:
                 verification_results.append({
                     "index": index, "command": command_text, "exit_code": None,
                     "timed_out": False, "stdout": "",

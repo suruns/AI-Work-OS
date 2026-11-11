@@ -148,6 +148,52 @@ def test_nested_mountpoint_detection_ignores_workspace_mount_itself():
 
 
 
+def test_mcp_config_argv_is_rewritten_to_sandbox_mount(tmp_path, monkeypatch):
+    workspace, task_dir, fake_bin = tmp_path / "workspace", tmp_path / "task", tmp_path / "bin"
+    workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    config = task_dir / "mcp-config.isolated.json"
+    config.write_text('{"mcpServers":{}}\\n', encoding="utf-8")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    result = build_sandbox_invocation(
+        [str(claude), "--mcp-config", str(config)], workspace, task_dir,
+        "configured", {"PATH": f"{claude.parent}:{fake_bin}"},
+        mcp_config_path=config, execution_kind="task",
+    )
+    index = result.command.index("--mcp-config")
+    assert result.command[index + 1] == "/awos/task/mcp-config.isolated.json"
+    assert str(config.resolve()) not in result.command
+
+
+def test_runtime_mounts_below_tmp_survive_tmpfs_creation(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    task_dir = tmp_path / "task"
+    runtime = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir()
+    claude, node = _fake_claude_runtime(runtime)
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    env = {"PATH": f"{node.parent}:{claude.parent}:{fake_bin}"}
+    result = build_sandbox_invocation(
+        [str(claude), "-p", "probe"], workspace, task_dir, "plan", env,
+        execution_kind="task",
+    )
+    tmpfs_index = result.command.index("--tmpfs")
+    runtime_bind_index = result.command.index("--ro-bind", tmpfs_index)
+    assert result.command[tmpfs_index + 1] == "/tmp"
+    assert runtime_bind_index > tmpfs_index
+    assert str(node.resolve()) in result.command
+    assert str(claude.resolve().parent) in result.command
+
+
 def test_bubblewrap_rejects_unknown_permission_mode(tmp_path, monkeypatch):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

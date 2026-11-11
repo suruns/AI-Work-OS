@@ -48,6 +48,7 @@ def test_bubblewrap_plan_is_read_only_and_network_is_disabled(tmp_path, monkeypa
     result = build_sandbox_invocation([str(claude), "-p", "inspect"], workspace, task_dir, "plan", env)
     command = result.command
     assert "--unshare-user" in command and "--unshare-pid" in command and "--unshare-net" in command
+    assert "--disable-userns" in command and "--uid" in command and "--gid" in command
     ro_binds = [command[i:i+3] for i in range(len(command)-2) if command[i] == "--ro-bind"]
     assert ["--ro-bind", str(workspace.resolve()), "/workspace"] in ro_binds
     assert str(node.resolve()) not in command  # runtime is already inside the workspace mount

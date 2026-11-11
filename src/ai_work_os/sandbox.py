@@ -26,8 +26,9 @@ def _preflight_bubblewrap(bwrap_path: str) -> None:
     if bwrap_path in _PREFLIGHTED_BWRAP:
         return
     probe = [
-        bwrap_path, "--die-with-parent", "--unshare-user", "--unshare-pid",
-        "--unshare-ipc", "--unshare-uts", "--unshare-net",
+        bwrap_path, "--die-with-parent", "--unshare-user",
+        "--uid", str(os.getuid()), "--gid", str(os.getgid()),
+        "--disable-userns", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
         "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev",
         "--tmpfs", "/tmp", "/usr/bin/true",
     ]
@@ -92,6 +93,10 @@ def _system_mounts() -> tuple[list[list[str]], set[str]]:
         if Path(source).exists():
             dirs.add(source)
             args.append(["--ro-bind", source, source])
+    for source in ("/etc/passwd", "/etc/group", "/etc/localtime", "/etc/os-release"):
+        path = Path(source)
+        if path.exists():
+            args.append(["--ro-bind", str(path.resolve(strict=True)), source])
     return args, dirs
 
 
@@ -178,6 +183,8 @@ def build_sandbox_invocation(
     bwrap = shutil.which(bwrap_setting)
     if bwrap is None:
         raise FileNotFoundError(f"Bubblewrap executable not found: {bwrap_setting}")
+    if os.getuid() == 0 or os.getgid() == 0:
+        raise ValueError("Bubblewrap Worker must run as an unprivileged host user")
     bwrap_path = str(Path(bwrap).resolve(strict=True))
     _preflight_bubblewrap(bwrap_path)
     workspace_input = Path(workspace).expanduser().absolute()
@@ -221,7 +228,8 @@ def build_sandbox_invocation(
         dirs.add(str(workspace_path.parent))
     args = [
         bwrap_path, "--die-with-parent", "--new-session",
-        "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+        "--unshare-user", "--uid", str(os.getuid()), "--gid", str(os.getgid()),
+        "--disable-userns", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
     ]
     if network == "none":
         args.append("--unshare-net")

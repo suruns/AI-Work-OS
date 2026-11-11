@@ -187,10 +187,10 @@ def build_sandbox_invocation(
             raise ValueError("MCP config must be a regular file inside the task artifact directory")
         config_target = "/awos/task/mcp-config.isolated.json"
         dirs.update({"/awos", "/awos/task"})
-    workspace_alias = not _inside(workspace_path, Path("/tmp")) and not any(
+    workspace_alias = not any(
         _inside(workspace_path, Path(root)) for root in SYSTEM_ROOTS
     )
-    if workspace_alias:
+    if workspace_alias and not _inside(workspace_path, Path("/tmp")):
         dirs.add(str(workspace_path.parent))
     args = [
         bwrap_path, "--die-with-parent", "--new-session",
@@ -222,6 +222,10 @@ def build_sandbox_invocation(
         "--dir", "/tmp/home/.local/share", "--dir", "/tmp/home/.claude",
     ])
     if workspace_alias:
+        if _inside(workspace_path, Path("/tmp")):
+            for directory in _target_dirs({str(workspace_path.parent)}):
+                if directory != "/tmp":
+                    args.extend(["--dir", directory])
         args.extend(["--symlink", "/workspace", str(workspace_path)])
     path_parts = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     if node_dir:

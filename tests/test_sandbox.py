@@ -70,6 +70,9 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     assert ["--ro-bind", "/", "/"] not in [
         invocation.command[i:i + 3] for i in range(len(invocation.command) - 2)
     ]
+    workspace_bind = invocation.command.index(str(workspace))
+    tmpfs_mount = invocation.command.index("--tmpfs")
+    assert workspace_bind < tmpfs_mount
 
 
 def test_configured_mode_binds_workspace_read_write(monkeypatch, tmp_path):
@@ -232,6 +235,10 @@ def test_claude_node_runtime_and_package_are_mounted_read_only(monkeypatch, tmp_
     assert invocation is not None
     assert str(bin_dir) in invocation.metadata["runtime_mounts"]
     assert str(package_dir) in invocation.metadata["runtime_mounts"]
+    assert all(target.startswith("/opt/awos-runtime/") for target in invocation.metadata["runtime_mount_targets"])
+    tmpfs_mount = invocation.command.index("--tmpfs")
+    for source in (str(bin_dir), str(package_dir)):
+        assert invocation.command.index(source) < tmpfs_mount
     separator = invocation.command.index("--")
     assert invocation.command[separator + 1].startswith("/opt/awos-runtime/")
     mcp_index = invocation.command.index("--mcp-config")

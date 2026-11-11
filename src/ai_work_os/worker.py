@@ -12,6 +12,7 @@ from pathlib import Path
 from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
+from .sandbox import SandboxError, build_sandbox_invocation
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
     """Persist process liveness; active task ownership remains authoritative on Task rows."""
@@ -310,6 +311,38 @@ def add_event(task_id: str, event_type: str, payload: dict) -> None:
         db.commit()
 
 
+def prepare_task_execution(
+    task_id: str,
+    command: list[str],
+    workspace: Path,
+    task_dir: Path,
+    permission_mode: str,
+    inherited_env: dict[str, str] | None,
+    execution_kind: str,
+) -> tuple[list[str], dict[str, str] | None, str]:
+    """Apply the configured OS sandbox consistently to every task-controlled process."""
+    try:
+        invocation = build_sandbox_invocation(
+            command, workspace, task_dir, permission_mode, inherited_env
+        )
+    except Exception as exc:
+        add_event(task_id, "executor.sandbox_failed", {
+            "execution_kind": execution_kind,
+            "policy": "fail_closed",
+            "mode": os.getenv("AI_WORK_OS_SANDBOX_MODE", "off"),
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        raise
+    if invocation is None:
+        return list(command), inherited_env, str(workspace)
+    add_event(task_id, "executor.sandbox_configured", {
+        **invocation.metadata,
+        "execution_kind": execution_kind,
+        "policy": "fail_closed",
+    })
+    return invocation.command, invocation.env, invocation.cwd
+
+
 def _blocked_origin(task_id: str, by_id: dict, parents: dict[str, list[str]], memo: dict[str, str | None],
                     visiting: set[str] | None = None) -> str | None:
     """Resolve whether a blocked task ultimately descends from a failed or cancelled task."""
@@ -576,11 +609,15 @@ async def run_repair_attempt(
             "repair_attempt": repair_number,
         })
         command = build_command(repair_prompt, permission_mode, mcp_config_path, setting_sources)
+        spawn_command, spawn_env, spawn_cwd = prepare_task_execution(
+            task_id, command, workspace, task_dir, permission_mode,
+            claude_subprocess_env(), "repair",
+        )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(workspace),
-                env=claude_subprocess_env(),
+                *spawn_command,
+                cwd=spawn_cwd,
+                env=spawn_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -670,9 +707,14 @@ async def run_repair_attempt(
             argv = shlex.split(command_text)
             if not argv:
                 raise ValueError("command is empty")
+            spawn_command, spawn_env, spawn_cwd = prepare_task_execution(
+                task_id, argv, workspace, task_dir, permission_mode,
+                os.environ.copy(), "repair_verification",
+            )
             check = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=str(workspace),
+                *spawn_command,
+                cwd=spawn_cwd,
+                env=spawn_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -717,7 +759,7 @@ async def run_repair_attempt(
             })
             if timed_out or check.returncode != 0:
                 break
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SandboxError) as exc:
             results.append({
                 "index": index,
                 "command": command_text,
@@ -824,11 +866,15 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "configured_server_count": 0,
             "disallowed_tool_pattern": "mcp__*",
         })
+        spawn_command, spawn_env, spawn_cwd = prepare_task_execution(
+            task_id, command, workspace, task_dir, permission_mode,
+            claude_subprocess_env(), "task",
+        )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(workspace),
-                env=claude_subprocess_env(),
+                *spawn_command,
+                cwd=spawn_cwd,
+                env=spawn_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -993,8 +1039,12 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 argv = shlex.split(command_text)
                 if not argv:
                     raise ValueError("command is empty")
+                spawn_command, spawn_env, spawn_cwd = prepare_task_execution(
+                    task_id, argv, workspace, task_dir, permission_mode,
+                    os.environ.copy(), "verification",
+                )
                 proc = await asyncio.create_subprocess_exec(
-                    *argv, cwd=str(workspace),
+                    *spawn_command, cwd=spawn_cwd, env=spawn_env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=(os.name == "posix"),

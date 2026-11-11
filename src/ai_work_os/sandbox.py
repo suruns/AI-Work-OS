@@ -160,6 +160,7 @@ def _validate_runtime_mount_root(path: Path) -> None:
     forbidden = [
         Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/var"),
         Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"), Path("/tmp"),
+        Path("/opt"), Path("/mnt"), Path("/media"), Path("/boot"),
     ]
     for root in forbidden:
         try:

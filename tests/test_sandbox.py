@@ -59,6 +59,8 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     assert invocation.env["HOME"] == "/tmp/awos-home"
     assert invocation.metadata["workspace_access"] == "read_only"
     assert invocation.metadata["network"] == "none"
+    assert "/awos/task/mcp-config.isolated.json" in invocation.command
+    assert str(task_dir) in invocation.command
 
 
 def test_configured_mode_binds_workspace_read_write(monkeypatch, tmp_path):
@@ -67,7 +69,7 @@ def test_configured_mode_binds_workspace_read_write(monkeypatch, tmp_path):
     task_dir = _task_dir(tmp_path)
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_NETWORK", "host")
-    with patch.object(sandbox, "_probe_bwrap"):
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
         invocation = sandbox.build_sandbox_invocation(
             [sys.executable, "-V"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
         )

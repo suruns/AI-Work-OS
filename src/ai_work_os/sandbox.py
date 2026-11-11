@@ -300,6 +300,14 @@ def build_sandbox_invocation(
                 args.extend(["--ro-bind", str(path.resolve(strict=True)), source])
     for mount in system_mounts:
         args.extend(mount)
+    # Create /tmp before runtime binds: a later tmpfs would hide any runtime
+    # executable mounted below it (for example a Node install under /tmp).
+    args.extend(["--proc", "/proc", "--dev", "/dev", "--perms", "01777", "--tmpfs", "/tmp"])
+    for directory in _target_dirs({
+        item for item in dirs
+        if item != "/tmp" and _inside(Path(item), Path("/tmp"))
+    }):
+        args.extend(["--dir", directory])
     for mount in runtime_mounts:
         args.extend(mount)
     args.extend(["--ro-bind" if permission_mode == "plan" else "--bind",
@@ -308,7 +316,6 @@ def build_sandbox_invocation(
         args.extend(["--tmpfs", task_hidden_target])
     if config_target and config_source:
         args.extend(["--ro-bind", str(config_source), config_target])
-    args.extend(["--proc", "/proc", "--dev", "/dev", "--perms", "01777", "--tmpfs", "/tmp"])
     for directory in (
         "/tmp/home", "/tmp/home/.cache", "/tmp/home/.config",
         "/tmp/home/.local", "/tmp/home/.local/share", "/tmp/home/.claude",
@@ -343,7 +350,14 @@ def build_sandbox_invocation(
                 sandbox_env[key] = (env or {})[key]
     # Pass a sanitized environment to bubblewrap via execve's envp, not argv:
     # secrets therefore do not appear in /proc/<pid>/cmdline.
-    args.extend(["--chdir", "/workspace", "--", command_path, *list(command)[1:]])
+    sandbox_args = list(command)
+    if config_target and mcp_config_path is not None:
+        host_config_path = str(Path(mcp_config_path).resolve(strict=True))
+        sandbox_args = [
+            config_target if argument == host_config_path else argument
+            for argument in sandbox_args
+        ]
+    args.extend(["--chdir", "/workspace", "--", command_path, *sandbox_args[1:]])
     return SandboxInvocation(args, "/", sandbox_env, {
         "enabled": True, "backend": "bubblewrap", "bwrap_path": bwrap_path,
         "network": network,

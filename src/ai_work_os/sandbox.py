@@ -168,7 +168,7 @@ def _validate_runtime_mount_root(path: Path) -> None:
         except OSError:
             pass
         if resolved == root or (
-            root not in {Path("/"), Path("/home"), Path("/tmp")} and _within(resolved, root)
+            root not in {Path("/"), Path("/home"), Path("/tmp"), Path("/opt"), Path("/mnt"), Path("/media")} and _within(resolved, root)
         ):
             raise SandboxError(f"runtime mount is too broad or sensitive: {resolved}")
     try:

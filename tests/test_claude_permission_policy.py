@@ -12,8 +12,9 @@ def test_configured_mode_uses_non_interactive_file_edit_policy():
     assert "--dangerously-skip-permissions" not in command
     assert "bypassPermissions" not in command
     assert command[command.index("--permission-prompts") + 1] == "none"
-    disallowed = [command[i + 1] for i, value in enumerate(command[:-1]) if value == "--disallowedTools"]
-    assert disallowed == ["mcp__*", "Bash"]
+    index = command.index("--disallowedTools")
+    assert command[index + 1:index + 3] == ["mcp__*", "Bash"]
+    assert command.count("--disallowedTools") == 1
 
 
 def test_plan_mode_remains_explicitly_read_only():

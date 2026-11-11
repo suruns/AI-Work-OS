@@ -172,5 +172,5 @@ def test_workspace_executable_symlink_cannot_expose_host_runtime(monkeypatch, tm
     with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
         with pytest.raises(sandbox.SandboxError, match="symlink points outside"):
             sandbox.build_sandbox_invocation(
-                ["run"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
+                ["./run"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
             )

@@ -11,7 +11,7 @@ AUTH_ENV_KEYS = {
     "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BEDROCK_BASE_URL",
     "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "AWS_REGION",
     "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
+    "AWS_SESSION_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 }
 SAFE_ENV_KEYS = {"LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM"}
 SYSTEM_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib64")
@@ -81,12 +81,19 @@ def _resolve_executable(command: Sequence[str], env: dict[str, str] | None) -> P
     return resolved
 
 
+def _sandbox_path(path: Path, workspace: Path) -> str:
+    if _inside(path, workspace):
+        return str(Path("/workspace") / path.relative_to(workspace))
+    return str(path)
+
+
 def _runtime_mounts(
     executable: Path, workspace: Path, env: dict[str, str] | None, include_node: bool,
-) -> tuple[list[list[str]], set[str], list[str], str]:
+) -> tuple[list[list[str]], set[str], list[str], str, str]:
     mounts: list[list[str]] = []
     dirs: set[str] = set()
     visible: list[str] = []
+    command_path = _sandbox_path(executable, workspace)
     if not _inside(executable, workspace) and not any(
         _inside(executable, Path(root)) for root in SYSTEM_ROOTS
     ):
@@ -111,6 +118,7 @@ def _runtime_mounts(
             mounts.append(["--ro-bind", str(source), str(source)])
             dirs.add(str(source) if source.is_dir() else str(Path(source).parent))
             visible.append(str(source))
+    node_dir = ""
     if include_node:
         node_found = shutil.which("node", path=(env or {}).get("PATH", os.defpath))
         if node_found is None:
@@ -118,13 +126,14 @@ def _runtime_mounts(
         node_path = Path(node_found).resolve(strict=True)
         if not node_path.is_file():
             raise ValueError(f"Node.js runtime is not a regular file: {node_path}")
+        node_dir = _sandbox_path(node_path.parent, workspace)
         if not _inside(node_path, workspace) and not any(
             _inside(node_path, Path(root)) for root in SYSTEM_ROOTS
         ):
             mounts.append(["--ro-bind", str(node_path), str(node_path)])
             dirs.add(str(node_path.parent))
             visible.append(str(node_path))
-    return mounts, dirs, visible, str(executable)
+    return mounts, dirs, visible, command_path, node_dir
 
 
 def build_sandbox_invocation(
@@ -160,7 +169,7 @@ def build_sandbox_invocation(
         raise ValueError("AI_WORK_OS_SANDBOX_NETWORK must be 'none' or 'host'")
     executable = _resolve_executable(command, env)
     include_node = execution_kind in {"task", "repair"}
-    runtime_mounts, runtime_dirs, visible_mounts, actual_command = _runtime_mounts(
+    runtime_mounts, runtime_dirs, visible_mounts, command_path, node_dir = _runtime_mounts(
         executable, workspace_path, env, include_node
     )
     system_mounts, dirs = _system_mounts()
@@ -189,7 +198,8 @@ def build_sandbox_invocation(
     ]
     if network == "none":
         args.append("--unshare-net")
-    args.extend(["--hostname", "ai-work-os", "--clearenv"])
+    args.append("--hostname")
+    args.append("ai-work-os")
     for directory in _target_dirs(dirs):
         args.extend(["--dir", directory])
     for mount in system_mounts:
@@ -208,11 +218,6 @@ def build_sandbox_invocation(
     ])
     if workspace_alias:
         args.extend(["--symlink", "/workspace", str(workspace_path)])
-    node_dir = ""
-    if include_node:
-        node_found = shutil.which("node", path=(env or {}).get("PATH", os.defpath))
-        if node_found:
-            node_dir = str(Path(node_found).resolve(strict=True).parent)
     path_parts = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     if node_dir:
         path_parts.insert(0, node_dir)
@@ -230,16 +235,10 @@ def build_sandbox_invocation(
         for key in AUTH_ENV_KEYS:
             if (env or {}).get(key):
                 sandbox_env[key] = (env or {})[key]
-    for key, value in sandbox_env.items():
-        args.extend(["--setenv", key, value])
-    sandbox_command = list(command)
-    sandbox_command[0] = actual_command
-    if mcp_config_path is not None and config_target:
-        original = str(mcp_config_path)
-        resolved = str(Path(mcp_config_path).resolve())
-        sandbox_command = [config_target if item in {original, resolved} else item for item in sandbox_command]
-    args.extend(["--chdir", "/workspace", "--", *sandbox_command])
-    return SandboxInvocation(args, "/", {"PATH": "/usr/bin:/bin"}, {
+    # Pass a sanitized environment to bubblewrap via execve's envp, not argv:
+    # secrets therefore do not appear in /proc/<pid>/cmdline.
+    args.extend(["--chdir", "/workspace", "--", command_path, *list(command)[1:]])
+    return SandboxInvocation(args, "/", sandbox_env, {
         "enabled": True, "backend": "bubblewrap", "bwrap_path": bwrap_path,
         "network": network,
         "workspace_access": "read_only" if permission_mode == "plan" else "read_write",

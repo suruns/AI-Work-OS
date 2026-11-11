@@ -40,11 +40,12 @@ _SYSTEM_FILES = (
     "/etc/group",
     "/etc/nsswitch.conf",
     "/etc/os-release",
+    "/etc/ld.so.cache",
 )
 _SYSTEM_DIR_MOUNTS = (
-    "/etc/ssl/certs",
     "/etc/pki/ca-trust",
     "/etc/pki/tls/certs",
+    "/etc/ssl/certs",
 )
 
 
@@ -267,20 +268,33 @@ def build_sandbox_invocation(
 
     created: set[str] = {"/"}
     for source in _SYSTEM_DIRS:
-        if Path(source).exists():
+        source_path = Path(source)
+        if source_path.is_symlink():
+            args.extend(["--symlink", os.readlink(source_path), source])
+            created.add(source)
+        elif source_path.is_dir():
             _ensure_target_dir(args, source, created)
             args.extend(["--ro-bind", source, source])
     for source in _SYSTEM_FILES:
-        if Path(source).is_file():
+        source_path = Path(source)
+        if source_path.is_symlink():
+            args.extend(["--symlink", os.readlink(source_path), source])
+            created.add(source)
+        elif source_path.is_file():
             _ensure_target_dir(args, source, created)
             args.extend(["--ro-bind", source, source])
     for source in _SYSTEM_DIR_MOUNTS:
-        if Path(source).is_dir():
+        source_path = Path(source)
+        if source_path.is_symlink():
+            args.extend(["--symlink", os.readlink(source_path), source])
+            created.add(source)
+        elif source_path.is_dir():
             _ensure_target_dir(args, source, created)
             args.extend(["--ro-bind", source, source])
-    if network == "host" and Path("/etc/resolv.conf").is_file():
+    if network == "host" and Path("/etc/resolv.conf").exists():
         _ensure_target_dir(args, "/etc/resolv.conf", created)
-        args.extend(["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"])
+        resolv_source = str(Path("/etc/resolv.conf").resolve(strict=True))
+        args.extend(["--ro-bind", resolv_source, "/etc/resolv.conf"])
 
     _ensure_target_dir(args, "/proc", created)
     _ensure_target_dir(args, "/dev", created)

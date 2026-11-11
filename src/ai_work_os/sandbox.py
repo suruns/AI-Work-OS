@@ -137,8 +137,9 @@ def _extra_runtime_paths() -> list[Path]:
             resolved = candidate.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"runtime path does not exist: {item}: {exc}") from exc
-        if resolved == Path("/") or not resolved.is_dir():
-            raise SandboxError(f"runtime path must be an existing directory below /: {item}")
+        forbidden = {Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/var"), Path("/tmp")}
+        if resolved in forbidden or not resolved.is_dir():
+            raise SandboxError(f"runtime path must be a narrow existing directory below /: {item}")
         paths.append(resolved)
     return paths
 
@@ -257,7 +258,6 @@ def build_sandbox_invocation(
     args = [
         bwrap,
         "--die-with-parent",
-        "--new-session",
         "--unshare-user",
         "--unshare-pid",
         "--unshare-ipc",
@@ -270,6 +270,7 @@ def build_sandbox_invocation(
     for source in _SYSTEM_DIRS:
         source_path = Path(source)
         if source_path.is_symlink():
+            _ensure_target_dir(args, str(source_path.parent), created)
             args.extend(["--symlink", os.readlink(source_path), source])
             created.add(source)
         elif source_path.is_dir():
@@ -278,6 +279,7 @@ def build_sandbox_invocation(
     for source in _SYSTEM_FILES:
         source_path = Path(source)
         if source_path.is_symlink():
+            _ensure_target_dir(args, str(source_path.parent), created)
             args.extend(["--symlink", os.readlink(source_path), source])
             created.add(source)
         elif source_path.is_file():

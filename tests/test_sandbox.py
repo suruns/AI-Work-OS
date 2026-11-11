@@ -59,6 +59,7 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     assert invocation.env["HOME"] == "/tmp/awos-home"
     assert invocation.metadata["workspace_access"] == "read_only"
     assert invocation.metadata["network"] == "none"
+    assert invocation.cwd == "/"
     assert "/awos/task/mcp-config.isolated.json" in invocation.command
     assert str(task_dir) in invocation.command
     mcp_index = invocation.command.index("--mcp-config")
@@ -174,3 +175,62 @@ def test_workspace_executable_symlink_cannot_expose_host_runtime(monkeypatch, tm
             sandbox.build_sandbox_invocation(
                 ["./run"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
             )
+
+
+
+def test_workspace_venv_shebang_is_rewritten_to_sandbox_path(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    bin_dir = workspace / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    interpreter = bin_dir / "python"
+    interpreter.symlink_to(sys.executable)
+    script = workspace / "run"
+    script.write_text(f"#!{interpreter}\\nprint('ok')\\n", encoding="utf-8")
+    script.chmod(0o755)
+    task_dir = _task_dir(tmp_path)
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox, "_probe_invocation"), patch.object(sandbox.shutil, "which", return_value=sys.executable):
+        invocation = sandbox.build_sandbox_invocation(
+            ["./run"], workspace, task_dir, "configured", {"PATH": os.environ.get("PATH", "")}
+        )
+    assert invocation is not None
+    separator = invocation.command.index("--")
+    assert invocation.command[separator + 1] == "/workspace/.venv/bin/python"
+    assert invocation.command[separator + 2] == "/workspace/run"
+
+
+def test_claude_node_runtime_and_package_are_mounted_read_only(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_dir = _task_dir(tmp_path)
+    runtime = tmp_path / "node-runtime"
+    bin_dir = runtime / "bin"
+    package_dir = runtime / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
+    bin_dir.mkdir(parents=True)
+    package_dir.mkdir(parents=True)
+    (bin_dir / "node").symlink_to(sys.executable)
+    cli_file = package_dir / "cli.js"
+    cli_file.write_text("#!/usr/bin/env node\\n", encoding="utf-8")
+    cli_file.chmod(0o755)
+    claude_link = bin_dir / "claude"
+    claude_link.symlink_to(cli_file)
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    real_which = sandbox.shutil.which
+
+    def fake_which(name, path=None):
+        if name == "bwrap":
+            return sys.executable
+        return real_which(name, path=path)
+
+    with patch.object(sandbox, "_probe_bwrap"), patch.object(sandbox, "_probe_invocation"), patch.object(sandbox.shutil, "which", side_effect=fake_which):
+        invocation = sandbox.build_sandbox_invocation(
+            [str(claude_link), "-p", "hello", "--mcp-config", str(task_dir / "mcp-config.isolated.json")],
+            workspace, task_dir, "plan", {"PATH": str(bin_dir), "ANTHROPIC_API_KEY": "secret"}
+        )
+    assert invocation is not None
+    assert str(bin_dir) in invocation.metadata["runtime_mounts"]
+    assert str(package_dir) in invocation.metadata["runtime_mounts"]
+    separator = invocation.command.index("--")
+    assert invocation.command[separator + 1] == str(claude_link)
+    mcp_index = invocation.command.index("--mcp-config")
+    assert invocation.command[mcp_index + 1] == "/awos/task/mcp-config.isolated.json"

@@ -108,7 +108,7 @@ def _probe_invocation(command: list[str], env: Mapping[str, str]) -> None:
     try:
         result = subprocess.run(
             probe_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, timeout=10, check=False, env=dict(env),
+            stderr=subprocess.PIPE, text=True, timeout=10, check=False, env=dict(env), cwd="/",
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SandboxError(f"bubblewrap mount preflight failed: {type(exc).__name__}: {exc}") from exc
@@ -491,4 +491,6 @@ def build_sandbox_invocation(
         "environment_policy": "explicit_auth_allowlist",
     }
     _probe_invocation(args, curated_env)
-    return SandboxInvocation(args, curated_env, "/workspace", metadata)
+    # The host-side bwrap process must start from a neutral cwd; --chdir below
+    # changes directory only after the mount namespace has been constructed.
+    return SandboxInvocation(args, curated_env, "/", metadata)

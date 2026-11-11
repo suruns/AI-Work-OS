@@ -219,7 +219,10 @@ async def _git_output(
     workspace: Path, *args: str, task_dir: Path | None = None,
     task_id: str | None = None, sandboxed: bool = True,
 ) -> bytes:
-    command = ["git", "-C", str(workspace), *args]
+    git_bin = shutil.which("git", path="/usr/bin:/bin")
+    if git_bin is None:
+        raise FileNotFoundError("system Git executable not found")
+    command = [git_bin, "-C", str(workspace), *args]
     invocation = None
     if sandboxed and sandbox_mode() == "bubblewrap":
         if task_dir is None or task_id is None:
@@ -289,6 +292,9 @@ async def capture_workspace_snapshot(
         tracked = {}
         for raw_path in filter(None, tracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                continue
             if is_generated_python_cache(rel):
                 continue
             patch = await _git_output(
@@ -300,10 +306,21 @@ async def capture_workspace_snapshot(
         excluded = [path.resolve() for path in (exclude_paths or [])]
         for raw_path in filter(None, untracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                continue
             if is_generated_python_cache(rel):
                 continue
-            candidate = root / rel
-            resolved_candidate = candidate.resolve()
+            candidate = root / rel_path
+            resolved_parent = candidate.parent.resolve()
+            if not (resolved_parent == root or root in resolved_parent.parents):
+                continue
+            if candidate.is_symlink():
+                resolved_candidate = candidate
+            else:
+                resolved_candidate = candidate.resolve(strict=False)
+                if not (resolved_candidate == root or root in resolved_candidate.parents):
+                    continue
             if any(resolved_candidate == item or item in resolved_candidate.parents for item in excluded):
                 continue
             try:

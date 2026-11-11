@@ -103,7 +103,9 @@ Implemented in this PR:
 - Mount system runtime directories read-only; resolve and mount the Claude CLI package and Node executable individually when they live outside system paths.
 - Use an ephemeral `/tmp/home` and an explicit provider/auth environment allowlist. The allowlisted environment is passed via the child environment, not command-line arguments. The sandbox keeps the unprivileged Worker UID/GID and disables nested user namespaces.
 - Preserve absolute workspace virtualenv shebangs with a sandbox-local symlink alias to `/workspace`; this does not mount the host parent directory.
-- Record `executor.sandbox_configured` / `executor.sandbox_failed` metadata for normal, repair, and verification subprocesses.
+- Record `executor.sandbox_configured` / `executor.sandbox_failed` metadata for normal, repair, verification, and Git snapshot subprocesses.
+- Hide task artifact directories with a tmpfs overlay when they are nested inside the selected workspace; reject nested host mountpoints to prevent recursive bind exposure.
+- Run Git diff/listing commands in a read-only sandbox, disable external diff/textconv and fsmonitor helpers, and keep the only host-side Git operation to a trusted `rev-parse` root lookup. Sandboxed snapshots require the selected workspace to be the repository root.
 
 Remaining local acceptance work:
 - Validate the actual Claude Code 2.1.306 launcher, Node runtime, provider authentication, and host-network DNS/certificate behavior on the operator's Fedora host.

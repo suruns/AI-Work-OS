@@ -236,10 +236,17 @@ async def _git_output(
             task_id, command, workspace, task_dir, "plan", snapshot_env,
             execution_kind="snapshot",
         )
+    host_env = None
+    if not sandboxed and sandbox_mode() == "bubblewrap":
+        host_env = {
+            "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
     proc = await asyncio.create_subprocess_exec(
         *(invocation.command if invocation else command),
         cwd=invocation.cwd if invocation else None,
-        env=invocation.env if invocation else None,
+        env=invocation.env if invocation else host_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

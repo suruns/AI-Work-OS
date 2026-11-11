@@ -709,7 +709,7 @@ async def run_repair_attempt(
                 raise ValueError("command is empty")
             spawn_command, spawn_env, spawn_cwd = prepare_task_execution(
                 task_id, argv, workspace, task_dir, permission_mode,
-                os.environ.copy(), "repair_verification",
+                None, "repair_verification",
             )
             check = await asyncio.create_subprocess_exec(
                 *spawn_command,
@@ -1041,7 +1041,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     raise ValueError("command is empty")
                 spawn_command, spawn_env, spawn_cwd = prepare_task_execution(
                     task_id, argv, workspace, task_dir, permission_mode,
-                    os.environ.copy(), "verification",
+                    None, "verification",
                 )
                 proc = await asyncio.create_subprocess_exec(
                     *spawn_command, cwd=spawn_cwd, env=spawn_env,

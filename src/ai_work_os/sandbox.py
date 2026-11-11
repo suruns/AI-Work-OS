@@ -172,6 +172,13 @@ def _runtime_mounts(
             resolved = original.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"cannot resolve runtime path {original}: {exc}") from exc
+        original_in_workspace = _is_within(original, workspace)
+        resolved_in_workspace = _is_within(resolved, workspace)
+        resolved_in_system = any(_is_within(resolved, Path(root)) for root in _SYSTEM_DIRS)
+        if original_in_workspace and not (resolved_in_workspace or resolved_in_system):
+            raise SandboxError(
+                f"workspace executable or interpreter symlink points outside the workspace: {original}"
+            )
         for candidate in (original, resolved):
             if any(_is_within(candidate, Path(root)) for root in _SYSTEM_DIRS):
                 continue

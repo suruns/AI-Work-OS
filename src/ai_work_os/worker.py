@@ -139,18 +139,16 @@ def build_command(
         "--permission-prompts", "none",
         "--setting-sources", ",".join(sources),
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
-        "--disallowedTools", "mcp__*",
     ]
     if CLAUDE_MODEL:
         command.extend(["--model", CLAUDE_MODEL])
     if permission_mode == "plan":
-        command.extend(["--permission-mode", "plan"])
+        command.extend(["--permission-mode", "plan", "--disallowedTools", "mcp__*"])
     elif permission_mode == "configured":
         # Accept Claude's native file-edit tools without an interactive approval
         # surface. Explicitly disallow Bash because acceptEdits may otherwise
         # permit workspace-local shell writes in unattended execution.
-        command.extend(["--permission-mode", "acceptEdits"])
-        command.extend(["--disallowedTools", "Bash"])
+        command.extend(["--permission-mode", "acceptEdits", "--disallowedTools", "mcp__*", "Bash"])
     else:
         raise ValueError(f"unsupported Claude permission mode: {permission_mode}")
     return command

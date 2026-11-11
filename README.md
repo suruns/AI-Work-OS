@@ -33,6 +33,11 @@ curl -X POST http://127.0.0.1:8000/tasks -H 'content-type: application/json' -d 
 Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 
 ## Safety
+
+- Phase 10.1 adds an opt-in Linux Bubblewrap execution boundary. It is **off by default** for compatibility; set `AI_WORK_OS_SANDBOX_MODE=bubblewrap` only after local preflight and acceptance. When enabled, missing Bubblewrap, invalid paths, or mount setup errors fail the task before starting the agent; there is no unsandboxed fallback.
+- Bubblewrap defaults to `AI_WORK_OS_SANDBOX_NETWORK=none`. Claude API calls require explicitly choosing `host` networking, which permits outbound network access and carries data-exfiltration risk. Workspace access is enforced by OS mounts: `plan` is read-only; configured/editing tasks are read-write. The task MCP config is mounted read-only by itself; the real home directory, user Claude settings, Worker storage, and database are not mounted.
+- The sandbox creates an ephemeral `/tmp/home` and passes only a small provider/auth environment allowlist to Claude. API key/token values are supplied to the sandbox process but are never included in policy events. Credentials stored only in the real `~/.claude` login directory are intentionally not mounted; use supported service environment credentials for sandbox runs. External runtime executables outside the workspace/system paths require explicit `AI_WORK_OS_SANDBOX_RUNTIME_PATHS` entries separated by the host path separator.
+- Bubblewrap is Linux-only and is not a kernel-exploit boundary. Network host mode can exfiltrate data readable inside the sandbox, and read-write mode permits arbitrary changes within the selected workspace. The Worker, database, artifact collection, and Git snapshots remain host-side.
 - Never run this service against untrusted workspaces.
 - The worker does not add --dangerously-skip-permissions or bypassPermissions.
 - By default, Worker starts Claude Code with `--setting-sources project,local`, excluding the user settings source (`~/.claude/settings.json`) that can re-inject model-selection variables through its `env` block. The source list can be explicitly changed with `AI_WORK_OS_CLAUDE_SETTING_SOURCES` (comma-separated subset of `user,project,local`); adding `user` opts back into user settings and can reintroduce their model overrides.

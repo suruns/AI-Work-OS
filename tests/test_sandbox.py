@@ -121,9 +121,10 @@ def test_task_artifacts_nested_in_workspace_are_hidden(tmp_path, monkeypatch):
         {"PATH": f"{claude.parent}:{fake_bin}"},
         mcp_config_path=config, execution_kind="task",
     )
-    assert ["--tmpfs", "/workspace/.ai-work-os/tasks/task-1"] == [
+    tmpfs_mounts = [
         result.command[i:i+2] for i in range(len(result.command)-1)
         if result.command[i] == "--tmpfs"
-    ][-1]
+    ]
+    assert ["--tmpfs", "/workspace/.ai-work-os/tasks/task-1"] in tmpfs_mounts
     assert result.metadata["task_artifacts_hidden_at"] == "/workspace/.ai-work-os/tasks/task-1"
     assert "/awos/task/mcp-config.isolated.json" in result.command

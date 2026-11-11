@@ -345,7 +345,7 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan.status_code == 201
     assert plan.json()["permission_mode"] == "plan"
     plan_command = build_command("inspect", "plan")
-    assert plan_command[-2:] == ["--permission-mode", "plan"]
+    assert plan_command[-4:] == ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]
     assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
     configured = client.post("/tasks", json={
@@ -565,7 +565,7 @@ def test_bubblewrap_workspace_snapshot_passes_task_context_to_every_git_call(tmp
     async def fake_git_output(path, *args, task_dir=None, task_id=None, sandboxed=True):
         calls.append((args, task_dir, task_id, sandboxed))
         if args == ("rev-parse", "--show-toplevel"):
-            return b"/workspace\\n"
+            return b"/workspace\n"
         return b""
 
     monkeypatch.setattr(worker, "sandbox_mode", lambda: "bubblewrap")

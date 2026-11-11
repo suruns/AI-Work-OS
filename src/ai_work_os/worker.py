@@ -607,9 +607,7 @@ async def run_repair_attempt(
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.command,
-
                 cwd=invocation.cwd,
-
                 env=invocation.env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -865,9 +863,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.command,
-
                 cwd=invocation.cwd,
-
                 env=invocation.env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

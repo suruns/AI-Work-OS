@@ -41,6 +41,7 @@ def test_bubblewrap_plan_is_read_only_and_network_is_disabled(tmp_path, monkeypa
     claude, node = _fake_claude_runtime(workspace / "runtime")
     env = {"PATH": f"{claude.parent}:{fake_bin}", "ANTHROPIC_API_KEY": "do-not-log-this",
            "ANTHROPIC_BASE_URL": "https://api.example.invalid", "ANTHROPIC_MODEL": "should-not-pass",
+           "CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret",
            "HOME": str(tmp_path / "real-home")}
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
     monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
@@ -54,7 +55,9 @@ def test_bubblewrap_plan_is_read_only_and_network_is_disabled(tmp_path, monkeypa
     assert str(node.resolve()) not in command  # runtime is already inside the workspace mount
     assert "/workspace/runtime/node-bin" in result.env["PATH"]
     assert "do-not-log-this" not in command and "should-not-pass" not in command
+    assert "oauth-secret" not in command
     assert result.env["ANTHROPIC_API_KEY"] == "do-not-log-this"
+    assert result.env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-secret"
     assert str(tmp_path / "real-home") not in command
     assert result.cwd == "/" and result.metadata["workspace_access"] == "read_only"
 

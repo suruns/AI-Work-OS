@@ -27,13 +27,17 @@ def _preflight_bubblewrap(bwrap_path: str) -> None:
     """Check required namespaces and a minimal system mount once per Worker process."""
     if bwrap_path in _PREFLIGHTED_BWRAP:
         return
+    system_mounts, dirs = _system_mounts()
     probe = [
         bwrap_path, "--die-with-parent", "--unshare-user",
         "--uid", str(os.getuid()), "--gid", str(os.getgid()),
         "--disable-userns", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
-        "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev",
-        "--tmpfs", "/tmp", "/usr/bin/true",
     ]
+    for directory in _target_dirs(dirs):
+        probe.extend(["--dir", directory])
+    for mount in system_mounts:
+        probe.extend(mount)
+    probe.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "/usr/bin/true"])
     try:
         subprocess.run(
             probe, check=True, capture_output=True, text=True, timeout=8,

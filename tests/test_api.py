@@ -554,6 +554,34 @@ def test_workspace_snapshot_reports_non_git_workspace_as_unavailable(tmp_path):
     assert report["available"] is False
 
 
+def test_bubblewrap_workspace_snapshot_passes_task_context_to_every_git_call(tmp_path, monkeypatch):
+    workspace = tmp_path / "git-workspace"
+    workspace.mkdir()
+    task_dir = tmp_path / "task-artifacts"
+    task_dir.mkdir()
+    task_id = "snapshot-task-123"
+    calls = []
+
+    async def fake_git_output(path, *args, task_dir=None, task_id=None, sandboxed=True):
+        calls.append((args, task_dir, task_id, sandboxed))
+        if args == ("rev-parse", "--show-toplevel"):
+            return b"/workspace\\n"
+        return b""
+
+    monkeypatch.setattr(worker, "sandbox_mode", lambda: "bubblewrap")
+    monkeypatch.setattr(worker, "_git_output", fake_git_output)
+
+    snapshot = asyncio.run(worker.capture_workspace_snapshot(
+        workspace, task_dir=task_dir, task_id=task_id,
+    ))
+
+    assert snapshot["available"] is True
+    assert snapshot["repository_root"] == str(workspace.resolve())
+    assert len(calls) == 3
+    assert all(call[1] == task_dir and call[2] == task_id and call[3] is True for call in calls)
+    assert calls[0][0] == ("rev-parse", "--show-toplevel")
+
+
 
 def test_workspace_changes_endpoint_returns_report_and_handles_pending_report(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module, "STORAGE", tmp_path / "storage")

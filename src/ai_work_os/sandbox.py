@@ -154,6 +154,28 @@ def _venv_root(path: Path) -> Path | None:
     return None
 
 
+def _validate_runtime_mount_root(path: Path) -> None:
+    """Never expose a broad host directory as an executable/runtime mount."""
+    resolved = path.resolve(strict=True)
+    forbidden = [
+        Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/var"),
+        Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"), Path("/tmp"),
+    ]
+    for root in forbidden:
+        try:
+            root = root.resolve(strict=True)
+        except OSError:
+            pass
+        if resolved == root or (root != Path("/home") and _within(resolved, root)):
+            raise SandboxError(f"runtime mount is too broad or sensitive: {resolved}")
+    try:
+        operator_home = Path.home().resolve(strict=True)
+    except OSError:
+        operator_home = Path.home()
+    if resolved == operator_home or resolved.parent == Path("/home"):
+        raise SandboxError("runtime mount must not expose an entire user home directory")
+
+
 def _extra_runtime_paths() -> list[Path]:
     raw = os.getenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", "")
     paths: list[Path] = []
@@ -165,9 +187,9 @@ def _extra_runtime_paths() -> list[Path]:
             resolved = candidate.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxError(f"runtime path does not exist: {item}: {exc}") from exc
-        forbidden = {Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/var"), Path("/tmp")}
-        if resolved in forbidden or not resolved.is_dir():
+        if not resolved.is_dir():
             raise SandboxError(f"runtime path must be a narrow existing directory below /: {item}")
+        _validate_runtime_mount_root(resolved)
         paths.append(resolved)
     return paths
 
@@ -190,6 +212,7 @@ def _runtime_mounts(
             raise SandboxError(f"runtime mount is not a directory: {directory}")
         if _is_system_path(directory) or _is_system_path(resolved):
             return str(resolved)
+        _validate_runtime_mount_root(resolved)
         if _within(directory, workspace) or _within(resolved, workspace):
             if _within(directory, workspace):
                 return "/workspace/" + directory.relative_to(workspace).as_posix()

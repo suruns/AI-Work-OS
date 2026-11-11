@@ -152,11 +152,11 @@ def test_mcp_config_argv_is_rewritten_to_sandbox_mount(tmp_path, monkeypatch):
     workspace, task_dir, fake_bin = tmp_path / "workspace", tmp_path / "task", tmp_path / "bin"
     workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir()
     bwrap = fake_bin / "bwrap"
-    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     bwrap.chmod(0o755)
     claude, _node = _fake_claude_runtime(workspace / "runtime")
     config = task_dir / "mcp-config.isolated.json"
-    config.write_text('{"mcpServers":{}}\\n', encoding="utf-8")
+    config.write_text('{"mcpServers":{}}\n', encoding="utf-8")
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
     monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
     result = build_sandbox_invocation(
@@ -177,7 +177,7 @@ def test_runtime_mounts_below_tmp_survive_tmpfs_creation(tmp_path, monkeypatch):
     workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir()
     claude, node = _fake_claude_runtime(runtime)
     bwrap = fake_bin / "bwrap"
-    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     bwrap.chmod(0o755)
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
     monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))

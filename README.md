@@ -45,6 +45,30 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use project/local Claude Code settings" when the task is expected to edit files; this uses project and project-local permission settings while excluding user settings by default. Set `AI_WORK_OS_CLAUDE_SETTING_SOURCES=user,project,local` only when you intentionally want the user's global settings loaded.
 - Plan mode is a Claude Code permission control, not an OS-level sandbox. Continue to use trusted workspaces and review agent activity.
 
+## Linux execution sandbox (Phase 10.1, opt-in)
+
+The Worker can optionally run Claude Code, repair attempts, and verification commands inside a Bubblewrap Linux namespace. This is an OS-level filesystem/process boundary layered underneath Claude permission settings and MCP isolation. It is **disabled by default** for compatibility; until the operator completes real-host acceptance, use trusted workspaces only.
+
+Install Bubblewrap and verify that unprivileged user namespaces work on the Worker host. Then configure the Worker service:
+
+~~~bash
+AI_WORK_OS_SANDBOX_MODE=bubblewrap
+AI_WORK_OS_SANDBOX_NETWORK=host
+~~~
+
+`AI_WORK_OS_SANDBOX_NETWORK=none` is the default when sandbox mode is enabled and disables network access inside the task namespace. Claude API calls will not work in that mode unless the required service is reachable without network access. Set `host` only when network access is deliberately accepted; it allows the agent to contact external services and potentially exfiltrate data it can read.
+
+In Bubblewrap mode:
+- `plan` tasks receive the workspace read-only at `/workspace`; configured/editing tasks receive it read-write.
+- The current task artifact directory is mounted read-only at `/awos/task`; other task directories, the Worker repository, database, storage root, and the real `/home` and `/root` are not mounted.
+- `/tmp`, `/home`, and `/root` are ephemeral namespace-local filesystems. Claude's HOME is set to `/tmp/awos-home`; real user Claude settings and credential files are not exposed.
+- System runtime directories and CA certificate directories are mounted read-only. The Node executable directory and Claude CLI package directory are resolved and mounted read-only under `/opt/awos-runtime`; their original host paths are not exposed inside the sandbox.
+- The process environment is rebuilt from a small allowlist rather than forwarding the Worker environment. The default includes common Anthropic API/auth variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `CLAUDE_CODE_OAUTH_TOKEN`) plus locale variables. Additional variable **names** may be explicitly allowed with `AI_WORK_OS_SANDBOX_ENV_ALLOWLIST` (comma-separated); values are never written to task events.
+- If Node or Claude Code lives outside the standard system paths, add only the required runtime **directories** with `AI_WORK_OS_SANDBOX_RUNTIME_PATHS` (colon-separated absolute paths). `AI_WORK_OS_BWRAP_BIN` may select a non-default Bubblewrap executable.
+- A namespace/mount capability probe is run before execution. Missing Bubblewrap, unsupported namespaces, invalid paths, or mount setup errors emit `executor.sandbox_failed` and fail closed; there is no unsandboxed fallback. Workspace and task-artifact roots must be separate, and broad host/system roots cannot be selected as workspaces.
+
+The same wrapper is used for normal Claude execution, automatic repair, and verification commands. Cancellation continues to terminate the host-side Bubblewrap process group; Bubblewrap's die-with-parent behavior tears down the contained process tree. The sandbox is not a defense against kernel vulnerabilities or a compromised host. Writable workspaces permit arbitrary edits within that workspace, and host networking permits external communication. The default environment allowlist does not expose file-based Claude OAuth credentials; configure a supported token environment variable before enabling sandbox mode.
+
 ## Initial API
 
 - `GET /` — task console

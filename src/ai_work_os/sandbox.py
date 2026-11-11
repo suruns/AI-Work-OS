@@ -208,11 +208,20 @@ def build_sandbox_invocation(
     workspace_path = workspace_input.resolve(strict=True)
     if not workspace_path.is_dir():
         raise ValueError("sandbox workspace must be a directory")
-    if workspace_path in {Path("/"), Path("/home"), Path("/etc"), Path("/usr"), Path("/tmp"), Path("/proc"), Path("/dev")}:
-        raise ValueError("sandbox workspace cannot be a filesystem or reserved mount root")
+    reserved_roots = ("/", "/home", "/etc", "/proc", "/dev")
+    if workspace_path in {Path(root) for root in reserved_roots} or any(
+        _inside(workspace_path, Path(root)) for root in (*SYSTEM_ROOTS, "/etc", "/proc", "/dev")
+    ):
+        raise ValueError("sandbox workspace cannot be a filesystem or reserved runtime path")
     task_path = Path(task_dir).resolve(strict=True)
     if not task_path.is_dir():
         raise ValueError("sandbox task artifact directory must exist")
+    task_hidden_target = None
+    if _inside(task_path, workspace_path):
+        relative_task_path = task_path.relative_to(workspace_path)
+        if not relative_task_path.parts:
+            raise ValueError("task artifact directory cannot be the workspace root")
+        task_hidden_target = str(Path("/workspace") / relative_task_path)
     network = os.getenv("AI_WORK_OS_SANDBOX_NETWORK", "none").strip().lower()
     if network not in {"none", "host"}:
         raise ValueError("AI_WORK_OS_SANDBOX_NETWORK must be 'none' or 'host'")
@@ -263,6 +272,8 @@ def build_sandbox_invocation(
         args.extend(mount)
     args.extend(["--ro-bind" if permission_mode == "plan" else "--bind",
                  str(workspace_path), "/workspace"])
+    if task_hidden_target:
+        args.extend(["--tmpfs", task_hidden_target])
     if config_target and config_source:
         args.extend(["--ro-bind", str(config_source), config_target])
     args.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
@@ -305,5 +316,6 @@ def build_sandbox_invocation(
         "sandbox_uid": os.getuid(), "sandbox_gid": os.getgid(),
         "nested_user_namespaces": "disabled",
         "runtime_mounts": sorted(set(visible_mounts)),
-        "task_config_mount": config_target, "execution_kind": execution_kind,
+        "task_config_mount": config_target, "task_artifacts_hidden_at": task_hidden_target,
+        "execution_kind": execution_kind,
     })

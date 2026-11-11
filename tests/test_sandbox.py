@@ -99,3 +99,31 @@ def test_bubblewrap_fails_closed_for_workspace_symlink_and_missing_bwrap(tmp_pat
     monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
     with pytest.raises(ValueError, match="canonical"):
         build_sandbox_invocation(["true"], link, task_dir, "plan", {})
+
+
+
+def test_task_artifacts_nested_in_workspace_are_hidden(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    task_dir = workspace / ".ai-work-os" / "tasks" / "task-1"
+    fake_bin = tmp_path / "bin"
+    task_dir.mkdir(parents=True)
+    fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    config = task_dir / "mcp-config.isolated.json"
+    config.write_text('{"mcpServers":{}}\n', encoding="utf-8")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    result = build_sandbox_invocation(
+        [str(claude), "--mcp-config", str(config)], workspace, task_dir, "plan",
+        {"PATH": f"{claude.parent}:{fake_bin}"},
+        mcp_config_path=config, execution_kind="task",
+    )
+    assert ["--tmpfs", "/workspace/.ai-work-os/tasks/task-1"] == [
+        result.command[i:i+2] for i in range(len(result.command)-1)
+        if result.command[i] == "--tmpfs"
+    ][-1]
+    assert result.metadata["task_artifacts_hidden_at"] == "/workspace/.ai-work-os/tasks/task-1"
+    assert "/awos/task/mcp-config.isolated.json" in result.command

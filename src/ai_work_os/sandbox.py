@@ -264,7 +264,7 @@ def _runtime_mounts(
             or env_program == "node"
         ):
             raise SandboxError(f"workspace script requests an unapproved host interpreter: {env_program}")
-        program_target = add_path(program_candidate)
+        add_path(program_candidate)
         program_dir = program_candidate.parent
         if _is_system_path(program_resolved):
             program_target = str(program_resolved.parent)
@@ -297,7 +297,7 @@ def _runtime_mounts(
             _within(raw_interpreter, workspace) or _is_system_path(interpreter_resolved)
         ):
             raise SandboxError(f"workspace script references an unapproved host interpreter: {shebang[0]}")
-        interpreter_target = add_path(raw_interpreter)
+        add_path(raw_interpreter)
 
     for runtime_dir in _extra_runtime_paths():
         target = add_directory(runtime_dir)
@@ -365,26 +365,35 @@ def _curated_environment(
     return result
 
 
-def _probe_invocation(command: list[str], env: Mapping[str, str]) -> None:
-    """Validate the exact mount plan with a trusted test binary before running task code."""
+def _probe_invocation(
+    command: list[str], env: Mapping[str, str], shebang: list[str]
+) -> None:
+    """Validate the exact mount plan with trusted binaries before running task code."""
     try:
         separator = command.index("--")
     except ValueError as exc:
         raise SandboxError("sandbox command is missing its execution separator") from exc
-    probe_command = command[:separator + 1] + ["/usr/bin/test", "-x", command[separator + 1]]
-    try:
-        result = subprocess.run(
-            probe_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, timeout=10, check=False, env=dict(env), cwd="/",
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SandboxError(f"bubblewrap mount preflight failed: {type(exc).__name__}: {exc}") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()[-2000:]
-        raise SandboxError(
-            f"bubblewrap mount preflight failed with exit code {result.returncode}"
-            + (f": {detail}" if detail else "")
-        )
+    prefix = command[:separator + 1]
+    probes = [
+        ["/usr/bin/test", "-x", command[separator + 1]],
+        ["/usr/bin/test", "-r", "/awos/task/mcp-config.isolated.json"],
+    ]
+    if shebang and shebang[0] == "/usr/bin/env" and "node" in shebang:
+        probes.append(["/usr/bin/env", "node", "--version"])
+    for probe_args in probes:
+        try:
+            result = subprocess.run(
+                prefix + probe_args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, timeout=10, check=False, env=dict(env), cwd="/",
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxError(f"bubblewrap mount preflight failed: {type(exc).__name__}: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[-2000:]
+            raise SandboxError(
+                f"bubblewrap mount preflight failed with exit code {result.returncode}"
+                + (f": {detail}" if detail else "")
+            )
 
 
 def build_sandbox_invocation(
@@ -567,5 +576,5 @@ def build_sandbox_invocation(
         "auth_env_keys": sorted(key for key in curated_env if key in _AUTH_ENV_KEYS),
         "environment_policy": "explicit_auth_allowlist",
     }
-    _probe_invocation(args, curated_env)
+    _probe_invocation(args, curated_env, shebang)
     return SandboxInvocation(args, curated_env, "/", metadata)

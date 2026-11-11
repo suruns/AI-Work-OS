@@ -73,6 +73,9 @@ def test_bubblewrap_plan_builds_read_only_workspace_and_no_host_home(monkeypatch
     workspace_bind = invocation.command.index(str(workspace))
     tmpfs_mount = invocation.command.index("--tmpfs")
     assert workspace_bind < tmpfs_mount
+    workspace_bind = invocation.command.index(str(workspace))
+    tmpfs_mount = invocation.command.index("--tmpfs")
+    assert workspace_bind < tmpfs_mount
 
 
 def test_configured_mode_binds_workspace_read_write(monkeypatch, tmp_path):

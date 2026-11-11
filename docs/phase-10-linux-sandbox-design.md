@@ -109,7 +109,7 @@ Implemented in this PR:
 - Preserve absolute workspace virtualenv shebangs with a sandbox-local symlink alias to `/workspace`; this does not mount the host parent directory.
 - Record `executor.sandbox_configured` / `executor.sandbox_failed` metadata for normal, repair, verification, and Git snapshot subprocesses.
 - Hide task artifact directories with a tmpfs overlay when they are nested inside the selected workspace; reject nested host mountpoints to prevent recursive bind exposure.
-- Run Git diff/listing commands in a read-only sandbox, disable external diff/textconv and fsmonitor helpers, and keep the only host-side Git operation to a trusted `rev-parse` root lookup. Sandboxed snapshots require the selected workspace to be the repository root.
+- Run every Git snapshot command, including `rev-parse --show-toplevel`, in a read-only sandbox. Resolve the sandbox's `/workspace` root back to the host-selected workspace only after the sandboxed probe returns exactly `/workspace`; disable external diff/textconv and fsmonitor helpers. Sandboxed snapshots require the selected workspace to be the repository root.
 
 Remaining local acceptance work:
 - Validate the actual Claude Code 2.1.306 launcher, Node runtime, provider authentication, and host-network DNS/certificate behavior on the operator's Fedora host.

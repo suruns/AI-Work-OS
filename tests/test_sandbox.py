@@ -145,3 +145,23 @@ def test_nested_mountpoint_detection_ignores_workspace_mount_itself():
         "32 20 0:27 / /work/other rw,relatime - ext4 /dev/sda2 rw\n"
     )
     assert _nested_mountpoints(workspace, mountinfo) == ["/work/project/.private"]
+
+
+
+def test_bubblewrap_rejects_unknown_permission_mode(tmp_path, monkeypatch):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    workspace = tmp_path / "workspace"
+    task_dir = tmp_path / "task"
+    workspace.mkdir()
+    task_dir.mkdir()
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    with pytest.raises(ValueError, match="unsupported sandbox permission mode"):
+        build_sandbox_invocation(
+            ["/usr/bin/true"], workspace, task_dir, "manual", None,
+            execution_kind="verification",
+        )

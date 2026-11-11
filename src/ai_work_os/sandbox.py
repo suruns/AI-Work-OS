@@ -215,6 +215,10 @@ def build_sandbox_invocation(
             "workspace_access": "read_only" if permission_mode == "plan" else "read_write",
             "runtime_mounts": [], "execution_kind": execution_kind,
         })
+    if permission_mode not in {"plan", "configured"}:
+        raise ValueError(f"unsupported sandbox permission mode: {permission_mode}")
+    if execution_kind not in {"task", "repair", "verification", "snapshot"}:
+        raise ValueError(f"unsupported sandbox execution kind: {execution_kind}")
     bwrap_setting = os.getenv("AI_WORK_OS_BWRAP_BIN", "bwrap")
     bwrap = shutil.which(bwrap_setting)
     if bwrap is None:

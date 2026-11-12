@@ -8,9 +8,10 @@ from urllib.parse import quote
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
-from .schemas import ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -421,6 +422,225 @@ def list_project_workflows(
             .order_by(Workflow.created_at.desc(), Workflow.id).limit(limit)
         ))
         return [_workflow_payload(db, workflow) for workflow in workflows]
+
+
+def _conversation_payload(db, conversation: Conversation) -> dict:
+    message_count = db.scalar(
+        select(func.count()).select_from(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation.id)
+    ) or 0
+    pending_turn_count = db.scalar(
+        select(func.count()).select_from(AgentTurn).where(
+            AgentTurn.conversation_id == conversation.id,
+            AgentTurn.status.in_(["queued", "running"]),
+        )
+    ) or 0
+    last = db.scalar(
+        select(ConversationMessage).where(
+            ConversationMessage.conversation_id == conversation.id
+        ).order_by(ConversationMessage.id.desc()).limit(1)
+    )
+    last_message = None if last is None else {
+        "id": last.id, "role": last.role, "content": last.content[:240],
+        "created_at": last.created_at,
+    }
+    return {
+        "id": conversation.id, "project_id": conversation.project_id,
+        "title": conversation.title, "status": conversation.status,
+        "created_at": conversation.created_at, "updated_at": conversation.updated_at,
+        "archived_at": conversation.archived_at, "message_count": message_count,
+        "pending_turn_count": pending_turn_count, "last_message": last_message,
+    }
+
+
+@app.post("/conversations", status_code=201)
+def create_conversation(body: ConversationCreate) -> dict:
+    with SessionLocal() as db:
+        if body.project_id is not None:
+            project = db.get(Project, body.project_id)
+            if project is None:
+                raise HTTPException(status_code=404, detail="project not found")
+            if project.status != "active":
+                raise HTTPException(status_code=409, detail="archived projects cannot receive conversations")
+        conversation = Conversation(
+            project_id=body.project_id,
+            title=(body.title or "New conversation").strip(),
+            status="active",
+        )
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+        return _conversation_payload(db, conversation)
+
+
+@app.get("/conversations")
+def list_conversations(
+    project_id: str | None = Query(default=None),
+    status: str | None = Query(default="active", pattern="^(active|archived)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    with SessionLocal() as db:
+        query = select(Conversation).order_by(
+            Conversation.updated_at.desc(), Conversation.id
+        ).limit(limit)
+        if project_id is not None:
+            query = query.where(Conversation.project_id == project_id)
+        if status is not None:
+            query = query.where(Conversation.status == status)
+        return [_conversation_payload(db, item) for item in db.scalars(query)]
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: str) -> dict:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        return _conversation_payload(db, conversation)
+
+
+@app.patch("/conversations/{conversation_id}")
+def update_conversation(conversation_id: str, body: ConversationUpdate) -> dict:
+    changes = body.model_dump(exclude_unset=True)
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        if changes.get("title") is not None:
+            conversation.title = changes["title"].strip()
+        if changes.get("status") is not None:
+            conversation.status = changes["status"]
+            conversation.archived_at = utcnow() if conversation.status == "archived" else None
+        conversation.updated_at = utcnow()
+        db.commit()
+        db.refresh(conversation)
+        return _conversation_payload(db, conversation)
+
+
+@app.get("/conversations/{conversation_id}/messages", response_model=list[ConversationMessageRead])
+def list_conversation_messages(
+    conversation_id: str,
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[ConversationMessage]:
+    with SessionLocal() as db:
+        if db.get(Conversation, conversation_id) is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        return list(db.scalars(
+            select(ConversationMessage).where(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.id > after_id,
+            ).order_by(ConversationMessage.id).limit(limit)
+        ))
+
+
+@app.post("/conversations/{conversation_id}/messages", status_code=202)
+def create_conversation_message(conversation_id: str, body: ConversationMessageCreate) -> dict:
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="message content must not be blank")
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        if conversation.status != "active":
+            raise HTTPException(status_code=409, detail="archived conversations cannot receive messages")
+
+        if body.client_message_id:
+            existing = db.scalar(select(ConversationMessage).where(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.client_message_id == body.client_message_id,
+            ))
+            if existing is not None:
+                turn = db.scalar(select(AgentTurn).where(AgentTurn.user_message_id == existing.id))
+                return {
+                    "message": ConversationMessageRead.model_validate(existing).model_dump(),
+                    "turn": AgentTurnRead.model_validate(turn).model_dump() if turn else None,
+                    "duplicate": True,
+                }
+
+        message = ConversationMessage(
+            conversation_id=conversation_id, role="user", content=content,
+            client_message_id=body.client_message_id, message_metadata={},
+        )
+        db.add(message)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            existing = db.scalar(select(ConversationMessage).where(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.client_message_id == body.client_message_id,
+            ))
+            if existing is None:
+                raise
+            turn = db.scalar(select(AgentTurn).where(AgentTurn.user_message_id == existing.id))
+            return {
+                "message": ConversationMessageRead.model_validate(existing).model_dump(),
+                "turn": AgentTurnRead.model_validate(turn).model_dump() if turn else None,
+                "duplicate": True,
+            }
+
+        turn = AgentTurn(
+            conversation_id=conversation_id, user_message_id=message.id,
+            status="queued", adapter="claude-code",
+        )
+        db.add(turn)
+        db.flush()
+        db.add(AgentTurnEvent(
+            turn_id=turn.id, event_type="turn.queued",
+            payload={"conversation_id": conversation_id, "message_id": message.id},
+        ))
+        if conversation.title == "New conversation":
+            first_line = content.splitlines()[0].strip()
+            conversation.title = first_line[:72] or "New conversation"
+        conversation.updated_at = utcnow()
+        db.commit()
+        db.refresh(message)
+        db.refresh(turn)
+        return {
+            "message": ConversationMessageRead.model_validate(message).model_dump(),
+            "turn": AgentTurnRead.model_validate(turn).model_dump(),
+            "duplicate": False,
+        }
+
+
+@app.get("/conversations/{conversation_id}/turns", response_model=list[AgentTurnRead])
+def list_conversation_turns(
+    conversation_id: str, limit: int = Query(default=100, ge=1, le=500),
+) -> list[AgentTurn]:
+    with SessionLocal() as db:
+        if db.get(Conversation, conversation_id) is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        return list(db.scalars(
+            select(AgentTurn).where(AgentTurn.conversation_id == conversation_id)
+            .order_by(AgentTurn.created_at, AgentTurn.id).limit(limit)
+        ))
+
+
+@app.get("/agent-turns/{turn_id}", response_model=AgentTurnRead)
+def get_agent_turn(turn_id: str) -> AgentTurn:
+    with SessionLocal() as db:
+        turn = db.get(AgentTurn, turn_id)
+        if turn is None:
+            raise HTTPException(status_code=404, detail="agent turn not found")
+        return turn
+
+
+@app.get("/agent-turns/{turn_id}/events", response_model=list[AgentTurnEventRead])
+def list_agent_turn_events(
+    turn_id: str,
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+) -> list[AgentTurnEvent]:
+    with SessionLocal() as db:
+        if db.get(AgentTurn, turn_id) is None:
+            raise HTTPException(status_code=404, detail="agent turn not found")
+        return list(db.scalars(
+            select(AgentTurnEvent).where(
+                AgentTurnEvent.turn_id == turn_id, AgentTurnEvent.id > after_id,
+            ).order_by(AgentTurnEvent.id).limit(limit)
+        ))
 
 
 @app.post("/tasks", response_model=TaskRead, status_code=201)

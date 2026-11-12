@@ -53,6 +53,10 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 
 ## Initial API
 
+- `POST /conversations`, `GET /conversations`, `GET /conversations/{id}`, `PATCH /conversations/{id}` — persistent chat threads, optionally linked to a project.
+- `POST /conversations/{id}/messages` — persist a user message and enqueue an AgentTurn atomically; supports `client_message_id` for retry-safe sends.
+- `GET /conversations/{id}/messages?after_id=...` — cursor-based transcript retrieval.
+- `GET /conversations/{id}/turns`, `GET /agent-turns/{id}`, `GET /agent-turns/{id}/events?after_id=...` — inspect agent-turn state and replayable events.
 - `POST /projects`, `GET /projects`, `GET /projects/{project_id}`, `PATCH /projects/{project_id}` — project directory and lifecycle.
 - `GET /projects/{project_id}/tasks` and `GET /projects/{project_id}/workflows` — project-scoped execution inventory.
 - `GET /` — task console

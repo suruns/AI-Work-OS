@@ -83,7 +83,20 @@ Browser
                                                └── Claude Code task execution
 ```
 
-The Master Agent adapter and task Worker adapter are separate trust and lifecycle roles. Phase 8's empty MCP configuration and Phase 10.1 sandbox policy for task execution must remain intact. If the Master Agent uses a control-plane tool bridge (for example, a dedicated local MCP server), that bridge must expose only explicitly allowlisted AI Work OS operations; it must not reuse the task Worker's empty-MCP exception or grant arbitrary host access. The exact CLI tool-bridge mechanism is a Phase 11.0 technical spike and must be validated against the supported Claude Code CLI version before implementation is committed.
+The Master Agent adapter and task Worker adapter are separate trust and lifecycle roles. Phase 8's empty MCP configuration and Phase 10.1 sandbox policy for task execution must remain intact. The Master Agent can use a dedicated local MCP control-plane bridge configured with `--strict-mcp-config --mcp-config <master-agent-config>`; that bridge must expose only explicitly allowlisted AI Work OS operations. It must never be mounted into or reused by task Worker invocations, whose MCP config remains empty.
+
+### Claude Code CLI feasibility findings
+
+The current official Claude Code CLI reference documents the primitives needed for this design:
+- `--input-format stream-json` and `--output-format stream-json` support a programmatic bidirectional streaming session.
+- `--include-partial-messages` exposes incremental assistant text for a responsive chat UI.
+- `--mcp-config` together with `--strict-mcp-config` provides an explicit per-invocation MCP server allowlist for Master Agent control-plane tools.
+- `--resume <session-id>` resumes a CLI conversation; `--session-id <uuid>` can pin a session identifier.
+- `--tools` restricts built-in tools separately from MCP tools, allowing the Master Agent to be configured without general-purpose shell or filesystem access.
+
+References: [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference), [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+These documented capabilities make the CLI-based design technically plausible and remove the need to invent a custom conversation protocol. They do not replace a real-host acceptance test. Phase 11.0 must verify the exact flags and event sequence on the operator's installed Claude Code 2.1.306, especially: multi-message stream input, partial text events, MCP tool invocation/result events, process cancellation, and session resume after orchestrator restart. The app's persisted conversation transcript remains authoritative even when CLI session resume is available. Session files are local CLI state and must be stored in a dedicated, permission-restricted Master Agent config directory; never point the Master Agent at the task Worker or user's unrestricted home configuration.
 
 ## Data model direction
 
@@ -123,7 +136,7 @@ Persist user messages before execution. Persist assistant output incrementally o
 - One active turn per conversation in the first release; enforce this with a transactional claim/unique active-turn strategy.
 - A turn is not a Task and must not be counted as Worker execution. Task/Workflow events remain independently durable and queryable.
 
-The observed Claude CLI `session_id` is correlation metadata only until a version-specific resume/continuation contract is verified. Conversation messages are the source of truth. Do not make conversation continuity depend solely on a CLI session ID.
+The CLI documents `--resume <session-id>`, but the Worker’s previously observed `session_id` is not automatically proof that the corresponding transcript is available to a separate Master Agent process. Phase 11.0 must verify the session's persistence directory, ownership, and restart/resume behavior on the supported host. Conversation messages are the source of truth and must remain sufficient to reconstruct context if CLI resume is unavailable.
 
 ### Project associations
 
@@ -214,7 +227,8 @@ The tool contract must validate every argument server-side. It must not expose r
 ## Delivery plan
 
 ### Phase 11.0 — Architecture and runtime feasibility
-- Confirm Claude Code CLI streaming, tool bridge, turn cancellation, and conversation continuation behavior on the supported CLI version.
+- Verify Claude Code CLI stream-json input/output, partial-message events, explicit MCP tool bridge, process cancellation, and `--resume` behavior on the supported CLI version (currently 2.1.306).
+- Verify a dedicated Master Agent config/session directory and confirm no user-global or Worker MCP/settings leakage.
 - Define Master Agent/Worker trust boundaries and tool schemas.
 - Finalize database relationships, event contracts, SSE replay semantics, and migration order.
 - Deliver architecture review and acceptance matrix before changing execution behavior.

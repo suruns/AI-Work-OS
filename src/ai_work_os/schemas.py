@@ -160,7 +160,7 @@ class ConversationMessageRead(BaseModel):
     role: str
     content: str
     client_message_id: str | None
-    metadata: dict
+    metadata: dict = Field(validation_alias="message_metadata")
     created_at: datetime
     model_config = {"from_attributes": True}
 

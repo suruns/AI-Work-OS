@@ -402,9 +402,14 @@ async def capture_workspace_snapshot(
 def compare_workspace_snapshots(before: dict, after: dict) -> dict:
     """Report net changes between snapshots and flag changes that predated the task."""
     if not before.get("available") or not after.get("available"):
+        reason = (
+            before.get("reason") if not before.get("available") else None
+        ) or (
+            after.get("reason") if not after.get("available") else None
+        ) or "Workspace change tracking requires a Git repository and successful snapshots."
         return {
             "available": False,
-            "reason": "Workspace change tracking requires a Git repository and successful snapshots.",
+            "reason": reason,
             "before_reason": before.get("reason"),
             "after_reason": after.get("reason"),
         }

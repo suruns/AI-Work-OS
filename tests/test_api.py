@@ -2983,7 +2983,7 @@ def test_project_creation_links_tasks_and_workflows_with_summary_counts(tmp_path
     assert created.status_code == 201
     project = created.json()
     assert project["status"] == "active"
-    assert project["counts"] == {"tasks": {}, "workflows": {}}
+    assert project["counts"] == {"tasks": {}, "workflows": {}, "conversations": {}}
 
     standalone = client.post("/tasks", json={
         "title": "Project task",
@@ -3013,6 +3013,7 @@ def test_project_creation_links_tasks_and_workflows_with_summary_counts(tmp_path
     summary = client.get(f"/projects/{project['id']}").json()
     assert summary["counts"]["tasks"] == {"queued": 2}
     assert summary["counts"]["workflows"] == {"queued": 1}
+    assert summary["counts"]["conversations"] == {}
     filtered = client.get("/tasks", params={"project_id": project["id"]}).json()
     assert len(filtered) == 2
     assert all(task["project_id"] == project["id"] for task in filtered)
@@ -3072,5 +3073,113 @@ def test_project_workspace_cannot_exclude_existing_task_workspaces(tmp_path):
     assert task.status_code == 201
     changed = client.patch(f"/projects/{project_id}", json={"workspace_path": str(other_root)})
     assert changed.status_code == 409
+
+def test_conversation_message_persists_and_queues_idempotent_agent_turn():
+    created = client.post("/conversations", json={"title": "Planning chat"})
+    assert created.status_code == 201
+    conversation_id = created.json()["id"]
+
+    sent = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "Please inspect the repository and propose the next milestone.",
+        "client_message_id": "browser-send-001",
+    })
+    assert sent.status_code == 202
+    payload = sent.json()
+    assert payload["duplicate"] is False
+    assert payload["message"]["role"] == "user"
+    assert payload["message"]["metadata"] == {}
+    assert payload["message"]["content"].startswith("Please inspect")
+    assert payload["turn"]["conversation_id"] == conversation_id
+    assert payload["turn"]["user_message_id"] == payload["message"]["id"]
+    assert payload["turn"]["status"] == "queued"
+    turn_id = payload["turn"]["id"]
+
+    retry = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "This retry must not create a second turn.",
+        "client_message_id": "browser-send-001",
+    })
+    assert retry.status_code == 202
+    assert retry.json()["duplicate"] is True
+    assert retry.json()["message"]["id"] == payload["message"]["id"]
+    assert retry.json()["turn"]["id"] == turn_id
+
+    messages = client.get(f"/conversations/{conversation_id}/messages").json()
+    assert len(messages) == 1
+    assert messages[0]["id"] == payload["message"]["id"]
+    assert client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"after_id": payload["message"]["id"]},
+    ).json() == []
+
+    events = client.get(f"/agent-turns/{turn_id}/events").json()
+    assert len(events) == 1
+    assert events[0]["event_type"] == "turn.queued"
+    assert events[0]["payload"]["message_id"] == payload["message"]["id"]
+
+    detail = client.get(f"/conversations/{conversation_id}").json()
+    assert detail["message_count"] == 1
+    assert detail["pending_turn_count"] == 1
+    assert detail["last_message"]["role"] == "user"
+    assert client.get(f"/conversations/{conversation_id}/turns").json()[0]["id"] == turn_id
+
+
+def test_conversations_are_project_scoped_and_archived_conversations_reject_messages(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    project = client.post("/projects", json={
+        "name": "Conversation Project",
+        "slug": f"conversation-project-{tmp_path.name}",
+        "workspace_path": str(workspace),
+    })
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    conversation = client.post("/conversations", json={
+        "project_id": project_id,
+    })
+    assert conversation.status_code == 201
+    conversation_id = conversation.json()["id"]
+    assert conversation.json()["project_id"] == project_id
+
+    assert len(client.get("/conversations", params={"project_id": project_id}).json()) == 1
+    assert len(client.get(f"/projects/{project_id}/conversations").json()) == 1
+    assert client.get(f"/projects/{project_id}").json()["counts"]["conversations"] == {"active": 1}
+    first_send = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "Persist this before archive",
+        "client_message_id": "archive-retry-001",
+    })
+    assert first_send.status_code == 202
+    archived = client.patch(f"/conversations/{conversation_id}", json={"status": "archived"})
+    assert archived.status_code == 200
+    assert archived.json()["archived_at"] is not None
+    rejected = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "Do not accept this message",
+    })
+    assert rejected.status_code == 409
+    retry = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "Retry after archive",
+        "client_message_id": "archive-retry-001",
+    })
+    assert retry.status_code == 202
+    assert retry.json()["duplicate"] is True
+    assert retry.json()["message"]["id"] == first_send.json()["message"]["id"]
+    assert client.get("/conversations", params={"project_id": project_id}).json() == []
+    assert len(client.get(
+        "/conversations", params={"project_id": project_id, "status": "archived"}
+    ).json()) == 1
+
+
+def test_conversation_creation_rejects_archived_project(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    project = client.post("/projects", json={
+        "name": "Archived Conversation Project",
+        "slug": f"archived-conversation-project-{tmp_path.name}",
+        "workspace_path": str(workspace),
+    })
+    project_id = project.json()["id"]
+    assert client.patch(f"/projects/{project_id}", json={"status": "archived"}).status_code == 200
+    rejected = client.post("/conversations", json={"project_id": project_id})
+    assert rejected.status_code == 409
 
 

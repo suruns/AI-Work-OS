@@ -351,7 +351,9 @@ def test_logged_command_redacts_secrets_and_preserves_effective_permission_args(
         actual = build_command(prompt, mode, mcp_path)
         logged = redact_command_for_event(actual)
 
-        assert logged == actual
+        assert actual[actual.index("-p") + 1] == prompt
+        assert actual[actual.index("--mcp-config") + 1] == mcp_path
+        assert logged != actual
         assert logged[logged.index("-p") + 1] == "<prompt>"
         assert logged[logged.index("--mcp-config") + 1] == "<isolated-mcp-config>"
         assert expected_permissions == logged[-len(expected_permissions):]

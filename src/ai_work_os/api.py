@@ -8,8 +8,8 @@ from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
-from .schemas import TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
+from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .schemas import ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -271,35 +271,190 @@ def health() -> dict:
     return {"status": "ok", "service": "ai-work-os-api"}
 
 
+def _project_counts(db, project_id: str) -> dict:
+    task_rows = db.execute(
+        select(Task.status, func.count()).where(Task.project_id == project_id).group_by(Task.status)
+    ).all()
+    workflow_rows = db.execute(
+        select(Workflow.status, func.count()).where(Workflow.project_id == project_id).group_by(Workflow.status)
+    ).all()
+    return {
+        "tasks": {status: count for status, count in task_rows},
+        "workflows": {status: count for status, count in workflow_rows},
+    }
+
+
+def _project_payload(db, project: Project) -> dict:
+    return {
+        "id": project.id, "name": project.name, "slug": project.slug,
+        "description": project.description, "workspace_path": project.workspace_path,
+        "status": project.status, "created_at": project.created_at,
+        "updated_at": project.updated_at, "archived_at": project.archived_at,
+        "counts": _project_counts(db, project.id),
+    }
+
+
+def _project_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug[:180].strip("-") or "project"
+
+
+def _validate_project_workspace(db, project_id: str | None, workspace: Path) -> Project | None:
+    if project_id is None:
+        return None
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project.status != "active":
+        raise HTTPException(status_code=409, detail="archived projects cannot receive new tasks")
+    root = Path(project.workspace_path).resolve()
+    try:
+        workspace.relative_to(root)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="workspace_path must be the project workspace or a directory inside it",
+        )
+    return project
+
+
+@app.post("/projects", status_code=201)
+def create_project(body: ProjectCreate) -> dict:
+    workspace = Path(body.workspace_path).expanduser().resolve()
+    if not workspace.is_dir():
+        raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
+    slug = _project_slug(body.slug or body.name)
+    with SessionLocal() as db:
+        if db.scalar(select(Project.id).where(Project.slug == slug)) is not None:
+            raise HTTPException(status_code=409, detail="project slug already exists")
+        project = Project(
+            name=body.name.strip(), slug=slug, description=body.description,
+            workspace_path=str(workspace), status="active",
+        )
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        return _project_payload(db, project)
+
+
+@app.get("/projects")
+def list_projects(
+    limit: int = Query(default=100, ge=1, le=200),
+    status: str | None = Query(default=None, pattern="^(active|archived)$"),
+) -> list[dict]:
+    with SessionLocal() as db:
+        query = select(Project).order_by(Project.updated_at.desc(), Project.id).limit(limit)
+        if status:
+            query = query.where(Project.status == status)
+        return [_project_payload(db, item) for item in db.scalars(query)]
+
+
+@app.get("/projects/{project_id}")
+def get_project(project_id: str) -> dict:
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return _project_payload(db, project)
+
+
+@app.patch("/projects/{project_id}")
+def update_project(project_id: str, body: ProjectUpdate) -> dict:
+    changes = body.model_dump(exclude_unset=True)
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if "workspace_path" in changes and changes["workspace_path"] is not None:
+            workspace = Path(changes["workspace_path"]).expanduser().resolve()
+            if not workspace.is_dir():
+                raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
+            project.workspace_path = str(workspace)
+        if "name" in changes and changes["name"] is not None:
+            project.name = changes["name"].strip()
+        if "slug" in changes and changes["slug"] is not None:
+            slug = _project_slug(changes["slug"])
+            duplicate = db.scalar(select(Project.id).where(Project.slug == slug, Project.id != project_id))
+            if duplicate is not None:
+                raise HTTPException(status_code=409, detail="project slug already exists")
+            project.slug = slug
+        if "description" in changes:
+            project.description = changes["description"]
+        if changes.get("status") is not None:
+            project.status = changes["status"]
+            project.archived_at = utcnow() if project.status == "archived" else None
+        project.updated_at = utcnow()
+        db.commit()
+        db.refresh(project)
+        return _project_payload(db, project)
+
+
+@app.get("/projects/{project_id}/tasks")
+def list_project_tasks(
+    project_id: str, limit: int = Query(default=100, ge=1, le=200),
+) -> list[Task]:
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return list(db.scalars(
+            select(Task).where(Task.project_id == project_id)
+            .order_by(Task.created_at.desc(), Task.id).limit(limit)
+        ))
+
+
+@app.get("/projects/{project_id}/workflows")
+def list_project_workflows(
+    project_id: str, limit: int = Query(default=100, ge=1, le=200),
+) -> list[dict]:
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        workflows = list(db.scalars(
+            select(Workflow).where(Workflow.project_id == project_id)
+            .order_by(Workflow.created_at.desc(), Workflow.id).limit(limit)
+        ))
+        return [_workflow_payload(db, workflow) for workflow in workflows]
+
+
 @app.post("/tasks", response_model=TaskRead, status_code=201)
 def create_task(body: TaskCreate) -> Task:
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
-    task = Task(
-        title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
-        permission_mode=body.permission_mode, priority=body.priority,
-        max_attempts=body.max_attempts,
-        acceptance_criteria=body.acceptance_criteria,
-        verification_commands=body.verification_commands,
-        auto_repair=body.auto_repair,
-        max_repair_attempts=body.max_repair_attempts if body.auto_repair else 0,
-        verification_status="pending" if body.verification_commands else "not_configured",
-    )
     with SessionLocal() as db:
+        _validate_project_workspace(db, body.project_id, workspace)
+        task = Task(
+            project_id=body.project_id,
+            title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
+            permission_mode=body.permission_mode, priority=body.priority,
+            max_attempts=body.max_attempts,
+            acceptance_criteria=body.acceptance_criteria,
+            verification_commands=body.verification_commands,
+            auto_repair=body.auto_repair,
+            max_repair_attempts=body.max_repair_attempts if body.auto_repair else 0,
+            verification_status="pending" if body.verification_commands else "not_configured",
+        )
         db.add(task)
         db.commit()
         db.refresh(task)
-        db.add(TaskEvent(task_id=task.id, event_type="task.queued", payload={"status": "queued"}))
+        db.add(TaskEvent(task_id=task.id, event_type="task.queued", payload={
+            "status": "queued", "project_id": body.project_id,
+        }))
         db.commit()
         db.refresh(task)
         return task
 
 
 @app.get("/tasks", response_model=list[TaskRead])
-def list_tasks(limit: int = Query(default=50, ge=1, le=200)) -> list[Task]:
+def list_tasks(
+    limit: int = Query(default=50, ge=1, le=200),
+    project_id: str | None = Query(default=None),
+) -> list[Task]:
     with SessionLocal() as db:
-        return list(db.scalars(select(Task).order_by(Task.created_at.desc()).limit(limit)))
+        query = select(Task).order_by(Task.created_at.desc()).limit(limit)
+        if project_id:
+            query = query.where(Task.project_id == project_id)
+        return list(db.scalars(query))
 
 
 @app.get("/tasks/{task_id}", response_model=TaskRead)

@@ -280,9 +280,15 @@ def _project_counts(db, project_id: str) -> dict:
     workflow_rows = db.execute(
         select(Workflow.status, func.count()).where(Workflow.project_id == project_id).group_by(Workflow.status)
     ).all()
+    conversation_rows = db.execute(
+        select(Conversation.status, func.count()).where(
+            Conversation.project_id == project_id
+        ).group_by(Conversation.status)
+    ).all()
     return {
         "tasks": {status: count for status, count in task_rows},
         "workflows": {status: count for status, count in workflow_rows},
+        "conversations": {status: count for status, count in conversation_rows},
     }
 
 
@@ -451,6 +457,20 @@ def _conversation_payload(db, conversation: Conversation) -> dict:
         "archived_at": conversation.archived_at, "message_count": message_count,
         "pending_turn_count": pending_turn_count, "last_message": last_message,
     }
+
+
+@app.get("/projects/{project_id}/conversations")
+def list_project_conversations(
+    project_id: str, limit: int = Query(default=100, ge=1, le=200),
+) -> list[dict]:
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        conversations = list(db.scalars(
+            select(Conversation).where(Conversation.project_id == project_id)
+            .order_by(Conversation.updated_at.desc(), Conversation.id).limit(limit)
+        ))
+        return [_conversation_payload(db, item) for item in conversations]
 
 
 @app.post("/conversations", status_code=201)

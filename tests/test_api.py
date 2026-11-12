@@ -2983,7 +2983,7 @@ def test_project_creation_links_tasks_and_workflows_with_summary_counts(tmp_path
     assert created.status_code == 201
     project = created.json()
     assert project["status"] == "active"
-    assert project["counts"] == {"tasks": {}, "workflows": {}}
+    assert project["counts"] == {"tasks": {}, "workflows": {}, "conversations": {}}
 
     standalone = client.post("/tasks", json={
         "title": "Project task",
@@ -3013,6 +3013,7 @@ def test_project_creation_links_tasks_and_workflows_with_summary_counts(tmp_path
     summary = client.get(f"/projects/{project['id']}").json()
     assert summary["counts"]["tasks"] == {"queued": 2}
     assert summary["counts"]["workflows"] == {"queued": 1}
+    assert summary["counts"]["conversations"] == {}
     filtered = client.get("/tasks", params={"project_id": project["id"]}).json()
     assert len(filtered) == 2
     assert all(task["project_id"] == project["id"] for task in filtered)
@@ -3141,6 +3142,8 @@ def test_conversations_are_project_scoped_and_archived_conversations_reject_mess
     assert conversation.json()["project_id"] == project_id
 
     assert len(client.get("/conversations", params={"project_id": project_id}).json()) == 1
+    assert len(client.get(f"/projects/{project_id}/conversations").json()) == 1
+    assert client.get(f"/projects/{project_id}").json()["counts"]["conversations"] == {"active": 1}
     archived = client.patch(f"/conversations/{conversation_id}", json={"status": "archived"})
     assert archived.status_code == 200
     assert archived.json()["archived_at"] is not None

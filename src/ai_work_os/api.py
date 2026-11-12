@@ -2,6 +2,7 @@ import json
 import os
 import re
 import subprocess
+from uuid import uuid4
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 from fastapi.responses import FileResponse
@@ -296,7 +297,7 @@ def _project_payload(db, project: Project) -> dict:
 
 def _project_slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug[:180].strip("-") or "project"
+    return slug[:180].strip("-")
 
 
 def _validate_project_workspace(db, project_id: str | None, workspace: Path) -> Project | None:
@@ -323,7 +324,7 @@ def create_project(body: ProjectCreate) -> dict:
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
-    slug = _project_slug(body.slug or body.name)
+    slug = _project_slug(body.slug or body.name) or f"project-{uuid4().hex[:8]}"
     with SessionLocal() as db:
         if db.scalar(select(Project.id).where(Project.slug == slug)) is not None:
             raise HTTPException(status_code=409, detail="project slug already exists")
@@ -379,7 +380,7 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict:
         if "name" in changes and changes["name"] is not None:
             project.name = changes["name"].strip()
         if "slug" in changes and changes["slug"] is not None:
-            slug = _project_slug(changes["slug"])
+            slug = _project_slug(changes["slug"]) or f"project-{uuid4().hex[:8]}"
             duplicate = db.scalar(select(Project.id).where(Project.slug == slug, Project.id != project_id))
             if duplicate is not None:
                 raise HTTPException(status_code=409, detail="project slug already exists")

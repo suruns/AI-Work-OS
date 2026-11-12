@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import shutil
+import stat
 import shlex
 import socket
 from datetime import datetime, timezone, timedelta
@@ -12,6 +13,7 @@ from pathlib import Path
 from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
+from .sandbox import build_sandbox_invocation, sandbox_mode
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
     """Persist process liveness; active task ownership remains authoritative on Task rows."""
@@ -137,13 +139,36 @@ def build_command(
         "--permission-prompts", "none",
         "--setting-sources", ",".join(sources),
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
-        "--disallowedTools", "mcp__*",
     ]
     if CLAUDE_MODEL:
         command.extend(["--model", CLAUDE_MODEL])
     if permission_mode == "plan":
-        command.extend(["--permission-mode", "plan"])
+        command.extend(["--permission-mode", "plan", "--disallowedTools", "mcp__*"])
+    elif permission_mode == "configured":
+        # Accept Claude's native file-edit tools without an interactive approval
+        # surface. Explicitly disallow Bash because acceptEdits may otherwise
+        # permit workspace-local shell writes in unattended execution.
+        command.extend(["--permission-mode", "acceptEdits", "--disallowedTools", "mcp__*", "Bash"])
+    else:
+        raise ValueError(f"unsupported Claude permission mode: {permission_mode}")
     return command
+
+
+def redact_command_for_event(command: list[str]) -> list[str]:
+    """Redact user prompt and isolated config path while preserving effective argv."""
+    logged = list(command)
+    for option, replacement in (
+        ("-p", "<prompt>"),
+        ("--mcp-config", "<isolated-mcp-config>"),
+    ):
+        try:
+            value_index = logged.index(option) + 1
+        except ValueError as exc:
+            raise ValueError(f"command is missing required option: {option}") from exc
+        if value_index >= len(logged):
+            raise ValueError(f"command option has no value: {option}")
+        logged[value_index] = replacement
+    return logged
 
 
 def process_group_exists(pgid: int) -> bool:
@@ -213,17 +238,51 @@ async def terminate_process_tree(
     return False
 
 
-async def _git_output(workspace: Path, *args: str) -> bytes:
+async def _git_output(
+    workspace: Path, *args: str, task_dir: Path | None = None,
+    task_id: str | None = None, sandboxed: bool = True,
+) -> bytes:
+    git_bin = shutil.which("git", path="/usr/bin:/bin")
+    if git_bin is None:
+        raise FileNotFoundError("system Git executable not found")
+    command = [git_bin, "-C", str(workspace), *args]
+    invocation = None
+    if sandboxed and sandbox_mode() == "bubblewrap":
+        if task_dir is None or task_id is None:
+            raise RuntimeError("sandboxed Git snapshot requires task context")
+        # The host workspace is mounted at this fixed path inside Bubblewrap.
+        command = [git_bin, "-c", "core.fsmonitor=false", "-C", "/workspace", *args]
+        snapshot_env = {
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
+        }
+        invocation = build_task_sandbox_invocation(
+            task_id, command, workspace, task_dir, "plan", snapshot_env,
+            execution_kind="snapshot",
+        )
+    host_env = None
+    if not sandboxed and sandbox_mode() == "bubblewrap":
+        host_env = {
+            "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
     proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(workspace), *args,
+        *(invocation.command if invocation else command),
+        cwd=invocation.cwd if invocation else None,
+        env=invocation.env if invocation else host_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
         raise
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed with exit code {proc.returncode}")
@@ -232,58 +291,125 @@ async def _git_output(workspace: Path, *args: str) -> bytes:
 
 def _hash_path(path: Path) -> str:
     digest = hashlib.sha256()
-    if path.is_symlink():
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
         digest.update(b"symlink\0")
         digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
     else:
-        with path.open("rb") as stream:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
     return digest.hexdigest()
 
 
-async def capture_workspace_snapshot(workspace: Path, exclude_paths: list[Path] | None = None) -> dict:
+async def capture_workspace_snapshot(
+    workspace: Path, exclude_paths: list[Path] | None = None, *,
+    task_dir: Path | None = None, task_id: str | None = None,
+) -> dict:
     """Capture a Git workspace's net diff state without storing source contents."""
     try:
-        root = Path((await _git_output(workspace, "rev-parse", "--show-toplevel")).decode().strip()).resolve()
-        tracked_paths = (await _git_output(root, "diff", "--name-only", "-z", "HEAD")).split(b"\0")
-        untracked_paths = (await _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")).split(b"\0")
+        git_context = {"task_dir": task_dir, "task_id": task_id}
+        try:
+            reported_root = Path((await _git_output(
+                workspace, "rev-parse", "--show-toplevel", **git_context
+            )).decode().strip()).resolve()
+        except RuntimeError as exc:
+            if sandbox_mode() == "bubblewrap":
+                return {
+                    "available": False,
+                    "reason": (
+                        "Git root probe failed inside the sandbox. The selected workspace "
+                        "must itself be a Git repository root with its .git metadata inside "
+                        "the workspace; parent-directory Git metadata is not mounted. "
+                        f"Underlying error: {exc}"
+                    ),
+                }
+            raise
+        if sandbox_mode() == "bubblewrap":
+            if reported_root != Path("/workspace"):
+                return {
+                    "available": False,
+                    "reason": "Sandboxed Git snapshots require the selected workspace to be the repository root.",
+                }
+            root = workspace.resolve()
+        else:
+            root = reported_root
+        tracked_paths = (await _git_output(
+            root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD",
+            **git_context,
+        )).split(b"\0")
+        untracked_paths = (await _git_output(
+            root, "ls-files", "--others", "--exclude-standard", "-z", **git_context,
+        )).split(b"\0")
         def is_generated_python_cache(rel: str) -> bool:
             parts = Path(rel).parts
             return "__pycache__" in parts or rel.endswith(".pyc")
 
+        excluded = [path.resolve() for path in (exclude_paths or [])]
+
+        def is_excluded(candidate: Path) -> bool:
+            absolute = candidate.absolute()
+            resolved = candidate.resolve(strict=False)
+            return any(
+                absolute == item or item in absolute.parents
+                or resolved == item or item in resolved.parents
+                for item in excluded
+            )
+
         tracked = {}
         for raw_path in filter(None, tracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
-            if is_generated_python_cache(rel):
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
                 continue
-            patch = await _git_output(root, "diff", "--binary", "HEAD", "--", rel)
+            if is_generated_python_cache(rel) or is_excluded(root / rel_path):
+                continue
+            patch = await _git_output(
+                root, "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", rel,
+                **git_context,
+            )
             tracked[rel] = hashlib.sha256(patch).hexdigest()
         untracked = {}
-        excluded = [path.resolve() for path in (exclude_paths or [])]
         for raw_path in filter(None, untracked_paths):
             rel = raw_path.decode("utf-8", errors="surrogateescape")
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                continue
             if is_generated_python_cache(rel):
                 continue
-            candidate = root / rel
-            resolved_candidate = candidate.resolve()
-            if any(resolved_candidate == item or item in resolved_candidate.parents for item in excluded):
+            candidate = root / rel_path
+            resolved_parent = candidate.parent.resolve()
+            if not (resolved_parent == root or root in resolved_parent.parents):
+                continue
+            if candidate.is_symlink():
+                resolved_candidate = candidate
+            else:
+                resolved_candidate = candidate.resolve(strict=False)
+                if not (resolved_candidate == root or root in resolved_candidate.parents):
+                    continue
+            if is_excluded(candidate):
                 continue
             try:
                 untracked[rel] = _hash_path(candidate)
             except (FileNotFoundError, PermissionError, OSError):
                 untracked[rel] = "unreadable"
         return {"available": True, "repository_root": str(root), "tracked": tracked, "untracked": untracked}
-    except (FileNotFoundError, RuntimeError, asyncio.TimeoutError, OSError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError, asyncio.TimeoutError, OSError) as exc:
         return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def compare_workspace_snapshots(before: dict, after: dict) -> dict:
     """Report net changes between snapshots and flag changes that predated the task."""
     if not before.get("available") or not after.get("available"):
+        reason = (
+            before.get("reason") if not before.get("available") else None
+        ) or (
+            after.get("reason") if not after.get("available") else None
+        ) or "Workspace change tracking requires a Git repository and successful snapshots."
         return {
             "available": False,
-            "reason": "Workspace change tracking requires a Git repository and successful snapshots.",
+            "reason": reason,
             "before_reason": before.get("reason"),
             "after_reason": after.get("reason"),
         }
@@ -308,6 +434,29 @@ def add_event(task_id: str, event_type: str, payload: dict) -> None:
     with SessionLocal() as db:
         db.add(TaskEvent(task_id=task_id, event_type=event_type, payload=payload))
         db.commit()
+
+
+def build_task_sandbox_invocation(
+    task_id: str, command: list[str], workspace: Path, task_dir: Path,
+    permission_mode: str, env: dict[str, str] | None, *,
+    mcp_config_path: Path | None = None, execution_kind: str,
+):
+    """Build one task subprocess boundary and persist non-secret policy metadata."""
+    try:
+        invocation = build_sandbox_invocation(
+            command, workspace, task_dir, permission_mode, env,
+            mcp_config_path=mcp_config_path, execution_kind=execution_kind,
+        )
+    except Exception as exc:
+        add_event(task_id, "executor.sandbox_failed", {
+            "backend": os.getenv("AI_WORK_OS_SANDBOX_MODE", "off"),
+            "execution_kind": execution_kind,
+            "error": f"{type(exc).__name__}: {exc}",
+            "process_started": False,
+        })
+        raise OSError(f"sandbox setup failed: {type(exc).__name__}: {exc}") from exc
+    add_event(task_id, "executor.sandbox_configured", invocation.metadata)
+    return invocation
 
 
 def _blocked_origin(task_id: str, by_id: dict, parents: dict[str, list[str]], memo: dict[str, str | None],
@@ -576,11 +725,15 @@ async def run_repair_attempt(
             "repair_attempt": repair_number,
         })
         command = build_command(repair_prompt, permission_mode, mcp_config_path, setting_sources)
+        invocation = build_task_sandbox_invocation(
+            task_id, command, workspace, task_dir, permission_mode, claude_subprocess_env(),
+            mcp_config_path=mcp_config_path, execution_kind="repair",
+        )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(workspace),
-                env=claude_subprocess_env(),
+                *invocation.command,
+                cwd=invocation.cwd,
+                env=invocation.env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -670,9 +823,13 @@ async def run_repair_attempt(
             argv = shlex.split(command_text)
             if not argv:
                 raise ValueError("command is empty")
+            invocation = build_task_sandbox_invocation(
+                task_id, argv, workspace, task_dir, permission_mode, None,
+                execution_kind="verification",
+            )
             check = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=str(workspace),
+                *invocation.command,
+                cwd=invocation.cwd, env=invocation.env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -759,7 +916,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     task_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = task_dir / f"stdout.attempt-{attempt_number:03d}.jsonl"
     stderr_path = task_dir / f"stderr.attempt-{attempt_number:03d}.log"
-    workspace_before = await capture_workspace_snapshot(workspace, [task_dir])
+    workspace_before = await capture_workspace_snapshot(workspace, [task_dir], task_dir=task_dir, task_id=task_id)
     mcp_config_path: Path | None = None
     mcp_config_attempted = False
     exit_code, error_summary, session_id = None, None, None
@@ -782,18 +939,11 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         mcp_config_attempted = True
         mcp_config_path = write_isolated_mcp_config(task_dir)
         command = build_command(prompt, permission_mode, mcp_config_path, setting_sources)
-        logged_command = [
-            CLAUDE_BIN, "-p", "<prompt>",
-            "--output-format", "stream-json", "--verbose",
-            "--permission-prompts", "none",
-            "--setting-sources", ",".join(setting_sources),
-            "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
-            "--disallowedTools", "mcp__*",
-        ]
-        if CLAUDE_MODEL:
-            logged_command.extend(["--model", CLAUDE_MODEL])
-        if permission_mode == "plan":
-            logged_command.extend(["--permission-mode", "plan"])
+        invocation = build_task_sandbox_invocation(
+            task_id, command, workspace, task_dir, permission_mode, claude_subprocess_env(),
+            mcp_config_path=mcp_config_path, execution_kind="task",
+        )
+        logged_command = redact_command_for_event(command)
         add_event(task_id, "executor.started", {
             "command": logged_command,
             "workspace": str(workspace),
@@ -826,9 +976,9 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         })
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(workspace),
-                env=claude_subprocess_env(),
+                *invocation.command,
+                cwd=invocation.cwd,
+                env=invocation.env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
@@ -993,8 +1143,12 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 argv = shlex.split(command_text)
                 if not argv:
                     raise ValueError("command is empty")
+                invocation = build_task_sandbox_invocation(
+                    task_id, argv, workspace, task_dir, permission_mode, None,
+                    execution_kind="verification",
+                )
                 proc = await asyncio.create_subprocess_exec(
-                    *argv, cwd=str(workspace),
+                    *invocation.command, cwd=invocation.cwd, env=invocation.env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=(os.name == "posix"),
@@ -1158,7 +1312,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     except OSError:
         pass
 
-    workspace_after = await capture_workspace_snapshot(workspace, [task_dir])
+    workspace_after = await capture_workspace_snapshot(workspace, [task_dir], task_dir=task_dir, task_id=task_id)
     workspace_changes = compare_workspace_snapshots(workspace_before, workspace_after)
     workspace_report_path = task_dir / "workspace_changes.json"
     report_written = False

@@ -334,6 +334,35 @@ def test_retry_is_scheduled_after_a_failed_attempt(tmp_path, monkeypatch):
     assert (task_dir / "stdout.jsonl").read_text(encoding="utf-8") == (task_dir / "stdout.attempt-002.jsonl").read_text(encoding="utf-8")
 
 
+def test_logged_command_redacts_secrets_and_preserves_effective_permission_args(monkeypatch):
+    from ai_work_os.worker import build_command, redact_command_for_event
+
+    monkeypatch.setattr(worker, "CLAUDE_BIN", "/opt/claude/bin/claude")
+    monkeypatch.setattr(worker, "CLAUDE_MODEL", "claude-test-model")
+    prompt = "private user prompt that must not appear in events"
+    mcp_path = "/host/private/task/mcp-config.isolated.json"
+
+    for mode, expected_permissions in (
+        ("plan", ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]),
+        ("configured", [
+            "--permission-mode", "acceptEdits", "--disallowedTools", "mcp__*", "Bash",
+        ]),
+    ):
+        actual = build_command(prompt, mode, mcp_path)
+        logged = redact_command_for_event(actual)
+
+        assert actual[actual.index("-p") + 1] == prompt
+        assert actual[actual.index("--mcp-config") + 1] == mcp_path
+        assert logged != actual
+        assert logged[logged.index("-p") + 1] == "<prompt>"
+        assert logged[logged.index("--mcp-config") + 1] == "<isolated-mcp-config>"
+        assert expected_permissions == logged[-len(expected_permissions):]
+        assert "claude-test-model" in logged
+        serialized = " ".join(logged)
+        assert prompt not in serialized
+        assert mcp_path not in serialized
+
+
 def test_permission_modes_are_persisted_and_applied():
     from ai_work_os.worker import build_command
 
@@ -345,7 +374,7 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan.status_code == 201
     assert plan.json()["permission_mode"] == "plan"
     plan_command = build_command("inspect", "plan")
-    assert plan_command[-2:] == ["--permission-mode", "plan"]
+    assert plan_command[-4:] == ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]
     assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
     configured = client.post("/tasks", json={
@@ -357,7 +386,9 @@ def test_permission_modes_are_persisted_and_applied():
     assert configured.status_code == 201
     assert configured.json()["permission_mode"] == "configured"
     configured_command = build_command("inspect", "configured")
-    assert "--permission-mode" not in configured_command
+    assert configured_command[configured_command.index("--permission-mode") + 1] == "acceptEdits"
+    assert "--dangerously-skip-permissions" not in configured_command
+    assert "bypassPermissions" not in configured_command
     assert configured_command[configured_command.index("--setting-sources") + 1] == "project,local"
 
 
@@ -550,6 +581,69 @@ def test_workspace_snapshot_reports_non_git_workspace_as_unavailable(tmp_path):
     report = worker.compare_workspace_snapshots(snapshot, snapshot)
     assert snapshot["available"] is False
     assert report["available"] is False
+    assert report["reason"] == snapshot["reason"]
+    assert report["before_reason"] == snapshot["reason"]
+    assert report["after_reason"] == snapshot["reason"]
+
+
+def test_workspace_snapshot_report_surfaces_after_failure_reason():
+    before = {
+        "available": True,
+        "repository_root": "/workspace",
+        "tracked": {},
+        "untracked": {},
+    }
+    after = {"available": False, "reason": "after snapshot failed: permission denied"}
+
+    report = worker.compare_workspace_snapshots(before, after)
+
+    assert report["available"] is False
+    assert report["reason"] == after["reason"]
+    assert report["after_reason"] == after["reason"]
+
+
+def test_bubblewrap_workspace_snapshot_passes_task_context_to_every_git_call(tmp_path, monkeypatch):
+    workspace = tmp_path / "git-workspace"
+    workspace.mkdir()
+    task_dir = tmp_path / "task-artifacts"
+    task_dir.mkdir()
+    task_id = "snapshot-task-123"
+    calls = []
+
+    async def fake_git_output(path, *args, task_dir=None, task_id=None, sandboxed=True):
+        calls.append((args, task_dir, task_id, sandboxed))
+        if args == ("rev-parse", "--show-toplevel"):
+            return b"/workspace\n"
+        return b""
+
+    monkeypatch.setattr(worker, "sandbox_mode", lambda: "bubblewrap")
+    monkeypatch.setattr(worker, "_git_output", fake_git_output)
+
+    snapshot = asyncio.run(worker.capture_workspace_snapshot(
+        workspace, task_dir=task_dir, task_id=task_id,
+    ))
+
+    assert snapshot["available"] is True
+    assert snapshot["repository_root"] == str(workspace.resolve())
+    assert len(calls) == 3
+    assert all(call[1] == task_dir and call[2] == task_id and call[3] is True for call in calls)
+    assert calls[0][0] == ("rev-parse", "--show-toplevel")
+
+
+def test_bubblewrap_snapshot_explains_git_metadata_outside_workspace(tmp_path, monkeypatch):
+    async def fail_git_root(path, *args, **kwargs):
+        raise RuntimeError("git rev-parse --show-toplevel failed with exit code 128")
+
+    monkeypatch.setattr(worker, "sandbox_mode", lambda: "bubblewrap")
+    monkeypatch.setattr(worker, "_git_output", fail_git_root)
+
+    snapshot = asyncio.run(worker.capture_workspace_snapshot(
+        tmp_path, task_dir=tmp_path / "task", task_id="snapshot-task",
+    ))
+
+    assert snapshot["available"] is False
+    assert "selected workspace must itself be a Git repository root" in snapshot["reason"]
+    assert "parent-directory Git metadata is not mounted" in snapshot["reason"]
 
 
 

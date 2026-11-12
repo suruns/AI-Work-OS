@@ -3144,6 +3144,11 @@ def test_conversations_are_project_scoped_and_archived_conversations_reject_mess
     assert len(client.get("/conversations", params={"project_id": project_id}).json()) == 1
     assert len(client.get(f"/projects/{project_id}/conversations").json()) == 1
     assert client.get(f"/projects/{project_id}").json()["counts"]["conversations"] == {"active": 1}
+    first_send = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "Persist this before archive",
+        "client_message_id": "archive-retry-001",
+    })
+    assert first_send.status_code == 202
     archived = client.patch(f"/conversations/{conversation_id}", json={"status": "archived"})
     assert archived.status_code == 200
     assert archived.json()["archived_at"] is not None
@@ -3151,6 +3156,13 @@ def test_conversations_are_project_scoped_and_archived_conversations_reject_mess
         "content": "Do not accept this message",
     })
     assert rejected.status_code == 409
+    retry = client.post(f"/conversations/{conversation_id}/messages", json={
+        "content": "Retry after archive",
+        "client_message_id": "archive-retry-001",
+    })
+    assert retry.status_code == 202
+    assert retry.json()["duplicate"] is True
+    assert retry.json()["message"]["id"] == first_send.json()["message"]["id"]
     assert client.get("/conversations", params={"project_id": project_id}).json() == []
     assert len(client.get(
         "/conversations", params={"project_id": project_id, "status": "archived"}

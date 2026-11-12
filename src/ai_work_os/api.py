@@ -365,7 +365,7 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict:
         project = db.get(Project, project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-            if "workspace_path" in changes and changes["workspace_path"] is not None:
+        if "workspace_path" in changes and changes["workspace_path"] is not None:
             workspace = Path(changes["workspace_path"]).expanduser().resolve()
             if not workspace.is_dir():
                 raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")

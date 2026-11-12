@@ -581,6 +581,25 @@ def test_workspace_snapshot_reports_non_git_workspace_as_unavailable(tmp_path):
     report = worker.compare_workspace_snapshots(snapshot, snapshot)
     assert snapshot["available"] is False
     assert report["available"] is False
+    assert report["reason"] == snapshot["reason"]
+    assert report["before_reason"] == snapshot["reason"]
+    assert report["after_reason"] == snapshot["reason"]
+
+
+def test_workspace_snapshot_report_surfaces_after_failure_reason():
+    before = {
+        "available": True,
+        "repository_root": "/workspace",
+        "tracked": {},
+        "untracked": {},
+    }
+    after = {"available": False, "reason": "after snapshot failed: permission denied"}
+
+    report = worker.compare_workspace_snapshots(before, after)
+
+    assert report["available"] is False
+    assert report["reason"] == after["reason"]
+    assert report["after_reason"] == after["reason"]
 
 
 def test_bubblewrap_workspace_snapshot_passes_task_context_to_every_git_call(tmp_path, monkeypatch):

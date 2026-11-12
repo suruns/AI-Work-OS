@@ -1092,7 +1092,7 @@ def _workflow_counts(db, workflow_id: str) -> dict[str, int]:
 def _workflow_payload(db, workflow: Workflow) -> dict:
     counts = _workflow_counts(db, workflow.id)
     return {
-        "id": workflow.id, "title": workflow.title, "status": workflow.status,
+        "id": workflow.id, "project_id": workflow.project_id, "title": workflow.title, "status": workflow.status,
         "created_at": workflow.created_at, "started_at": workflow.started_at,
         "finished_at": workflow.finished_at, "counts": counts,
     }
@@ -1139,13 +1139,15 @@ def create_workflow(body: WorkflowCreate) -> dict:
         workspaces[item.key] = str(workspace)
 
     with SessionLocal() as db:
-        workflow = Workflow(title=body.title.strip(), status="queued")
+        for item in body.tasks:
+            _validate_project_workspace(db, body.project_id, Path(workspaces[item.key]))
+        workflow = Workflow(project_id=body.project_id, title=body.title.strip(), status="queued")
         db.add(workflow)
         db.flush()
         created = {}
         for item in body.tasks:
             task = Task(
-                workflow_id=workflow.id, title=item.title.strip(), prompt=item.prompt,
+                project_id=body.project_id, workflow_id=workflow.id, title=item.title.strip(), prompt=item.prompt,
                 workspace_path=workspaces[item.key], permission_mode=item.permission_mode,
                 priority=item.priority, max_attempts=item.max_attempts,
                 acceptance_criteria=item.acceptance_criteria,
@@ -1166,7 +1168,7 @@ def create_workflow(body: WorkflowCreate) -> dict:
                 ))
         for task in created.values():
             db.add(TaskEvent(task_id=task.id, event_type="task.queued", payload={
-                "status": "queued", "workflow_id": workflow.id,
+                "status": "queued", "workflow_id": workflow.id, "project_id": body.project_id,
             }))
         db.commit()
         db.refresh(workflow)
@@ -1184,9 +1186,15 @@ def create_workflow(body: WorkflowCreate) -> dict:
 
 
 @app.get("/workflows")
-def list_workflows(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+def list_workflows(
+    limit: int = Query(default=50, ge=1, le=200),
+    project_id: str | None = Query(default=None),
+) -> list[dict]:
     with SessionLocal() as db:
-        workflows = list(db.scalars(select(Workflow).order_by(Workflow.created_at.desc()).limit(limit)))
+        query = select(Workflow).order_by(Workflow.created_at.desc()).limit(limit)
+        if project_id:
+            query = query.where(Workflow.project_id == project_id)
+        workflows = list(db.scalars(query))
         return [_workflow_payload(db, workflow) for workflow in workflows]
 
 

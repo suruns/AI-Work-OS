@@ -365,10 +365,16 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict:
         project = db.get(Project, project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        if "workspace_path" in changes and changes["workspace_path"] is not None:
+            if "workspace_path" in changes and changes["workspace_path"] is not None:
             workspace = Path(changes["workspace_path"]).expanduser().resolve()
             if not workspace.is_dir():
                 raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
+            existing_tasks = list(db.scalars(select(Task).where(Task.project_id == project_id)))
+            if any(not Path(task.workspace_path).resolve().is_relative_to(workspace) for task in existing_tasks):
+                raise HTTPException(
+                    status_code=409,
+                    detail="workspace_path cannot exclude directories used by existing project tasks",
+                )
             project.workspace_path = str(workspace)
         if "name" in changes and changes["name"] is not None:
             project.name = changes["name"].strip()
@@ -1131,6 +1137,8 @@ def _validate_dag(items: list) -> dict[str, list[str]]:
 @app.post("/workflows", status_code=201)
 def create_workflow(body: WorkflowCreate) -> dict:
     graph = _validate_dag(body.tasks)
+    if any(item.project_id not in (None, body.project_id) for item in body.tasks):
+        raise HTTPException(status_code=422, detail="workflow task project_id must match the workflow project_id")
     workspaces = {}
     for item in body.tasks:
         workspace = Path(item.workspace_path).expanduser().resolve()

@@ -476,6 +476,8 @@ def list_project_conversations(
 @app.post("/conversations", status_code=201)
 def create_conversation(body: ConversationCreate) -> dict:
     with SessionLocal() as db:
+        if body.title is not None and not body.title.strip():
+            raise HTTPException(status_code=422, detail="conversation title must not be blank")
         if body.project_id is not None:
             project = db.get(Project, body.project_id)
             if project is None:
@@ -527,6 +529,8 @@ def update_conversation(conversation_id: str, body: ConversationUpdate) -> dict:
         if conversation is None:
             raise HTTPException(status_code=404, detail="conversation not found")
         if changes.get("title") is not None:
+            if not changes["title"].strip():
+                raise HTTPException(status_code=422, detail="conversation title must not be blank")
             conversation.title = changes["title"].strip()
         if changes.get("status") is not None:
             conversation.status = changes["status"]
@@ -563,9 +567,6 @@ def create_conversation_message(conversation_id: str, body: ConversationMessageC
         conversation = db.get(Conversation, conversation_id)
         if conversation is None:
             raise HTTPException(status_code=404, detail="conversation not found")
-        if conversation.status != "active":
-            raise HTTPException(status_code=409, detail="archived conversations cannot receive messages")
-
         if body.client_message_id:
             existing = db.scalar(select(ConversationMessage).where(
                 ConversationMessage.conversation_id == conversation_id,
@@ -578,6 +579,9 @@ def create_conversation_message(conversation_id: str, body: ConversationMessageC
                     "turn": AgentTurnRead.model_validate(turn).model_dump() if turn else None,
                     "duplicate": True,
                 }
+
+        if conversation.status != "active":
+            raise HTTPException(status_code=409, detail="archived conversations cannot receive new messages")
 
         message = ConversationMessage(
             conversation_id=conversation_id, role="user", content=content,

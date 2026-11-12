@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 10.1 now includes an opt-in Bubblewrap backend. It remains disabled by default (`AI_WORK_OS_SANDBOX_MODE=off`) until the operator completes real-host acceptance. When disabled, subprocesses retain the existing host execution behavior; when enabled, normal Claude execution, Repair, and Verification are wrapped and fail closed on sandbox setup errors.
+Phase 10.1 includes an opt-in Bubblewrap backend. It remains disabled by default (`AI_WORK_OS_SANDBOX_MODE=off`) for compatibility; enable it explicitly only after local preflight and acceptance. The operator completed real-host acceptance with Claude Code 2.1.306 on Fedora, including workspace access boundaries, repair/verification coverage, host-path isolation, and fail-closed behavior. When disabled, subprocesses retain the existing host execution behavior; when enabled, normal Claude execution, Repair, Verification, and Git snapshots are wrapped and fail closed on sandbox setup errors.
 
 Base commit: `3a34bb9f8c752a74f1194ffbbc72470c06b82846` (Phase 9).
 
@@ -111,11 +111,21 @@ Implemented in this PR:
 - Hide task artifact directories with a tmpfs overlay when they are nested inside the selected workspace; reject nested host mountpoints to prevent recursive bind exposure.
 - Run every Git snapshot command, including `rev-parse --show-toplevel`, in a read-only sandbox. Resolve the sandbox's `/workspace` root back to the host-selected workspace only after the sandboxed probe returns exactly `/workspace`; disable external diff/textconv and fsmonitor helpers. Sandboxed snapshots require the selected workspace to be the repository root.
 
-Remaining local acceptance work:
-- Validate the actual Claude Code 2.1.306 launcher, Node runtime, provider authentication, and host-network DNS/certificate behavior on the operator's Fedora host.
-- Exercise read-only/read-write workspace boundaries, host home and sibling-project canaries, symlink escapes, child process inheritance, and cancellation cleanup.
+### Operator acceptance completed
+
+Real-host acceptance was completed on the operator's Fedora host with Claude Code 2.1.306. The reported checks passed:
+- Claude launcher and Node runtime startup with the isolated environment and supported provider authentication.
+- Plan read-only and Configured native Edit/Write behavior; Claude Bash and MCP tools unavailable in Configured mode.
+- Repair and Verification execution inside the same sandbox boundary.
+- Host home, sibling directory, workspace symlink escape, and writes outside the workspace blocked.
+- Non-root UID/GID, ephemeral HOME, and no host-home writes.
+- Bubblewrap setup failures fail closed; Git-root constraints and snapshot diagnostics are reported.
+- Sandbox events emitted for task, repair, verification, and before/after Git snapshots.
+
+Operational notes:
 - External verification executables outside workspace/system paths require explicit `AI_WORK_OS_SANDBOX_RUNTIME_PATHS` entries.
 - The Worker performs a one-time per-process Bubblewrap preflight for user/PID/IPC/UTS/network namespaces and a minimal system mount before starting task-controlled commands.
+- Bubblewrap remains opt-in and off by default; this acceptance does not authorize changing the default policy.
 
 ### Phase 10.2 — hardening
 

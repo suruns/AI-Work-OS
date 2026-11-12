@@ -154,6 +154,23 @@ def build_command(
     return command
 
 
+def redact_command_for_event(command: list[str]) -> list[str]:
+    """Redact user prompt and isolated config path while preserving effective argv."""
+    logged = list(command)
+    for option, replacement in (
+        ("-p", "<prompt>"),
+        ("--mcp-config", "<isolated-mcp-config>"),
+    ):
+        try:
+            value_index = logged.index(option) + 1
+        except ValueError as exc:
+            raise ValueError(f"command is missing required option: {option}") from exc
+        if value_index >= len(logged):
+            raise ValueError(f"command option has no value: {option}")
+        logged[value_index] = replacement
+    return logged
+
+
 def process_group_exists(pgid: int) -> bool:
     """Return whether a POSIX process group still exists (including unverified access)."""
     try:
@@ -921,18 +938,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             task_id, command, workspace, task_dir, permission_mode, claude_subprocess_env(),
             mcp_config_path=mcp_config_path, execution_kind="task",
         )
-        logged_command = [
-            CLAUDE_BIN, "-p", "<prompt>",
-            "--output-format", "stream-json", "--verbose",
-            "--permission-prompts", "none",
-            "--setting-sources", ",".join(setting_sources),
-            "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
-            "--disallowedTools", "mcp__*",
-        ]
-        if CLAUDE_MODEL:
-            logged_command.extend(["--model", CLAUDE_MODEL])
-        if permission_mode == "plan":
-            logged_command.extend(["--permission-mode", "plan"])
+        logged_command = redact_command_for_event(command)
         add_event(task_id, "executor.started", {
             "command": logged_command,
             "workspace": str(workspace),

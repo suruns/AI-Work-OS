@@ -2969,3 +2969,108 @@ def test_repair_fails_closed_when_isolated_mcp_config_cannot_be_written(tmp_path
     assert "simulated repair config storage failure" in isolation_failures[0]["payload"]["error"]
     finished = [event for event in events if event["event_type"] == "repair.finished"]
     assert finished[-1]["payload"]["status"] == "error"
+
+def test_project_creation_links_tasks_and_workflows_with_summary_counts(tmp_path):
+    workspace = tmp_path / "project"
+    nested = workspace / "packages" / "api"
+    nested.mkdir(parents=True)
+    created = client.post("/projects", json={
+        "name": "Project Foundation Test",
+        "slug": f"project-foundation-{tmp_path.name}",
+        "description": "Project-scoped work",
+        "workspace_path": str(workspace),
+    })
+    assert created.status_code == 201
+    project = created.json()
+    assert project["status"] == "active"
+    assert project["counts"] == {"tasks": {}, "workflows": {}}
+
+    standalone = client.post("/tasks", json={
+        "title": "Project task",
+        "prompt": "Read only",
+        "workspace_path": str(nested),
+        "project_id": project["id"],
+    })
+    assert standalone.status_code == 201
+    assert standalone.json()["project_id"] == project["id"]
+
+    workflow = client.post("/workflows", json={
+        "title": "Project workflow",
+        "project_id": project["id"],
+        "tasks": [{
+            "key": "inspect",
+            "title": "Inspect project",
+            "prompt": "Read only",
+            "workspace_path": str(workspace),
+        }],
+    })
+    assert workflow.status_code == 201
+    assert workflow.json()["project_id"] == project["id"]
+    assert client.get("/workflows", params={"project_id": project["id"]}).json()[0]["id"] == workflow.json()["id"]
+    assert client.get(f"/projects/{project['id']}/tasks").status_code == 200
+    assert client.get(f"/projects/{project['id']}/workflows").json()[0]["id"] == workflow.json()["id"]
+
+    summary = client.get(f"/projects/{project['id']}").json()
+    assert summary["counts"]["tasks"] == {"queued": 2}
+    assert summary["counts"]["workflows"] == {"queued": 1}
+    filtered = client.get("/tasks", params={"project_id": project["id"]}).json()
+    assert len(filtered) == 2
+    assert all(task["project_id"] == project["id"] for task in filtered)
+
+
+def test_project_scope_rejects_external_workspace_and_archived_dispatch(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    created = client.post("/projects", json={
+        "name": "Project Scope Test",
+        "slug": f"project-scope-{tmp_path.name}",
+        "workspace_path": str(workspace),
+    })
+    assert created.status_code == 201
+    project_id = created.json()["id"]
+
+    outside_task = client.post("/tasks", json={
+        "title": "Outside workspace",
+        "prompt": "Must not queue",
+        "workspace_path": str(outside),
+        "project_id": project_id,
+    })
+    assert outside_task.status_code == 422
+
+    archived = client.patch(f"/projects/{project_id}", json={"status": "archived"})
+    assert archived.status_code == 200
+    assert archived.json()["archived_at"] is not None
+    rejected = client.post("/tasks", json={
+        "title": "Archived project task",
+        "prompt": "Must not queue",
+        "workspace_path": str(workspace),
+        "project_id": project_id,
+    })
+    assert rejected.status_code == 409
+
+
+def test_project_workspace_cannot_exclude_existing_task_workspaces(tmp_path):
+    workspace = tmp_path / "project"
+    nested = workspace / "nested"
+    nested.mkdir(parents=True)
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    created = client.post("/projects", json={
+        "name": "Project Root Change Test",
+        "slug": f"project-root-change-{tmp_path.name}",
+        "workspace_path": str(workspace),
+    })
+    project_id = created.json()["id"]
+    task = client.post("/tasks", json={
+        "title": "Nested task",
+        "prompt": "Read only",
+        "workspace_path": str(nested),
+        "project_id": project_id,
+    })
+    assert task.status_code == 201
+    changed = client.patch(f"/projects/{project_id}", json={"workspace_path": str(other_root)})
+    assert changed.status_code == 409
+
+

@@ -53,12 +53,14 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 
 ## Initial API
 
+- `POST /projects`, `GET /projects`, `GET /projects/{project_id}`, `PATCH /projects/{project_id}` — project directory and lifecycle.
+- `GET /projects/{project_id}/tasks` and `GET /projects/{project_id}/workflows` — project-scoped execution inventory.
 - `GET /` — task console
 - `GET /health`
 - `GET /stats`
 - `GET /insights?period_days=30` — read-only task/workflow timing, success, throughput, reported Claude usage/cost, and current worker snapshot
-- `POST /tasks`
-- `GET /tasks`
+- `POST /tasks` (optional `project_id`)
+- `GET /tasks` (optional `project_id` filter)
 - `GET /tasks/{task_id}`
 - `GET /tasks/{task_id}/events`
 - `GET /tasks/{task_id}/workspace-changes`
@@ -67,8 +69,8 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - `GET /tasks/{task_id}/artifacts/{name}`
 - `GET /tasks/{task_id}/workspace-file?path=relative/file/path`
 - `POST /tasks/{task_id}/cancel`
-- `POST /workflows` — atomically create a workflow and its task DAG
-- `GET /workflows` — list workflows with task-status counts
+- `POST /workflows` — atomically create a workflow and its task DAG (optional `project_id`; member tasks inherit it)
+- `GET /workflows` — list workflows with task-status counts (optional `project_id` filter)
 - `GET /workflows/{workflow_id}` — workflow, member tasks, dependency edges, and blocked reasons
 - `POST /workflows/{workflow_id}/cancel` — cancel queued members and request cancellation for running members
 

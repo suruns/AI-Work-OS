@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
+from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
 from .sandbox import build_sandbox_invocation, sandbox_mode
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:

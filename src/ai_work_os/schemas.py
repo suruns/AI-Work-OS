@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TaskCreate(BaseModel):
+    project_id: str | None = None
     title: str = Field(min_length=1, max_length=240)
     prompt: str = Field(min_length=1, max_length=100_000)
     workspace_path: str = Field(min_length=1, max_length=4096)
@@ -30,6 +31,7 @@ class TaskCreate(BaseModel):
 
 
 class TaskRead(BaseModel):
+    project_id: str | None = None
     id: str
     title: str
     prompt: str
@@ -75,6 +77,7 @@ class WorkflowTaskCreate(TaskCreate):
 
 
 class WorkflowCreate(BaseModel):
+    project_id: str | None = None
     title: str = Field(min_length=1, max_length=240)
     tasks: list[WorkflowTaskCreate] = Field(min_length=1, max_length=100)
 
@@ -85,6 +88,7 @@ class WorkflowTaskRead(TaskRead):
 
 
 class WorkflowRead(BaseModel):
+    project_id: str | None = None
     id: str
     title: str
     status: str
@@ -93,3 +97,32 @@ class WorkflowRead(BaseModel):
     finished_at: datetime | None
     counts: dict[str, int]
     model_config = {"from_attributes": True}
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    slug: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = Field(default=None, max_length=10_000)
+    workspace_path: str = Field(min_length=1, max_length=4096)
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    slug: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = Field(default=None, max_length=10_000)
+    workspace_path: str | None = Field(default=None, min_length=1, max_length=4096)
+    status: Literal["active", "archived"] | None = None
+
+
+class ProjectRead(BaseModel):
+    id: str
+    name: str
+    slug: str
+    description: str | None
+    workspace_path: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+    counts: dict[str, dict[str, int]]
+    model_config = {"from_attributes": True}
+

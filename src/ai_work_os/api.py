@@ -396,7 +396,7 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict:
         return _project_payload(db, project)
 
 
-@app.get("/projects/{project_id}/tasks")
+@app.get("/projects/{project_id}/tasks", response_model=list[TaskRead])
 def list_project_tasks(
     project_id: str, limit: int = Query(default=100, ge=1, le=200),
 ) -> list[Task]:

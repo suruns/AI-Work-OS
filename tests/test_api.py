@@ -334,6 +334,33 @@ def test_retry_is_scheduled_after_a_failed_attempt(tmp_path, monkeypatch):
     assert (task_dir / "stdout.jsonl").read_text(encoding="utf-8") == (task_dir / "stdout.attempt-002.jsonl").read_text(encoding="utf-8")
 
 
+def test_logged_command_redacts_secrets_and_preserves_effective_permission_args(monkeypatch):
+    from ai_work_os.worker import build_command, redact_command_for_event
+
+    monkeypatch.setattr(worker, "CLAUDE_BIN", "/opt/claude/bin/claude")
+    monkeypatch.setattr(worker, "CLAUDE_MODEL", "claude-test-model")
+    prompt = "private user prompt that must not appear in events"
+    mcp_path = "/host/private/task/mcp-config.isolated.json"
+
+    for mode, expected_permissions in (
+        ("plan", ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]),
+        ("configured", [
+            "--permission-mode", "acceptEdits", "--disallowedTools", "mcp__*", "Bash",
+        ]),
+    ):
+        actual = build_command(prompt, mode, mcp_path)
+        logged = redact_command_for_event(actual)
+
+        assert logged == actual
+        assert logged[logged.index("-p") + 1] == "<prompt>"
+        assert logged[logged.index("--mcp-config") + 1] == "<isolated-mcp-config>"
+        assert expected_permissions == logged[-len(expected_permissions):]
+        assert "claude-test-model" in logged
+        serialized = " ".join(logged)
+        assert prompt not in serialized
+        assert mcp_path not in serialized
+
+
 def test_permission_modes_are_persisted_and_applied():
     from ai_work_os.worker import build_command
 

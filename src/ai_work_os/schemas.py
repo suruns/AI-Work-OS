@@ -173,6 +173,7 @@ class AgentTurnRead(BaseModel):
     status: str
     adapter: str
     cli_session_id: str | None
+    cancel_requested: bool = False
     started_at: datetime | None
     finished_at: datetime | None
     error_summary: str | None

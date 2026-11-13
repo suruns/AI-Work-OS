@@ -1681,3 +1681,33 @@ def get_agent_session(session_id: str) -> dict:
                 "The API has no authentication, so control audit records identify the API surface, not a verified human operator.",
             ],
         }
+
+
+@app.post("/agent-turns/{turn_id}/cancel", response_model=AgentTurnRead)
+def cancel_agent_turn(turn_id: str) -> AgentTurn:
+    """Cancel a queued turn immediately or request process termination for a running turn."""
+    with SessionLocal() as db:
+        turn = db.get(AgentTurn, turn_id)
+        if turn is None:
+            raise HTTPException(status_code=404, detail="agent turn not found")
+        if turn.status == "queued":
+            cancelled_at = utcnow()
+            turn.status = "cancelled"
+            turn.cancel_requested = True
+            turn.finished_at = cancelled_at
+            turn.updated_at = cancelled_at
+            turn.error_summary = "Cancelled before execution"
+            db.add(AgentTurnEvent(
+                turn_id=turn.id, event_type="turn.cancelled",
+                payload={"reason": "cancelled_while_queued"},
+            ))
+        elif turn.status == "running" and not turn.cancel_requested:
+            turn.cancel_requested = True
+            turn.updated_at = utcnow()
+            db.add(AgentTurnEvent(
+                turn_id=turn.id, event_type="turn.cancel_requested",
+                payload={"requested_at": turn.updated_at.isoformat()},
+            ))
+        db.commit()
+        db.refresh(turn)
+        return turn

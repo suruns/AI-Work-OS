@@ -32,6 +32,15 @@ curl -X POST http://127.0.0.1:8000/tasks -H 'content-type: application/json' -d 
 
 Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 
+For the chat-first Master Agent runtime, start a separate process after the API:
+
+~~~bash
+source .venv/bin/activate
+python -m ai_work_os.master_agent
+~~~
+
+The initial Master Agent runtime is read-only (Claude Code plan mode) and disables MCP servers. Project-linked conversations use the project's workspace; unlinked conversations use `AI_WORK_OS_MASTER_WORKSPACE` or a dedicated storage workspace. See [Phase 11.3 runtime notes](docs/phase-11-3-master-agent-runtime.md).
+
 ## Safety
 
 - Phase 10.1 adds an opt-in Linux Bubblewrap execution boundary. It is **off by default** for compatibility; set `AI_WORK_OS_SANDBOX_MODE=bubblewrap` only after local preflight and acceptance. When enabled, missing Bubblewrap, invalid paths, or mount setup errors fail the task before starting the agent; there is no unsandboxed fallback. The Worker must run as a non-root user; the sandbox keeps that host UID/GID and disables nested user namespaces.
@@ -57,6 +66,8 @@ Open http://127.0.0.1:8000/ for the task console and /docs for the API.
 - `POST /conversations/{id}/messages` — persist a user message and enqueue an AgentTurn atomically; supports `client_message_id` for retry-safe sends.
 - `GET /conversations/{id}/messages?after_id=...` — cursor-based transcript retrieval.
 - `GET /conversations/{id}/turns`, `GET /agent-turns/{id}`, `GET /agent-turns/{id}/events?after_id=...` — inspect agent-turn state and replayable events.
+- `POST /agent-turns/{id}/cancel` — cancel a queued turn or request cancellation of a running Master Agent process.
+- Start the separate read-only Master Agent runtime with `python -m ai_work_os.master_agent`; it claims queued AgentTurns, persists Claude Code stream events and assistant replies, and resumes the Claude session on later turns.
 - `POST /projects`, `GET /projects`, `GET /projects/{project_id}`, `PATCH /projects/{project_id}` — project directory and lifecycle.
 - `GET /projects/{project_id}/tasks`, `GET /projects/{project_id}/workflows`, and `GET /projects/{project_id}/conversations` — project-scoped execution and chat inventory.
 - `GET /` — task console

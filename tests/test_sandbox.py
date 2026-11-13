@@ -218,3 +218,53 @@ def test_bubblewrap_rejects_unknown_permission_mode(tmp_path, monkeypatch):
             ["/usr/bin/true"], workspace, task_dir, "manual", None,
             execution_kind="verification",
         )
+
+
+def test_bubblewrap_persists_only_the_isolated_claude_session_directory(tmp_path, monkeypatch):
+    workspace, task_dir = tmp_path / "workspace", tmp_path / "task"
+    state_dir, fake_bin = tmp_path / "session-state", tmp_path / "bin"
+    workspace.mkdir(); task_dir.mkdir(); state_dir.mkdir(); fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_NETWORK", "host")
+    env = {
+        "PATH": f"{claude.parent}:{fake_bin}",
+        "ANTHROPIC_API_KEY": "auth-secret",
+        "CLAUDE_CONFIG_DIR": str(state_dir),
+    }
+    result = build_sandbox_invocation(
+        [str(claude), "--print"], workspace, task_dir, "plan", env,
+        claude_config_dir=state_dir,
+    )
+    binds = [
+        result.command[i:i+3]
+        for i in range(len(result.command)-2)
+        if result.command[i] == "--bind"
+    ]
+    assert ["--bind", str(state_dir.resolve()), "/tmp/home/.claude"] in binds
+    assert result.env["CLAUDE_CONFIG_DIR"] == "/tmp/home/.claude"
+    assert result.env["ANTHROPIC_API_KEY"] == "auth-secret"
+    assert result.metadata["persistent_claude_config"] is True
+    assert str(state_dir.resolve()) not in result.command[result.command.index("--") + 1:]
+
+
+def test_bubblewrap_rejects_claude_session_directory_inside_workspace(tmp_path, monkeypatch):
+    workspace, task_dir = tmp_path / "workspace", tmp_path / "task"
+    state_dir, fake_bin = workspace / ".sessions", tmp_path / "bin"
+    workspace.mkdir(); task_dir.mkdir(); state_dir.mkdir(); fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    with pytest.raises(ValueError, match="outside workspace"):
+        build_sandbox_invocation(
+            [str(claude), "--print"], workspace, task_dir, "plan",
+            {"PATH": f"{claude.parent}:{fake_bin}"},
+            claude_config_dir=state_dir,
+        )

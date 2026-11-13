@@ -339,20 +339,34 @@ def _finish_turn(
             db.add(message)
             db.flush()
             assistant_message_id = message.id
-            turn.assistant_message_id = message.id
-        turn.status = status
-        turn.finished_at = finished_at
-        turn.updated_at = finished_at
-        turn.worker_id = None
-        turn.lease_expires_at = None
-        turn.error_summary = error
+        result = db.execute(
+            update(AgentTurn)
+            .where(
+                AgentTurn.id == turn_id,
+                AgentTurn.status == "running",
+                AgentTurn.worker_id == worker_id,
+                AgentTurn.lease_expires_at > finished_at,
+            )
+            .values(
+                status=status,
+                finished_at=finished_at,
+                updated_at=finished_at,
+                worker_id=None,
+                lease_expires_at=None,
+                error_summary=error,
+                assistant_message_id=assistant_message_id,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return
         _event(db, turn_id, "turn.finished", {
             "status": status, "exit_code": exit_code,
             "assistant_message_id": assistant_message_id,
             "error_summary": error,
         })
         db.commit()
-
 
 async def execute_turn(turn_id: str, worker_id: str) -> None:
     proc: asyncio.subprocess.Process | None = None

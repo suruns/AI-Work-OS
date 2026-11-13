@@ -37,8 +37,6 @@ def _project(db) -> Project:
     project = db.get(Project, PROJECT_ID)
     if project is None:
         raise ToolError("The conversation project no longer exists.")
-    if project.status != "active":
-        raise ToolError("Archived projects cannot receive new work.")
     return project
 
 
@@ -109,6 +107,8 @@ def _tools() -> list[dict[str, Any]]:
 
 
 def _create_task(db, project: Project, args: dict) -> dict:
+    if project.status != "active":
+        raise ToolError("Archived projects cannot receive new work.")
     title = args.get("title")
     prompt = args.get("prompt")
     criteria = args.get("acceptance_criteria")
@@ -138,6 +138,8 @@ def _create_task(db, project: Project, args: dict) -> dict:
 
 
 def _create_workflow(db, project: Project, args: dict) -> dict:
+    if project.status != "active":
+        raise ToolError("Archived projects cannot receive new work.")
     title, specs = args.get("title"), args.get("tasks")
     if not isinstance(title, str) or not title.strip() or len(title) > 240:
         raise ToolError("title must be a non-empty string of at most 240 characters")

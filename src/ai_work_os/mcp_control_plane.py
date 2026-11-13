@@ -13,13 +13,16 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import (
-    Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow,
-)
-
-Base.metadata.create_all(bind=engine)
-ensure_schema_compatibility()
+BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
+if not BROKER_SOCKET:
+    from .db import Base, SessionLocal, engine, ensure_schema_compatibility
+    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow
+    Base.metadata.create_all(bind=engine)
+    ensure_schema_compatibility()
+else:
+    # Sandboxed MCP clients must never initialize or open the host database.
+    SessionLocal = None
+    Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = utcnow = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
 PROTOCOL_VERSION = "2024-11-05"
@@ -31,10 +34,11 @@ class ToolError(ValueError):
     pass
 
 
-def _project(db) -> Project:
-    if not PROJECT_ID:
+def _project(db, project_id: str | None = None) -> Project:
+    bound_project_id = project_id if project_id is not None else PROJECT_ID
+    if not bound_project_id:
         raise ToolError("This conversation is not attached to a project.")
-    project = db.get(Project, PROJECT_ID)
+    project = db.get(Project, bound_project_id)
     if project is None:
         raise ToolError("The conversation project no longer exists.")
     return project
@@ -246,11 +250,13 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
     }
 
 
-def call_tool(name: str, args: dict) -> Any:
+def call_tool(name: str, args: dict, *, project_id: str | None = None) -> Any:
     if not isinstance(args, dict):
         raise ToolError("tool arguments must be an object")
+    if SessionLocal is None:
+        raise ToolError("Sandboxed MCP clients cannot access the database directly.")
     with SessionLocal() as db:
-        project = _project(db)
+        project = _project(db, project_id)
         if name == "get_project_overview":
             counts = {}
             for model, key in ((Task, "tasks"), (Workflow, "workflows")):
@@ -322,7 +328,7 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            value = call_tool(name, args)
+            value = _broker_call(name, args) if BROKER_SOCKET else call_tool(name, args)
             return {"jsonrpc": "2.0", "id": request_id, "result": {
                 "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}],
                 "isError": False,
@@ -336,6 +342,34 @@ def _reply(message: dict) -> dict | None:
             "code": -32601, "message": f"Method not found: {method}",
         }}
     return None
+
+
+def _broker_call(name: str, args: dict) -> Any:
+    import socket
+    request = json.dumps({"name": name, "arguments": args}, ensure_ascii=False).encode("utf-8") + b"\n"
+    if len(request) > MAX_MESSAGE_BYTES:
+        raise ToolError("MCP broker request exceeds the message size limit")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(30)
+            client.connect(BROKER_SOCKET)
+            client.sendall(request)
+            chunks = bytearray()
+            while b"\n" not in chunks:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+                if len(chunks) > MAX_MESSAGE_BYTES:
+                    raise ToolError("MCP broker response exceeds the message size limit")
+        response = json.loads(bytes(chunks).split(b"\n", 1)[0])
+        if not isinstance(response, dict):
+            raise ToolError("MCP broker returned an invalid response")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ToolError(f"MCP broker unavailable: {type(exc).__name__}") from exc
+    if not response.get("ok"):
+        raise ToolError(str(response.get("error") or "MCP broker rejected the request"))
+    return response.get("value")
 
 
 def main() -> None:

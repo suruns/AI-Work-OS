@@ -51,16 +51,19 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
     assert "--output-format" in command
     assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--include-partial-messages" in command
-    assert command[command.index("--permission-mode") + 1] == "plan"
+    assert command[command.index("--permission-mode") + 1] == "default"
     assert "--restricted" in command
     assert command[command.index("--tools") + 1] == "Read,Glob,Grep"
     assert command[command.index("--resume") + 1] == "session-123"
     assert command[command.index("--model") + 1] == "claude-test-model"
     assert command[command.index("--strict-mcp-config") + 1] == "--mcp-config"
-    assert command[command.index("--disallowedTools") + 1] == "mcp__*"
+    allowed = command[command.index("--allowedTools") + 1]
+    assert allowed == "mcp__awos__*"
     denied = command[command.index("--disallowedTools") + 1:command.index("--max-turns")]
-    assert {"mcp__*", "Bash", "Edit", "Write", "NotebookEdit"} <= set(denied)
+    assert {"Bash", "Edit", "Write", "NotebookEdit"} <= set(denied)
+    assert "mcp__*" not in denied
     assert "--dangerously-skip-permissions" not in command
+    assert command[command.index("--permission-prompts") + 1] == "none"
 
 
 def test_extract_final_text_from_result_and_assistant_events():
@@ -147,11 +150,20 @@ def test_finish_turn_persists_assistant_message_atomically(monkeypatch):
 
 
 
-def test_empty_mcp_config_is_valid_and_private(tmp_path):
-    path = master_agent._write_empty_mcp_config(tmp_path)
-    assert path.read_text(encoding="utf-8") == '{"mcpServers":{}}\n'
+def test_mcp_config_is_scoped_and_private(tmp_path):
+    import json
+    path = master_agent._write_mcp_config(tmp_path, "project-123")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    server = config["mcpServers"]["awos"]
+    assert server["args"] == ["-m", "ai_work_os.mcp_control_plane"]
+    assert server["env"] == {"AI_WORK_OS_MCP_PROJECT_ID": "project-123"}
     assert path.stat().st_mode & 0o777 == 0o600
 
+
+def test_projectless_mcp_config_disables_server(tmp_path):
+    import json
+    path = master_agent._write_mcp_config(tmp_path, None)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"mcpServers": {}}
 
 def test_cancel_queued_turn_is_terminal_and_audited(monkeypatch):
     engine, factory = isolated_db(monkeypatch)
@@ -218,5 +230,58 @@ def test_finish_turn_cannot_overwrite_an_expired_worker_lease(monkeypatch):
         assert master_agent.recover_orphaned_turns() == 1
         with factory() as db:
             assert db.get(AgentTurn, turn_id).status == "failed"
+    finally:
+        engine.dispose()
+
+
+def test_session_id_is_persisted_on_conversation_and_turn(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        turn_id, conversation_id = queued_turn(factory)
+        assert master_agent._claim_turn("worker-session") == turn_id
+        master_agent._persist_session_id(turn_id, "worker-session", "claude-session-123")
+        with factory() as db:
+            turn = db.get(AgentTurn, turn_id)
+            conversation = db.get(Conversation, conversation_id)
+            assert turn.cli_session_id == "claude-session-123"
+            assert conversation.cli_session_id == "claude-session-123"
+            events = list(db.scalars(
+                select(AgentTurnEvent).where(AgentTurnEvent.turn_id == turn_id)
+            ))
+            assert [event.event_type for event in events] == [
+                "turn.started", "turn.session_attached",
+            ]
+    finally:
+        engine.dispose()
+
+
+def test_claim_turn_serializes_turns_within_one_conversation(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        first_turn_id, conversation_id = queued_turn(factory)
+        with factory() as db:
+            second_message = ConversationMessage(
+                conversation_id=conversation_id, role="user",
+                content="Follow-up message", message_metadata={},
+            )
+            db.add(second_message)
+            db.flush()
+            second_turn = AgentTurn(
+                conversation_id=conversation_id, user_message_id=second_message.id,
+                status="queued", adapter="claude-code",
+            )
+            db.add(second_turn)
+            db.commit()
+            second_turn_id = second_turn.id
+
+        assert master_agent._claim_turn("worker-one") == first_turn_id
+        assert master_agent._claim_turn("worker-two") is None
+        with factory() as db:
+            first = db.get(AgentTurn, first_turn_id)
+            first.status = "succeeded"
+            first.worker_id = None
+            first.lease_expires_at = None
+            db.commit()
+        assert master_agent._claim_turn("worker-two") == second_turn_id
     finally:
         engine.dispose()

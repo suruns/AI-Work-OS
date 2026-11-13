@@ -21,6 +21,7 @@ It deliberately does not yet expose task/workflow creation tools to Claude Code 
 ## Configuration
 
 - `AI_WORK_OS_CLAUDE_BIN` (default `claude`)
+- `AI_WORK_OS_CLAUDE_MODEL` (optional model override shared with the task Worker)
 - `AI_WORK_OS_MASTER_WORKSPACE` (optional existing absolute directory for unprojected conversations)
 - `AI_WORK_OS_MASTER_POLL_SECONDS` (default 1)
 - `AI_WORK_OS_MASTER_TURN_TIMEOUT_SECONDS` (default 1800)

@@ -52,6 +52,7 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
     assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--include-partial-messages" in command
     assert command[command.index("--permission-mode") + 1] == "plan"
+    assert "--restricted" in command
     assert command[command.index("--tools") + 1] == "Read,Glob,Grep"
     assert command[command.index("--resume") + 1] == "session-123"
     assert command[command.index("--model") + 1] == "claude-test-model"

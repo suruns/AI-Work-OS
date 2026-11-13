@@ -15,6 +15,7 @@ It deliberately does not yet expose task/workflow creation tools to Claude Code 
 - The first slice is read-only: Claude starts in `plan` permission mode, MCP servers are explicitly disabled, and no task-dispatch tools are exposed.
 - Project conversations use the project's configured workspace. Conversations without a project use `AI_WORK_OS_MASTER_WORKSPACE`; if unset, a dedicated storage-owned workspace is created.
 - The CLI process is terminated on cancellation, timeout, or worker shutdown. The worker never uses `--dangerously-skip-permissions` or `bypassPermissions`.
+- Claude session files live in a per-conversation `CLAUDE_CONFIG_DIR` under `AI_WORK_OS_STORAGE/master-agent/claude-config/`. This keeps resume state across worker restarts without exposing the user's real Claude home. With Bubblewrap, only this dedicated directory is bind-mounted at `/tmp/home/.claude`; it must remain outside the project workspace and task artifact directory.
 - When Bubblewrap is enabled, the runtime must use the same fail-closed sandbox builder; it must never silently fall back to an unsandboxed process.
 
 ## Configuration

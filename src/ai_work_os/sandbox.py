@@ -206,7 +206,7 @@ def _runtime_mounts(
 def build_sandbox_invocation(
     command: Sequence[str], workspace: Path, task_dir: Path, permission_mode: str,
     env: dict[str, str] | None, *, mcp_config_path: Path | None = None,
-    execution_kind: str = "task",
+    execution_kind: str = "task", claude_config_dir: Path | None = None,
 ) -> SandboxInvocation:
     """Build a fail-closed Bubblewrap invocation; never falls back to host execution."""
     if sandbox_mode() == "off":
@@ -248,6 +248,16 @@ def build_sandbox_invocation(
     task_path = Path(task_dir).resolve(strict=True)
     if not task_path.is_dir():
         raise ValueError("sandbox task artifact directory must exist")
+    persistent_claude_path = None
+    if claude_config_dir is not None:
+        config_input = Path(claude_config_dir).expanduser().absolute()
+        if config_input.is_symlink() or config_input != config_input.resolve(strict=True):
+            raise ValueError("persistent Claude config directory must be canonical and not a symlink")
+        persistent_claude_path = config_input.resolve(strict=True)
+        if not persistent_claude_path.is_dir():
+            raise ValueError("persistent Claude config path must be a directory")
+        if _inside(persistent_claude_path, workspace_path) or _inside(persistent_claude_path, task_path):
+            raise ValueError("persistent Claude config directory must be outside workspace and task artifacts")
     task_hidden_target = None
     if _inside(task_path, workspace_path):
         relative_task_path = task_path.relative_to(workspace_path)
@@ -321,6 +331,8 @@ def build_sandbox_invocation(
         "/tmp/home/.local", "/tmp/home/.local/share", "/tmp/home/.claude",
     ):
         args.extend(["--dir", directory, "--chmod", "0777", directory])
+    if persistent_claude_path is not None:
+        args.extend(["--bind", str(persistent_claude_path), "/tmp/home/.claude"])
     if workspace_alias:
         if _inside(workspace_path, Path("/tmp")):
             for directory in _target_dirs({str(workspace_path.parent)}):
@@ -348,6 +360,8 @@ def build_sandbox_invocation(
         for key in AUTH_ENV_KEYS:
             if (env or {}).get(key):
                 sandbox_env[key] = (env or {})[key]
+    if persistent_claude_path is not None:
+        sandbox_env["CLAUDE_CONFIG_DIR"] = "/tmp/home/.claude"
     # Pass a sanitized environment to bubblewrap via execve's envp, not argv:
     # secrets therefore do not appear in /proc/<pid>/cmdline.
     sandbox_args = list(command)
@@ -367,5 +381,6 @@ def build_sandbox_invocation(
         "nested_user_namespaces": "disabled",
         "runtime_mounts": sorted(set(visible_mounts)),
         "task_config_mount": config_target, "task_artifacts_hidden_at": task_hidden_target,
+        "persistent_claude_config": persistent_claude_path is not None,
         "execution_kind": execution_kind,
     })

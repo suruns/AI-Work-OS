@@ -260,32 +260,47 @@ def _cancel_requested(turn_id: str, worker_id: str) -> bool:
 
 async def _terminate(proc: asyncio.subprocess.Process, grace_seconds: float = 4.0) -> bool:
     if os.name == "posix":
+        pgid = proc.pid
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
-            pass
+            return True
         except OSError:
             return False
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
-        except asyncio.TimeoutError:
+        if proc.returncode is None:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+            except asyncio.TimeoutError:
+                pass
+
+        async def group_exists() -> bool:
+            try:
+                os.killpg(pgid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+
+        deadline = asyncio.get_running_loop().time() + grace_seconds
+        while await group_exists() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        if await group_exists():
+            try:
+                os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             except OSError:
                 return False
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                return False
-        try:
-            os.killpg(proc.pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        return False
+            if proc.returncode is None:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    return False
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while await group_exists() and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.05)
+        return not await group_exists()
     if proc.returncode is None:
         proc.terminate()
         try:

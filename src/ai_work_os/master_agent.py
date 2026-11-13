@@ -21,6 +21,7 @@ Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
 
 CLAUDE_BIN = os.getenv("AI_WORK_OS_CLAUDE_BIN", "claude")
+MASTER_MODEL = os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None
 STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
 POLL_SECONDS = max(0.1, float(os.getenv("AI_WORK_OS_MASTER_POLL_SECONDS", "1")))
 TURN_TIMEOUT_SECONDS = max(30, int(os.getenv("AI_WORK_OS_MASTER_TURN_TIMEOUT_SECONDS", "1800")))
@@ -177,6 +178,8 @@ def build_master_command(
         "--disallowedTools", "mcp__*",
         "--max-turns", str(MAX_TURNS),
     ]
+    if MASTER_MODEL:
+        command.extend(["--model", MASTER_MODEL])
     if session_id:
         command.extend(["--resume", session_id])
     return command
@@ -416,6 +419,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=1024 * 1024,
                 start_new_session=(os.name == "posix"),
             )
             assert proc.stdin is not None

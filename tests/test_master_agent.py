@@ -1,4 +1,8 @@
+import asyncio
+import json
+import stat
 from datetime import timedelta
+from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -7,9 +11,9 @@ from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 from ai_work_os import api as api_module
-from ai_work_os import master_agent
+from ai_work_os import master_agent, mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage
+from ai_work_os.models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task
 
 
 def isolated_db(monkeypatch):
@@ -283,5 +287,96 @@ def test_claim_turn_serializes_turns_within_one_conversation(monkeypatch):
             first.lease_expires_at = None
             db.commit()
         assert master_agent._claim_turn("worker-two") == second_turn_id
+    finally:
+        engine.dispose()
+
+
+def test_master_agent_mcp_broker_is_project_scoped_and_uses_private_socket(tmp_path, monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    monkeypatch.setattr(mcp, "SessionLocal", factory)
+    with factory() as db:
+        project = Project(name="Broker project", slug="broker-project", workspace_path=str(tmp_path), status="active")
+        other = Project(name="Other project", slug="other-project", workspace_path=str(tmp_path), status="active")
+        db.add_all([project, other])
+        db.flush()
+        foreign_task = Task(
+            project_id=other.id, title="Private task", prompt="private",
+            workspace_path=str(tmp_path), permission_mode="plan",
+        )
+        db.add(foreign_task)
+        db.commit()
+        project_id, foreign_task_id = project.id, foreign_task.id
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def exercise_broker():
+        server, socket_path = await master_agent._start_mcp_broker(tmp_path, project_id, workspace)
+        try:
+            assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
+            async def request(payload):
+                reader, writer = await asyncio.open_unix_connection(str(socket_path))
+                writer.write(json.dumps(payload).encode("utf-8") + b"\n")
+                await writer.drain()
+                response = json.loads(await reader.readline())
+                writer.close()
+                await writer.wait_closed()
+                return response
+            overview = await request({"name": "get_project_overview", "arguments": {}})
+            assert overview["ok"] is True
+            assert overview["value"]["id"] == project_id
+            denied = await request({"name": "get_task", "arguments": {"task_id": foreign_task_id}})
+            assert denied["ok"] is False
+            assert "not found" in denied["error"]
+        finally:
+            server.close()
+            await server.wait_closed()
+            socket_path.unlink(missing_ok=True)
+
+    try:
+        asyncio.run(exercise_broker())
+    finally:
+        engine.dispose()
+
+
+def test_master_agent_closes_mcp_broker_when_sandbox_setup_fails(tmp_path, monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    storage = tmp_path / "storage"
+    monkeypatch.setattr(master_agent, "STORAGE", storage)
+    monkeypatch.setattr(master_agent, "sandbox_mode", lambda: "bubblewrap")
+    def fail_sandbox(*args, **kwargs):
+        raise RuntimeError("sandbox setup rejected")
+    monkeypatch.setattr(master_agent, "build_sandbox_invocation", fail_sandbox)
+    worker_id = "acceptance-worker"
+    with factory() as db:
+        project = Project(
+            name="Broker cleanup", slug="broker-cleanup",
+            workspace_path=str(workspace), status="active",
+        )
+        conversation = Conversation(title="Broker cleanup", status="active")
+        db.add_all([project, conversation])
+        db.flush()
+        conversation.project_id = project.id
+        message = ConversationMessage(
+            conversation_id=conversation.id, role="user", content="inspect", message_metadata={},
+        )
+        db.add(message)
+        db.flush()
+        turn = AgentTurn(
+            conversation_id=conversation.id, user_message_id=message.id,
+            status="running", worker_id=worker_id,
+            lease_expires_at=master_agent.now() + timedelta(seconds=60),
+        )
+        db.add(turn)
+        db.commit()
+        turn_id = turn.id
+    try:
+        asyncio.run(master_agent.execute_turn(turn_id, worker_id))
+        socket_path = Path("/tmp") / f"awos-mcp-{turn_id}.sock"
+        assert not socket_path.exists()
+        with factory() as db:
+            assert db.get(AgentTurn, turn_id).status == "failed"
     finally:
         engine.dispose()

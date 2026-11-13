@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,6 +208,8 @@ def build_sandbox_invocation(
     command: Sequence[str], workspace: Path, task_dir: Path, permission_mode: str,
     env: dict[str, str] | None, *, mcp_config_path: Path | None = None,
     execution_kind: str = "task", claude_config_dir: Path | None = None,
+    mcp_broker_socket_path: Path | None = None,
+    mcp_runtime_paths: Sequence[Path] = (),
 ) -> SandboxInvocation:
     """Build a fail-closed Bubblewrap invocation; never falls back to host execution."""
     if sandbox_mode() == "off":
@@ -217,7 +220,7 @@ def build_sandbox_invocation(
         })
     if permission_mode not in {"plan", "configured"}:
         raise ValueError(f"unsupported sandbox permission mode: {permission_mode}")
-    if execution_kind not in {"task", "repair", "verification", "snapshot"}:
+    if execution_kind not in {"task", "repair", "verification", "snapshot", "master_agent"}:
         raise ValueError(f"unsupported sandbox execution kind: {execution_kind}")
     bwrap_setting = os.getenv("AI_WORK_OS_BWRAP_BIN", "bwrap")
     bwrap = shutil.which(bwrap_setting)
@@ -268,11 +271,47 @@ def build_sandbox_invocation(
     if network not in {"none", "host"}:
         raise ValueError("AI_WORK_OS_SANDBOX_NETWORK must be 'none' or 'host'")
     executable = _resolve_executable(command, env)
-    include_node = execution_kind in {"task", "repair"}
+    include_node = execution_kind in {"task", "repair", "master_agent"}
     runtime_mounts, runtime_dirs, visible_mounts, command_path, node_dir = _runtime_mounts(
         executable, workspace_path, env, include_node
     )
+    mcp_runtime_visible: list[str] = []
+    for extra in mcp_runtime_paths:
+        candidate = Path(extra).expanduser().absolute()
+        if candidate.is_symlink() or candidate != candidate.resolve(strict=True):
+            raise ValueError(f"MCP runtime path must be canonical and not a symlink: {candidate}")
+        candidate = candidate.resolve(strict=True)
+        broad_roots = {Path("/"), Path("/home"), Path("/etc"), Path("/proc"),
+                       Path("/dev"), Path("/tmp"), Path("/var"), Path("/run")}
+        home = Path.home().resolve(strict=True)
+        if candidate in broad_roots or candidate == home or _inside(home, candidate):
+            raise ValueError(f"MCP runtime path is too broad to mount safely: {candidate}")
+        if not (candidate.is_file() or candidate.is_dir()):
+            raise ValueError(f"MCP runtime path must be a regular file or directory: {candidate}")
+        if _inside(candidate, workspace_path) or any(_inside(candidate, Path(root)) for root in SYSTEM_ROOTS):
+            continue
+        runtime_mounts.append(["--ro-bind", str(candidate), str(candidate)])
+        runtime_dirs.add(str(candidate) if candidate.is_dir() else str(candidate.parent))
+        visible_mounts.append(str(candidate))
+        mcp_runtime_visible.append(str(candidate))
+    broker_socket = None
+    if mcp_broker_socket_path is not None:
+        socket_input = Path(mcp_broker_socket_path).expanduser().absolute()
+        if socket_input.is_symlink() or socket_input != socket_input.resolve(strict=True):
+            raise ValueError("MCP broker socket path must be canonical and not a symlink")
+        broker_socket = socket_input.resolve(strict=True)
+        socket_stat = broker_socket.stat()
+        if not stat.S_ISSOCK(socket_stat.st_mode):
+            raise ValueError("MCP broker path must be a Unix domain socket")
+        if socket_stat.st_uid != os.getuid() or stat.S_IMODE(socket_stat.st_mode) != 0o600:
+            raise ValueError("MCP broker socket must be owned by the Worker user and private (0600)")
+        if _inside(broker_socket, workspace_path) or _inside(broker_socket, task_path):
+            raise ValueError("MCP broker socket must be outside workspace and task artifacts")
+        if len(str(broker_socket).encode()) >= 104:
+            raise ValueError("MCP broker socket path is too long for Unix domain sockets")
     system_mounts, dirs = _system_mounts()
+    if broker_socket is not None:
+        dirs.add("/run")
     dirs.update(runtime_dirs)
     dirs.update({"/tmp/home", "/tmp/home/.cache", "/tmp/home/.config",
                  "/tmp/home/.local", "/tmp/home/.local/share", "/tmp/home/.claude"})
@@ -310,6 +349,10 @@ def build_sandbox_invocation(
                 args.extend(["--ro-bind", str(path.resolve(strict=True)), source])
     for mount in system_mounts:
         args.extend(mount)
+    # Mount the broker socket before hiding host /tmp; its host-side endpoint may
+    # live there, while the fixed in-sandbox target is outside the tmpfs.
+    if broker_socket is not None:
+        args.extend(["--bind", str(broker_socket), "/run/awos-mcp.sock"])
     # Create /tmp before runtime binds: a later tmpfs would hide any runtime
     # executable mounted below it (for example a Node install under /tmp).
     args.extend(["--proc", "/proc", "--dev", "/dev", "--perms", "01777", "--tmpfs", "/tmp"])
@@ -356,12 +399,20 @@ def build_sandbox_invocation(
         for key in GIT_ENV_KEYS:
             if (env or {}).get(key):
                 sandbox_env[key] = (env or {})[key]
-    if execution_kind in {"task", "repair"}:
+    if execution_kind in {"task", "repair", "master_agent"}:
         for key in AUTH_ENV_KEYS:
             if (env or {}).get(key):
                 sandbox_env[key] = (env or {})[key]
     if persistent_claude_path is not None:
         sandbox_env["CLAUDE_CONFIG_DIR"] = "/tmp/home/.claude"
+    if broker_socket is not None:
+        python_roots = []
+        for extra in mcp_runtime_paths:
+            candidate = Path(extra).resolve(strict=True)
+            if candidate.is_dir() and not any(_inside(candidate, Path(root)) for root in SYSTEM_ROOTS):
+                python_roots.append(_sandbox_path(candidate, workspace_path))
+        if python_roots:
+            sandbox_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_roots))
     # Pass a sanitized environment to bubblewrap via execve's envp, not argv:
     # secrets therefore do not appear in /proc/<pid>/cmdline.
     sandbox_args = list(command)
@@ -382,5 +433,7 @@ def build_sandbox_invocation(
         "runtime_mounts": sorted(set(visible_mounts)),
         "task_config_mount": config_target, "task_artifacts_hidden_at": task_hidden_target,
         "persistent_claude_config": persistent_claude_path is not None,
+        "mcp_broker_socket": "/run/awos-mcp.sock" if broker_socket is not None else None,
+        "mcp_runtime_mounts": sorted(set(mcp_runtime_visible)),
         "execution_kind": execution_kind,
     })

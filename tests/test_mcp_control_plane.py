@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -133,3 +137,31 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
         "get_workflow", "create_task", "create_workflow",
     }
+
+
+def test_call_tool_uses_trusted_explicit_project_binding(monkeypatch, tmp_path):
+    engine, factory, (project_id, _other_id) = isolated(monkeypatch, tmp_path)
+    try:
+        result = mcp.call_tool("get_project_overview", {}, project_id=project_id)
+        assert result["id"] == project_id
+        try:
+            mcp.call_tool("get_project_overview", {}, project_id="not-a-project")
+        except mcp.ToolError as exc:
+            assert "no longer exists" in str(exc)
+        else:
+            raise AssertionError("unknown trusted project binding was accepted")
+    finally:
+        engine.dispose()
+
+
+def test_broker_client_import_does_not_initialize_host_database(tmp_path):
+    db_path = tmp_path / "host-storage" / "awos.db"
+    env = os.environ.copy()
+    env["AI_WORK_OS_MCP_BROKER_SOCKET"] = str(tmp_path / "missing-broker.sock")
+    env["AI_WORK_OS_DB"] = str(db_path)
+    code = (
+        "import sys; import ai_work_os.mcp_control_plane; "
+        "assert 'ai_work_os.db' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)
+    assert not db_path.parent.exists()

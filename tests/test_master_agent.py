@@ -57,9 +57,11 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
     assert command[command.index("--resume") + 1] == "session-123"
     assert command[command.index("--model") + 1] == "claude-test-model"
     assert command[command.index("--strict-mcp-config") + 1] == "--mcp-config"
-    assert command[command.index("--disallowedTools") + 1] == "mcp__*"
+    allowed = command[command.index("--allowedTools") + 1]
+    assert allowed == "mcp__awos__*"
     denied = command[command.index("--disallowedTools") + 1:command.index("--max-turns")]
-    assert {"mcp__*", "Bash", "Edit", "Write", "NotebookEdit"} <= set(denied)
+    assert {"Bash", "Edit", "Write", "NotebookEdit"} <= set(denied)
+    assert "mcp__*" not in denied
     assert "--dangerously-skip-permissions" not in command
 
 

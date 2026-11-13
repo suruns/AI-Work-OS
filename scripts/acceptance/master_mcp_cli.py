@@ -40,7 +40,7 @@ def main() -> int:
         os.environ["AI_WORK_OS_SANDBOX_MODE"] = "off"
 
         from ai_work_os.db import Base, SessionLocal, engine
-        from ai_work_os.models import Project, Task, Workflow, WorkflowTaskDependency
+        from ai_work_os.models import Project, Task, Worker, Workflow, WorkflowTaskDependency
         from ai_work_os.master_agent import _subprocess_env, _write_mcp_config, build_master_command
 
         Base.metadata.create_all(bind=engine)
@@ -115,6 +115,7 @@ Do not use shell commands or file-editing tools."""
             tasks = list(db.query(Task).filter(Task.project_id == project_id).all())
             workflows = list(db.query(Workflow).filter(Workflow.project_id == project_id).all())
             edges = list(db.query(WorkflowTaskDependency).all())
+            workers = list(db.query(Worker).all())
 
         task_created = [task for task in tasks if task.title == "Real CLI MCP task"]
         workflow_created = [item for item in workflows if item.title == "Real CLI MCP DAG"]
@@ -126,6 +127,7 @@ Do not use shell commands or file-editing tools."""
             and len(workflow_created) == 1
             and len(dag_tasks) == 3
             and len(edges) == 2
+            and len(workers) == 0
             and all(task.status == "queued" and task.permission_mode == "plan" for task in tasks)
         )
         if not ok:
@@ -139,7 +141,7 @@ Do not use shell commands or file-editing tools."""
             return 1
         print("PASS: real Claude Code MCP calls and persisted queued DAG")
         print("tools=" + ",".join(sorted(called & required)))
-        print(f"project_tasks={len(tasks)} workflows={len(workflows)} dag_edges={len(edges)}")
+        print(f"project_tasks={len(tasks)} workflows={len(workflows)} dag_edges={len(edges)} workers={len(workers)}")
         return 0
 
 

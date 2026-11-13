@@ -174,7 +174,7 @@ def build_master_command(
         "--permission-mode", "plan",
         "--tools", "Read,Glob,Grep",
         "--permission-prompts", "none",
-        "--setting-sources", "project,local",
+        "--restricted",
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
         "--disallowedTools", "mcp__*", "Bash", "Edit", "Write", "NotebookEdit",
         "--max-turns", str(MAX_TURNS),

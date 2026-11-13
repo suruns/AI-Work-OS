@@ -213,7 +213,7 @@ def _extract_text(event: dict) -> str | None:
         if message.get("stop_reason") != "end_turn":
             return None
         blocks = message.get("content") or []
-        text = "\\n".join(
+        text = "\n".join(
             str(block.get("text", "")) for block in blocks
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()

@@ -226,15 +226,27 @@ def _extract_text(event: dict) -> str | None:
 
 
 def _persist_session_id(turn_id: str, worker_id: str, session_id: str) -> None:
+    observed_at = now()
     with SessionLocal() as db:
         turn = db.get(AgentTurn, turn_id)
-        if turn is None or turn.status != "running" or turn.worker_id != worker_id:
+        if turn is None or turn.cli_session_id == session_id:
             return
-        if turn.cli_session_id != session_id:
-            turn.cli_session_id = session_id
-            _event(db, turn_id, "turn.session_attached", {"session_id": session_id})
-            db.commit()
-
+        result = db.execute(
+            update(AgentTurn)
+            .where(
+                AgentTurn.id == turn_id,
+                AgentTurn.status == "running",
+                AgentTurn.worker_id == worker_id,
+                AgentTurn.lease_expires_at > observed_at,
+            )
+            .values(cli_session_id=session_id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return
+        _event(db, turn_id, "turn.session_attached", {"session_id": session_id})
+        db.commit()
 
 def _renew_lease(turn_id: str, worker_id: str) -> bool:
     renewed_at = now()
@@ -515,6 +527,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                         _persist_event(turn_id, "turn.lease_lost", {
                             "process_tree_stopped": stopped,
                         })
+                        await asyncio.gather(*readers, return_exceptions=True)
                         return
                     next_renewal = current + HEARTBEAT_SECONDS
             await asyncio.gather(*readers, return_exceptions=True)

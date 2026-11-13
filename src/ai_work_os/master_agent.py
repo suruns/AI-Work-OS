@@ -190,7 +190,7 @@ def _write_empty_mcp_config(turn_dir: Path) -> Path:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
-            stream.write('{"mcpServers":{}}\\n')
+            stream.write('{"mcpServers":{}}\n')
     finally:
         if fd >= 0:
             os.close(fd)
@@ -390,7 +390,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 start_new_session=(os.name == "posix"),
             )
             assert proc.stdin is not None
-            proc.stdin.write((SYSTEM_PROMPT + "\\n\\n" + prompt).encode("utf-8"))
+            proc.stdin.write(prompt.encode("utf-8"))
             await proc.stdin.drain()
             proc.stdin.close()
 

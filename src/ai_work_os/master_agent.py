@@ -169,6 +169,7 @@ def build_master_command(
         CLAUDE_BIN, "--print",
         "--output-format", "stream-json", "--verbose",
         "--include-partial-messages",
+        "--append-system-prompt", SYSTEM_PROMPT,
         "--permission-mode", "plan",
         "--permission-prompts", "none",
         "--setting-sources", "project,local",

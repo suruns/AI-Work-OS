@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import socket
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import (
     AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, utcnow,
 )
-from .sandbox import build_sandbox_invocation
+from .sandbox import build_sandbox_invocation, sandbox_mode
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
@@ -34,9 +35,15 @@ MAX_TURNS = max(1, min(100, int(os.getenv("AI_WORK_OS_MASTER_MAX_TURNS", "12")))
 MAX_EVENT_BYTES = 64_000
 
 SYSTEM_PROMPT = """You are the Master Agent for AI Work OS.
-Help the user understand and plan work in the selected project workspace.
-This runtime slice is read-only: inspect and explain, but do not modify files,
-create tasks, create workflows, or claim that work has been dispatched.
+Help the user understand, plan, and coordinate work in the selected project.
+Use the ai-work-os MCP tools to inspect the current project's tasks and workflows.
+When the user asks you to delegate or organize work, decompose it into clear tasks
+and dependencies, explain the proposed plan, then create queued plan-mode tasks or
+workflows using the MCP tools. Creating work only queues it; never claim it has
+started or completed until persisted task state confirms that.
+The MCP server is bound to this conversation's project. Never ask it to access
+another project, and never invent project, task, or workflow identifiers.
+Built-in file tools are read-only. Do not use shell commands or edit files.
 Be explicit about assumptions and ask concise clarification questions when needed.
 The user-visible transcript and AI Work OS event log are durable records."""
 
@@ -176,7 +183,8 @@ def build_master_command(
         "--permission-prompts", "none",
         "--restricted",
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
-        "--disallowedTools", "mcp__*", "Bash", "Edit", "Write", "NotebookEdit",
+        "--allowedTools", "mcp__awos__*",
+        "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit",
         "--max-turns", str(MAX_TURNS),
     ]
     if MASTER_MODEL:
@@ -186,7 +194,7 @@ def build_master_command(
     return command
 
 
-def _write_empty_mcp_config(turn_dir: Path) -> Path:
+def _write_mcp_config(turn_dir: Path, project_id: str | None) -> Path:
     path = turn_dir / "mcp-config.isolated.json"
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -194,7 +202,15 @@ def _write_empty_mcp_config(turn_dir: Path) -> Path:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
-            stream.write('{"mcpServers":{}}\n')
+            if project_id:
+                config = {"mcpServers": {"awos": {
+                    "type": "stdio", "command": sys.executable,
+                    "args": ["-m", "ai_work_os.mcp_control_plane"],
+                    "env": {"AI_WORK_OS_MCP_PROJECT_ID": project_id},
+                }}}
+            else:
+                config = {"mcpServers": {}}
+            stream.write(json.dumps(config, ensure_ascii=False) + "\\n")
     finally:
         if fd >= 0:
             os.close(fd)
@@ -408,7 +424,11 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         turn_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = turn_dir / "stdout.jsonl"
         stderr_path = turn_dir / "stderr.log"
-        mcp_config = _write_empty_mcp_config(turn_dir)
+        if project is not None and sandbox_mode() == "bubblewrap":
+            raise RuntimeError(
+                "Project-scoped MCP is not yet supported inside Bubblewrap; refusing to expose the host database or runtime"
+            )
+        mcp_config = _write_mcp_config(turn_dir, project.id if project else None)
         claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
         claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if claude_config_dir.is_symlink():
@@ -428,7 +448,8 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 "--verbose", "--include-partial-messages", "--permission-mode", "plan",
                 "--tools", "Read,Glob,Grep", "--permission-prompts", "none", "--setting-sources", "project,local",
                 "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
-                "--disallowedTools", "mcp__*", "Bash", "Edit", "Write", "NotebookEdit",
+                "--allowedTools", "mcp__awos__*",
+                "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit",
                 "--max-turns", str(MAX_TURNS),
                 *(["--resume", "<persisted-session-id>"] if session_id else []),
             ],
@@ -436,8 +457,8 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             "claude_config_dir": str(claude_config_dir),
             "permission_mode": "plan",
             "configured_model": MASTER_MODEL or "cli_default",
-            "tool_policy": "deny_shell_and_file_edits",
-            "mcp_policy": "deny_all",
+            "tool_policy": "read_only_builtin_tools",
+            "mcp_policy": "conversation_project_allowlist" if project else "disabled_projectless",
             "sandbox": invocation.metadata,
             "timeout_seconds": TURN_TIMEOUT_SECONDS,
             "stdout_path": str(stdout_path),

@@ -54,7 +54,7 @@ def test_task_creation_is_project_bound_plan_only_and_only_queues(monkeypatch, t
             assert task.workspace_path == str(tmp_path)
             assert task.permission_mode == "plan"
             assert task.status == "queued"
-            assert task.auto_repair is False
+            assert not task.auto_repair
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task.id)))
             assert [event.event_type for event in events] == ["task.queued"]
     finally:

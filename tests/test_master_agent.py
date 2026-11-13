@@ -187,3 +187,34 @@ def test_cancel_running_turn_records_request_without_stealing_lease(monkeypatch)
             ]
     finally:
         engine.dispose()
+
+
+def test_finish_turn_cannot_overwrite_an_expired_worker_lease(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        turn_id, _ = queued_turn(factory)
+        assert master_agent._claim_turn("stale-worker") == turn_id
+        with factory() as db:
+            turn = db.get(AgentTurn, turn_id)
+            turn.lease_expires_at = master_agent.now() - timedelta(seconds=1)
+            db.commit()
+        master_agent._finish_turn(
+            turn_id, "stale-worker", "succeeded",
+            assistant_text="This stale result must not be committed.", exit_code=0,
+        )
+        with factory() as db:
+            turn = db.get(AgentTurn, turn_id)
+            assert turn.status == "running"
+            assert turn.assistant_message_id is None
+            messages = list(db.scalars(
+                select(ConversationMessage).where(
+                    ConversationMessage.conversation_id == turn.conversation_id,
+                    ConversationMessage.role == "assistant",
+                )
+            ))
+            assert messages == []
+        assert master_agent.recover_orphaned_turns() == 1
+        with factory() as db:
+            assert db.get(AgentTurn, turn_id).status == "failed"
+    finally:
+        engine.dispose()

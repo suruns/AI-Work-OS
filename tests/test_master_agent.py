@@ -64,6 +64,7 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
 
 def test_extract_final_text_from_result_and_assistant_events():
     assert master_agent._extract_text({"type": "result", "result": "Final answer"}) == "Final answer"
+    assert master_agent._extract_text({"type": "result", "result": "failure", "is_error": True}) is None
     event = {
         "type": "assistant",
         "message": {

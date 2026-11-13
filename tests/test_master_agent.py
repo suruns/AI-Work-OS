@@ -142,7 +142,7 @@ def test_finish_turn_persists_assistant_message_atomically(monkeypatch):
 
 def test_empty_mcp_config_is_valid_and_private(tmp_path):
     path = master_agent._write_empty_mcp_config(tmp_path)
-    assert path.read_text(encoding="utf-8") == '{"mcpServers":{}}\\n'
+    assert path.read_text(encoding="utf-8") == '{"mcpServers":{}}\n'
     assert path.stat().st_mode & 0o777 == 0o600
 
 

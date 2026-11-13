@@ -20,14 +20,14 @@ It deliberately does not yet expose task/workflow creation tools to Claude Code 
 ## Configuration
 
 - `AI_WORK_OS_CLAUDE_BIN` (default `claude`)
-- `AI_WORK_OS_MASTER_WORKSPACE` (optional absolute directory for unprojected conversations)
+- `AI_WORK_OS_MASTER_WORKSPACE` (optional existing absolute directory for unprojected conversations)
 - `AI_WORK_OS_MASTER_POLL_SECONDS` (default 1)
 - `AI_WORK_OS_MASTER_TURN_TIMEOUT_SECONDS` (default 1800)
 - `AI_WORK_OS_MASTER_TURN_LEASE_SECONDS` (default 60)
 - `AI_WORK_OS_MASTER_HEARTBEAT_SECONDS` (default 10)
 - `AI_WORK_OS_MASTER_MAX_TURNS` (default 12)
 
-Start separately from the task Worker:
+When Bubblewrap is enabled, the existing sandbox policy still applies. Its default network mode is `none`; Claude API access requires the operator to explicitly set `AI_WORK_OS_SANDBOX_NETWORK=host`, which permits outbound network access. The Master Agent does not weaken or bypass this policy.\n\nStart separately from the task Worker:
 
 ```bash
 python -m ai_work_os.master_agent

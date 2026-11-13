@@ -4,6 +4,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from fastapi.testclient import TestClient
+
+from ai_work_os import api as api_module
 from ai_work_os import master_agent
 from ai_work_os.db import Base
 from ai_work_os.models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage
@@ -132,5 +135,50 @@ def test_finish_turn_persists_assistant_message_atomically(monkeypatch):
             assert message.role == "assistant"
             assert message.content == "The project is healthy."
             assert message.message_metadata["turn_id"] == turn_id
+    finally:
+        engine.dispose()
+
+
+
+def test_empty_mcp_config_is_valid_and_private(tmp_path):
+    path = master_agent._write_empty_mcp_config(tmp_path)
+    assert path.read_text(encoding="utf-8") == '{"mcpServers":{}}\\n'
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_cancel_queued_turn_is_terminal_and_audited(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    monkeypatch.setattr(api_module, "SessionLocal", factory)
+    try:
+        turn_id, _ = queued_turn(factory)
+        response = TestClient(api_module.app).post(f"/agent-turns/{turn_id}/cancel")
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelled"
+        assert response.json()["cancel_requested"] is True
+        with factory() as db:
+            events = list(db.scalars(select(AgentTurnEvent).where(AgentTurnEvent.turn_id == turn_id)))
+            assert [event.event_type for event in events] == ["turn.cancelled"]
+    finally:
+        engine.dispose()
+
+
+def test_cancel_running_turn_records_request_without_stealing_lease(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    monkeypatch.setattr(api_module, "SessionLocal", factory)
+    try:
+        turn_id, _ = queued_turn(factory)
+        assert master_agent._claim_turn("worker-running") == turn_id
+        response = TestClient(api_module.app).post(f"/agent-turns/{turn_id}/cancel")
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+        assert response.json()["cancel_requested"] is True
+        with factory() as db:
+            turn = db.get(AgentTurn, turn_id)
+            assert turn.worker_id == "worker-running"
+            assert turn.lease_expires_at is not None
+            events = list(db.scalars(select(AgentTurnEvent).where(AgentTurnEvent.turn_id == turn_id)))
+            assert [event.event_type for event in events] == [
+                "turn.started", "turn.cancel_requested",
+            ]
     finally:
         engine.dispose()

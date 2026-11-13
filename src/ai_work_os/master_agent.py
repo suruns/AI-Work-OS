@@ -210,6 +210,8 @@ def _persist_event(turn_id: str, event_type: str, payload: dict) -> None:
 def _extract_text(event: dict) -> str | None:
     event_type = event.get("type")
     if event_type == "result":
+        if bool(event.get("is_error")):
+            return None
         value = event.get("result")
         return value if isinstance(value, str) and value.strip() else None
     if event_type == "assistant":
@@ -474,10 +476,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     observed_session = event.get("session_id")
                     if observed_session:
                         _persist_session_id(turn_id, worker_id, str(observed_session))
-                    extracted = (
-                        None if event_type == "result" and bool(event.get("is_error"))
-                        else _extract_text(event)
-                    )
+                    extracted = _extract_text(event)
                     if extracted:
                         final_text = extracted
                     if event_type == "stream_event":

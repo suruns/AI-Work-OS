@@ -172,6 +172,7 @@ def build_master_command(
         "--include-partial-messages",
         "--append-system-prompt", SYSTEM_PROMPT,
         "--permission-mode", "plan",
+        "--tools", "Read,Glob,Grep",
         "--permission-prompts", "none",
         "--setting-sources", "project,local",
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
@@ -397,7 +398,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             "command": [
                 "<claude>", "--print", "--output-format", "stream-json",
                 "--verbose", "--include-partial-messages", "--permission-mode", "plan",
-                "--permission-prompts", "none", "--setting-sources", "project,local",
+                "--tools", "Read,Glob,Grep", "--permission-prompts", "none", "--setting-sources", "project,local",
                 "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
                 "--disallowedTools", "mcp__*", "Bash", "Edit", "Write", "NotebookEdit",
                 "--max-turns", str(MAX_TURNS),

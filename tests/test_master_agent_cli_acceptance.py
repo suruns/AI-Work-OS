@@ -7,8 +7,12 @@ import pytest
 
 
 @pytest.mark.skipif(
-    os.getenv("AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE") != "1",
-    reason="set AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE=1 to run the real Claude Code MCP acceptance",
+    os.getenv("AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE") != "1"
+    or not os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip(),
+    reason=(
+        "set AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE=1 and "
+        "AI_WORK_OS_CLAUDE_MODEL to a gateway-supported model"
+    ),
 )
 def test_real_claude_cli_can_call_scoped_mcp_tools_and_queue_work():
     root = Path(__file__).resolve().parents[1]

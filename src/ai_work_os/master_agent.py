@@ -408,6 +408,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             proc.stdin.write(prompt.encode("utf-8"))
             await proc.stdin.drain()
             proc.stdin.close()
+            await proc.stdin.wait_closed()
 
             async def read_stdout() -> None:
                 nonlocal final_text

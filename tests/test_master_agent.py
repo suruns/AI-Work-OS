@@ -44,7 +44,8 @@ def queued_turn(factory):
         return turn.id, conversation.id
 
 
-def test_master_command_is_read_only_and_resumes_session(tmp_path):
+def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_agent, "MASTER_MODEL", "claude-test-model")
     command = master_agent.build_master_command("session-123", tmp_path / "mcp.json")
     assert command[0] == master_agent.CLAUDE_BIN
     assert "--output-format" in command
@@ -52,6 +53,7 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path):
     assert "--include-partial-messages" in command
     assert command[command.index("--permission-mode") + 1] == "plan"
     assert command[command.index("--resume") + 1] == "session-123"
+    assert command[command.index("--model") + 1] == "claude-test-model"
     assert command[command.index("--strict-mcp-config") + 1] == "--mcp-config"
     assert command[command.index("--disallowedTools") + 1] == "mcp__*"
     assert "--dangerously-skip-permissions" not in command

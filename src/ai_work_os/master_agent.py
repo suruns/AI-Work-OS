@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import (
@@ -70,9 +70,17 @@ def _claim_turn(worker_id: str) -> str | None:
     with SessionLocal() as db:
         if db.bind is not None and db.bind.dialect.name == "sqlite":
             db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        active_conversation_turn = exists().where(
+            AgentTurn.conversation_id == Conversation.id,
+            AgentTurn.status == "running",
+        )
         candidate = db.scalar(
             select(AgentTurn)
-            .where(AgentTurn.status == "queued")
+            .join(Conversation, Conversation.id == AgentTurn.conversation_id)
+            .where(
+                AgentTurn.status == "queued",
+                ~active_conversation_turn,
+            )
             .order_by(AgentTurn.created_at, AgentTurn.id)
             .limit(1)
         )
@@ -247,7 +255,7 @@ def _persist_session_id(turn_id: str, worker_id: str, session_id: str) -> None:
     observed_at = now()
     with SessionLocal() as db:
         turn = db.get(AgentTurn, turn_id)
-        if turn is None or turn.cli_session_id == session_id:
+        if turn is None:
             return
         result = db.execute(
             update(AgentTurn)
@@ -263,6 +271,12 @@ def _persist_session_id(turn_id: str, worker_id: str, session_id: str) -> None:
         if result.rowcount != 1:
             db.rollback()
             return
+        conversation = db.get(Conversation, turn.conversation_id)
+        if conversation is None:
+            db.rollback()
+            return
+        conversation.cli_session_id = session_id
+        conversation.updated_at = observed_at
         _event(db, turn_id, "turn.session_attached", {"session_id": session_id})
         db.commit()
 
@@ -414,7 +428,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             conversation = db.get(Conversation, turn.conversation_id)
             user_message = db.get(ConversationMessage, turn.user_message_id)
             project = db.get(Project, conversation.project_id) if conversation and conversation.project_id else None
-            session_id = turn.cli_session_id
+            session_id = conversation.cli_session_id or turn.cli_session_id
             if conversation is None or user_message is None:
                 raise RuntimeError("AgentTurn is missing its conversation or user message")
             prompt = user_message.content

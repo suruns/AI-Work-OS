@@ -27,6 +27,9 @@ def main() -> int:
     if shutil.which(claude_bin) is None:
         print("FAIL: Claude Code CLI is not available on PATH")
         return 2
+    if not os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip():
+        print("FAIL: set AI_WORK_OS_CLAUDE_MODEL to a model available through this CLI gateway")
+        return 2
 
     with tempfile.TemporaryDirectory(prefix="awos-real-mcp-cli-") as temp:
         temp_path = Path(temp)
@@ -103,6 +106,58 @@ Do not use shell commands or file-editing tools."""
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+        first_session_ids = {
+            str(event["session_id"]) for event in events
+            if isinstance(event, dict) and event.get("session_id")
+        }
+        if completed.returncode != 0 and not any(
+            event.get("type") in {"assistant", "result", "stream_event"}
+            for event in events if isinstance(event, dict)
+        ):
+            diagnostic = completed.stdout[-3000:] + "\\n" + completed.stderr[-3000:]
+            print("FAIL: Claude CLI produced no assistant/tool events; check model availability and gateway")
+            print(diagnostic)
+            return 1
+        if len(first_session_ids) != 1:
+            print(f"FAIL: expected one CLI session id in first turn, got {sorted(first_session_ids)}")
+            return 1
+        first_session_id = next(iter(first_session_ids))
+        resume_command = build_master_command(first_session_id, mcp_config)
+        resume_prompt = "This is a follow-up in the same conversation. Reply with exactly SESSION_RESUMED_OK and do not call tools."
+        resumed = subprocess.run(
+            resume_command,
+            input=resume_prompt,
+            text=True,
+            capture_output=True,
+            cwd=workspace,
+            env=env,
+            timeout=180,
+            check=False,
+        )
+        resumed_events = []
+        for line in resumed.stdout.splitlines():
+            try:
+                resumed_events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        resumed_session_ids = {
+            str(event["session_id"]) for event in resumed_events
+            if isinstance(event, dict) and event.get("session_id")
+        }
+        resumed_text = "\\n".join(
+            str(event.get("result", "")) for event in resumed_events
+            if isinstance(event, dict) and event.get("type") == "result"
+        )
+        if (
+            resumed.returncode != 0
+            or resumed_session_ids != {first_session_id}
+            or "SESSION_RESUMED_OK" not in resumed_text
+        ):
+            print("FAIL: Claude Code did not resume the same session on a follow-up turn")
+            print(f"first_session_id={first_session_id}")
+            print(f"resumed_session_ids={sorted(resumed_session_ids)}")
+            print((resumed.stdout + "\\n" + resumed.stderr)[-3000:])
+            return 1
         called = set(name for event in events for name in _walk(event))
         required = {
             "mcp__awos__get_project_overview",
@@ -139,9 +194,10 @@ Do not use shell commands or file-editing tools."""
                 print("stderr_tail:")
                 print(completed.stderr[-3000:])
             return 1
-        print("PASS: real Claude Code MCP calls and persisted queued DAG")
+        print("PASS: real Claude Code MCP calls, queued DAG, and resumed follow-up session")
         print("tools=" + ",".join(sorted(called & required)))
         print(f"project_tasks={len(tasks)} workflows={len(workflows)} dag_edges={len(edges)} workers={len(workers)}")
+        print(f"resumed_session_id={first_session_id}")
         return 0
 
 

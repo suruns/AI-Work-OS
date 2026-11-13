@@ -85,3 +85,20 @@ The test requires a working Claude Code CLI and inherited provider credentials.
 It exercises `get_project_overview`, `list_tasks`, `create_task`, and
 `create_workflow` through the actual MCP stdio process, then verifies the
 persisted queued task/workflow DAG. It does not start the AI Work OS task Worker.
+
+
+## Conversation-scoped Claude CLI session continuity
+
+The Claude CLI session identifier is stored on `conversations.cli_session_id`,
+while `agent_turns.cli_session_id` remains as a per-turn audit snapshot. Each
+new turn resumes the conversation's latest session. The additive SQLite
+compatibility migration backfills the conversation field from the newest
+historical turn session ID. Turn claiming is serialized per conversation so
+two Master Agent workers cannot concurrently resume the same CLI session.
+
+The real CLI acceptance requires `AI_WORK_OS_CLAUDE_MODEL` to name a model
+available through the configured gateway. It now performs a follow-up CLI
+invocation using the first turn's session ID and verifies the same session is
+returned. If the model variable is absent, pytest skips the opt-in test; the
+standalone script prints an actionable configuration error instead of
+misreporting a gateway 503 as an MCP permission failure.

@@ -232,3 +232,56 @@ def test_finish_turn_cannot_overwrite_an_expired_worker_lease(monkeypatch):
             assert db.get(AgentTurn, turn_id).status == "failed"
     finally:
         engine.dispose()
+
+
+def test_session_id_is_persisted_on_conversation_and_turn(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        turn_id, conversation_id = queued_turn(factory)
+        assert master_agent._claim_turn("worker-session") == turn_id
+        master_agent._persist_session_id(turn_id, "worker-session", "claude-session-123")
+        with factory() as db:
+            turn = db.get(AgentTurn, turn_id)
+            conversation = db.get(Conversation, conversation_id)
+            assert turn.cli_session_id == "claude-session-123"
+            assert conversation.cli_session_id == "claude-session-123"
+            events = list(db.scalars(
+                select(AgentTurnEvent).where(AgentTurnEvent.turn_id == turn_id)
+            ))
+            assert [event.event_type for event in events] == [
+                "turn.started", "turn.session_attached",
+            ]
+    finally:
+        engine.dispose()
+
+
+def test_claim_turn_serializes_turns_within_one_conversation(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        first_turn_id, conversation_id = queued_turn(factory)
+        with factory() as db:
+            second_message = ConversationMessage(
+                conversation_id=conversation_id, role="user",
+                content="Follow-up message", message_metadata={},
+            )
+            db.add(second_message)
+            db.flush()
+            second_turn = AgentTurn(
+                conversation_id=conversation_id, user_message_id=second_message.id,
+                status="queued", adapter="claude-code",
+            )
+            db.add(second_turn)
+            db.commit()
+            second_turn_id = second_turn.id
+
+        assert master_agent._claim_turn("worker-one") == first_turn_id
+        assert master_agent._claim_turn("worker-two") is None
+        with factory() as db:
+            first = db.get(AgentTurn, first_turn_id)
+            first.status = "succeeded"
+            first.worker_id = None
+            first.lease_expires_at = None
+            db.commit()
+        assert master_agent._claim_turn("worker-two") == second_turn_id
+    finally:
+        engine.dispose()

@@ -210,7 +210,7 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None) -> Path:
                 }}}
             else:
                 config = {"mcpServers": {}}
-            stream.write(json.dumps(config, ensure_ascii=False) + "\\n")
+            stream.write(json.dumps(config, ensure_ascii=False) + "\n")
     finally:
         if fd >= 0:
             os.close(fd)

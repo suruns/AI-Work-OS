@@ -225,7 +225,7 @@ def test_bubblewrap_persists_only_the_isolated_claude_session_directory(tmp_path
     state_dir, fake_bin = tmp_path / "session-state", tmp_path / "bin"
     workspace.mkdir(); task_dir.mkdir(); state_dir.mkdir(); fake_bin.mkdir()
     bwrap = fake_bin / "bwrap"
-    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     bwrap.chmod(0o755)
     claude, _node = _fake_claude_runtime(workspace / "runtime")
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
@@ -257,7 +257,7 @@ def test_bubblewrap_rejects_claude_session_directory_inside_workspace(tmp_path, 
     state_dir, fake_bin = workspace / ".sessions", tmp_path / "bin"
     workspace.mkdir(); task_dir.mkdir(); state_dir.mkdir(); fake_bin.mkdir()
     bwrap = fake_bin / "bwrap"
-    bwrap.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     bwrap.chmod(0o755)
     claude, _node = _fake_claude_runtime(workspace / "runtime")
     monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")

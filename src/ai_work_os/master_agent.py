@@ -474,7 +474,10 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     observed_session = event.get("session_id")
                     if observed_session:
                         _persist_session_id(turn_id, worker_id, str(observed_session))
-                    extracted = _extract_text(event)
+                    extracted = (
+                        None if event_type == "result" and bool(event.get("is_error"))
+                        else _extract_text(event)
+                    )
                     if extracted:
                         final_text = extracted
                     if event_type == "stream_event":

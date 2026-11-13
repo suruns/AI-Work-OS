@@ -377,10 +377,18 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         stdout_path = turn_dir / "stdout.jsonl"
         stderr_path = turn_dir / "stderr.log"
         mcp_config = _write_empty_mcp_config(turn_dir)
+        claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
+        claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if claude_config_dir.is_symlink():
+            raise ValueError("persistent Claude config directory must not be a symlink")
+        os.chmod(claude_config_dir, 0o700)
         command = build_master_command(session_id, mcp_config)
+        subprocess_env = _subprocess_env()
+        subprocess_env["CLAUDE_CONFIG_DIR"] = str(claude_config_dir)
         invocation = build_sandbox_invocation(
-            command, workspace, turn_dir, "plan", _subprocess_env(),
+            command, workspace, turn_dir, "plan", subprocess_env,
             mcp_config_path=mcp_config, execution_kind="task",
+            claude_config_dir=claude_config_dir,
         )
         _persist_event(turn_id, "turn.executor_started", {
             "command": [
@@ -392,6 +400,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 *(["--resume", "<persisted-session-id>"] if session_id else []),
             ],
             "workspace": str(workspace),
+            "claude_config_dir": str(claude_config_dir),
             "permission_mode": "plan",
             "mcp_policy": "deny_all",
             "sandbox": invocation.metadata,

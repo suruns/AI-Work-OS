@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import exists, select, update
+from sqlalchemy.orm import aliased
 
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import (
@@ -70,9 +71,12 @@ def _claim_turn(worker_id: str) -> str | None:
     with SessionLocal() as db:
         if db.bind is not None and db.bind.dialect.name == "sqlite":
             db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        active_conversation_turn = exists().where(
-            AgentTurn.conversation_id == Conversation.id,
-            AgentTurn.status == "running",
+        running_turn = aliased(AgentTurn)
+        active_conversation_turn = exists(
+            select(running_turn.id).where(
+                running_turn.conversation_id == Conversation.id,
+                running_turn.status == "running",
+            )
         )
         candidate = db.scalar(
             select(AgentTurn)

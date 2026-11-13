@@ -30,11 +30,21 @@ A conversation without a project receives no project/task/workflow tools that ca
 8. The MCP config names exactly the approved server. The Claude command removes the blanket `mcp__*` deny rule and instead denies every MCP tool except the explicit allowlist; built-in shell and file-edit tools remain denied.
 9. No MCP tool can cancel, retry, edit, archive, or delete existing work in this slice.
 
+## Current implementation
+
+The server lives in `ai_work_os.mcp_control_plane` and implements newline-delimited JSON-RPC 2.0 for MCP initialize, ping, tools/list, and tools/call. It is started by Claude Code from an isolated per-turn MCP config named `awos`.
+
+The Claude invocation allows only `mcp__awos__*` MCP tools and continues to deny Bash, Edit, Write, and NotebookEdit. Projectless conversations receive an empty MCP server configuration. The Master Agent system prompt now directs it to inspect project state and queue work through these tools.
+
+Task creation stores a plan-mode task using the project's canonical workspace and writes a `task.queued` audit event. Workflow creation validates task keys, dependency references, duplicate edges, and DAG acyclicity before inserting the workflow, tasks, dependencies, and queued events in one transaction. Neither operation starts a Worker.
+
+Read operations are scoped by the trusted project ID injected into the server environment. Cross-project task/workflow IDs return the same not-found response as missing IDs. Archived projects remain inspectable but cannot receive new work.
+
 ## Runtime and sandbox requirements
 
 The MCP server is a dedicated stdio child process launched by Claude Code. It must use the same database configuration as AI Work OS and must not inherit the user's real Claude configuration.
 
-When Bubblewrap is enabled, the MCP child must remain inside the same fail-closed sandbox. The sandbox must expose only the minimum application code/runtime and database access needed by this server; it must not mount the user's home, unrelated project workspaces, or general application secrets. If that constrained mount contract cannot be satisfied, startup must fail closed rather than silently run the MCP server on the host.
+Current limitation: project-scoped MCP turns are deliberately rejected when Bubblewrap is enabled. The MCP server needs a narrowly scoped read/write database mount plus the Python package/runtime; this mount contract is not yet implemented. The Master Agent fails closed rather than allowing the MCP child to inherit host database access outside the sandbox. Project-scoped MCP is currently available only with sandbox mode off. Bubblewrap support is a required follow-up before enabling both features together.
 
 ## Auditability
 
@@ -50,4 +60,4 @@ Each successful creation writes the same task/workflow records and queued events
 - Verify create_workflow creates an atomic workflow/task/dependency graph and rejects cycles, duplicate keys, missing dependencies, and cross-project scope.
 - Verify archived and projectless conversations cannot create project work.
 - Verify cancellation, lease fencing, session resume, and stream persistence still work with MCP enabled.
-- Verify Bubblewrap mode remains fail-closed and the MCP child has no access beyond the explicit runtime/database mounts.
+- Verify project-scoped turns fail closed under Bubblewrap until the dedicated runtime/database mounts are implemented.

@@ -67,44 +67,65 @@ def _workflow_summary(db, workflow: Workflow) -> dict[str, Any]:
 
 def _tools() -> list[dict[str, Any]]:
     return [
-        {"name": "get_project_overview", "description": "Read the current conversation's project summary.",
-         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-        {"name": "list_tasks", "description": "List tasks in the current project.",
-         "inputSchema": {"type": "object", "properties": {
-             "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled", "blocked"]},
-             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20}},
-             "additionalProperties": False}},
-        {"name": "get_task", "description": "Read a task in the current project.",
-         "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
-                         "required": ["task_id"], "additionalProperties": False}},
-        {"name": "list_workflows", "description": "List workflows in the current project.",
-         "inputSchema": {"type": "object", "properties": {
-             "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
-             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20}},
-             "additionalProperties": False}},
-        {"name": "get_workflow", "description": "Read a workflow and its tasks in the current project.",
-         "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}},
-                         "required": ["workflow_id"], "additionalProperties": False}},
-        {"name": "create_task", "description": "Queue a plan-mode task in the current project. It will not execute until claimed by a Worker.",
-         "inputSchema": {"type": "object", "properties": {
-             "title": {"type": "string", "minLength": 1, "maxLength": 240},
-             "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
-             "acceptance_criteria": {"type": "string", "maxLength": 10000}},
-             "required": ["title", "prompt"], "additionalProperties": False}},
-        {"name": "create_workflow", "description": "Queue a plan-mode workflow in the current project. Dependencies use task keys.",
-         "inputSchema": {"type": "object", "properties": {
-             "title": {"type": "string", "minLength": 1, "maxLength": 240},
-             "tasks": {"type": "array", "minItems": 1, "maxItems": 30, "items": {
-                 "type": "object", "properties": {
-                     "key": {"type": "string", "minLength": 1, "maxLength": 80},
-                     "title": {"type": "string", "minLength": 1, "maxLength": 240},
-                     "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
-                     "depends_on": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
-                     "acceptance_criteria": {"type": "string", "maxLength": 10000}},
-                 "required": ["key", "title", "prompt"], "additionalProperties": False}},
-             "required": ["title", "tasks"], "additionalProperties": False}},
+        {
+            "name": "get_project_overview",
+            "description": "Read the current conversation's project summary.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "list_tasks",
+            "description": "List tasks in the current project.",
+            "inputSchema": {"type": "object", "properties": {
+                "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled", "blocked"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20},
+            }, "additionalProperties": False},
+        },
+        {
+            "name": "get_task",
+            "description": "Read a task in the current project.",
+            "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
+                            "required": ["task_id"], "additionalProperties": False},
+        },
+        {
+            "name": "list_workflows",
+            "description": "List workflows in the current project.",
+            "inputSchema": {"type": "object", "properties": {
+                "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20},
+            }, "additionalProperties": False},
+        },
+        {
+            "name": "get_workflow",
+            "description": "Read a workflow and its tasks in the current project.",
+            "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}},
+                            "required": ["workflow_id"], "additionalProperties": False},
+        },
+        {
+            "name": "create_task",
+            "description": "Queue a plan-mode task in the current project. It will not execute until claimed by a Worker.",
+            "inputSchema": {"type": "object", "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 240},
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
+                "acceptance_criteria": {"type": "string", "maxLength": 10000},
+            }, "required": ["title", "prompt"], "additionalProperties": False},
+        },
+        {
+            "name": "create_workflow",
+            "description": "Queue a plan-mode workflow in the current project. Dependencies use task keys.",
+            "inputSchema": {"type": "object", "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 240},
+                "tasks": {"type": "array", "minItems": 1, "maxItems": 30, "items": {
+                    "type": "object", "properties": {
+                        "key": {"type": "string", "minLength": 1, "maxLength": 80},
+                        "title": {"type": "string", "minLength": 1, "maxLength": 240},
+                        "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
+                        "depends_on": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+                        "acceptance_criteria": {"type": "string", "maxLength": 10000},
+                    }, "required": ["key", "title", "prompt"], "additionalProperties": False,
+                }},
+            }, "required": ["title", "tasks"], "additionalProperties": False},
+        },
     ]
-
 
 def _create_task(db, project: Project, args: dict) -> dict:
     if project.status != "active":

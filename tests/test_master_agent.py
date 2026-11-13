@@ -149,11 +149,20 @@ def test_finish_turn_persists_assistant_message_atomically(monkeypatch):
 
 
 
-def test_empty_mcp_config_is_valid_and_private(tmp_path):
-    path = master_agent._write_empty_mcp_config(tmp_path)
-    assert path.read_text(encoding="utf-8") == '{"mcpServers":{}}\n'
+def test_mcp_config_is_scoped_and_private(tmp_path):
+    import json
+    path = master_agent._write_mcp_config(tmp_path, "project-123")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    server = config["mcpServers"]["awos"]
+    assert server["args"] == ["-m", "ai_work_os.mcp_control_plane"]
+    assert server["env"] == {"AI_WORK_OS_MCP_PROJECT_ID": "project-123"}
     assert path.stat().st_mode & 0o777 == 0o600
 
+
+def test_projectless_mcp_config_disables_server(tmp_path):
+    import json
+    path = master_agent._write_mcp_config(tmp_path, None)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"mcpServers": {}}
 
 def test_cancel_queued_turn_is_terminal_and_audited(monkeypatch):
     engine, factory = isolated_db(monkeypatch)

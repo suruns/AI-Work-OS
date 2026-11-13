@@ -177,7 +177,8 @@ def build_master_command(
         CLAUDE_BIN, "--print",
         "--output-format", "stream-json", "--verbose",
         "--include-partial-messages",
-        "--append-system-prompt", SYSTEM_PROMPT,        "--permission-mode", "default",
+        "--append-system-prompt", SYSTEM_PROMPT,
+        "--permission-mode", "default",
         "--tools", "Read,Glob,Grep",
         "--permission-prompts", "none",
         "--restricted",
@@ -356,8 +357,11 @@ def _finish_turn(
             return
         assistant_message_id = None
         if status == "succeeded" and assistant_text:
-            conversation = db.get(Conversation, turn.conversation_id)            if conversation is not None:
-                conversation.updated_at = finished_at            message = ConversationMessage(                conversation_id=turn.conversation_id,
+            conversation = db.get(Conversation, turn.conversation_id)
+            if conversation is not None:
+                conversation.updated_at = finished_at
+            message = ConversationMessage(
+                conversation_id=turn.conversation_id,
                 role="assistant",
                 content=assistant_text,
                 message_metadata={"turn_id": turn_id, "adapter": "claude-code"},
@@ -533,10 +537,13 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if current >= deadline:
                     stopped = await _terminate(proc)
                     terminal_status = "failed"
-                    error = f"Master Agent turn timed out after {TURN_TIMEOUT_SECONDS} seconds"                    _persist_event(turn_id, "turn.timed_out", {
+                    error = f"Master Agent turn timed out after {TURN_TIMEOUT_SECONDS} seconds"
+                    _persist_event(turn_id, "turn.timed_out", {
                         "timeout_seconds": TURN_TIMEOUT_SECONDS,
-                        "process_tree_stopped": stopped,                    })
-                    break                if current >= next_renewal:
+                        "process_tree_stopped": stopped,
+                    })
+                    break
+                if current >= next_renewal:
                     if not _renew_lease(turn_id, worker_id):
                         stopped = await _terminate(proc)
                         error = "Master Agent worker lost its turn lease"

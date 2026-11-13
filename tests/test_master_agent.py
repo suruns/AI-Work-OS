@@ -51,7 +51,7 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
     assert "--output-format" in command
     assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--include-partial-messages" in command
-    assert command[command.index("--permission-mode") + 1] == "plan"
+    assert command[command.index("--permission-mode") + 1] == "default"
     assert "--restricted" in command
     assert command[command.index("--tools") + 1] == "Read,Glob,Grep"
     assert command[command.index("--resume") + 1] == "session-123"
@@ -63,6 +63,7 @@ def test_master_command_is_read_only_and_resumes_session(tmp_path, monkeypatch):
     assert {"Bash", "Edit", "Write", "NotebookEdit"} <= set(denied)
     assert "mcp__*" not in denied
     assert "--dangerously-skip-permissions" not in command
+    assert command[command.index("--permission-prompts") + 1] == "none"
 
 
 def test_extract_final_text_from_result_and_assistant_events():

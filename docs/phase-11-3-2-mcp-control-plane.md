@@ -61,3 +61,27 @@ Each successful creation writes the same task/workflow records and queued events
 - Verify archived and projectless conversations cannot create project work.
 - Verify cancellation, lease fencing, session resume, and stream persistence still work with MCP enabled.
 - Verify project-scoped turns fail closed under Bubblewrap until the dedicated runtime/database mounts are implemented.
+
+
+## MCP permission mode and real-CLI regression
+
+The Master Agent CLI uses Claude Code's `default` permission mode, not `plan`.
+Claude Code plan mode rejects MCP tool execution even when the server is connected
+and the tool name matches `--allowedTools`. This worker is non-interactive and sets
+`--permission-prompts none`, so only the explicit `mcp__awos__*` allowlist can run.
+The built-in tool list remains restricted to `Read,Glob,Grep`; Bash, Edit, Write,
+and NotebookEdit remain explicitly denied. The MCP server itself exposes only the
+project-scoped read and queued-work tools described above. Task records created by
+MCP remain `permission_mode=plan`, and creation never starts a Worker.
+
+Run the opt-in real Claude Code regression against an isolated temporary database:
+
+```bash
+AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE=1 \
+  .venv/bin/pytest -q tests/test_master_agent_cli_acceptance.py
+```
+
+The test requires a working Claude Code CLI and inherited provider credentials.
+It exercises `get_project_overview`, `list_tasks`, `create_task`, and
+`create_workflow` through the actual MCP stdio process, then verifies the
+persisted queued task/workflow DAG. It does not start the AI Work OS task Worker.

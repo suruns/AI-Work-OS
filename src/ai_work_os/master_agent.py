@@ -323,6 +323,9 @@ def _finish_turn(
             return
         assistant_message_id = None
         if status == "succeeded" and assistant_text:
+            conversation = db.get(Conversation, turn.conversation_id)
+            if conversation is not None:
+                conversation.updated_at = finished_at
             message = ConversationMessage(
                 conversation_id=turn.conversation_id,
                 role="assistant",
@@ -393,6 +396,8 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             "mcp_policy": "deny_all",
             "sandbox": invocation.metadata,
             "timeout_seconds": TURN_TIMEOUT_SECONDS,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
         })
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
             proc = await asyncio.create_subprocess_exec(

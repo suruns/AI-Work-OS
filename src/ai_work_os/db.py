@@ -69,3 +69,15 @@ def ensure_schema_compatibility() -> None:
         if "repair_attempt_count" not in columns:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN repair_attempt_count INTEGER NOT NULL DEFAULT 0"))
         connection.execute(text("UPDATE tasks SET available_at = created_at WHERE available_at IS NULL"))
+
+    if inspector.has_table("agent_turns"):
+        turn_columns = {column["name"] for column in inspector.get_columns("agent_turns")}
+        with engine.begin() as connection:
+            if "worker_id" not in turn_columns:
+                connection.execute(text("ALTER TABLE agent_turns ADD COLUMN worker_id VARCHAR(36)"))
+            if "lease_expires_at" not in turn_columns:
+                connection.execute(text("ALTER TABLE agent_turns ADD COLUMN lease_expires_at DATETIME"))
+            if "cancel_requested" not in turn_columns:
+                connection.execute(text("ALTER TABLE agent_turns ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_turns_worker_id ON agent_turns (worker_id)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_turns_lease_expires_at ON agent_turns (lease_expires_at)"))

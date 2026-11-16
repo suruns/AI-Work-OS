@@ -156,7 +156,10 @@ def test_mcp_config_is_scoped_and_private(tmp_path):
     config = json.loads(path.read_text(encoding="utf-8"))
     server = config["mcpServers"]["awos"]
     assert server["args"] == ["-m", "ai_work_os.mcp_control_plane"]
-    assert server["env"] == {"AI_WORK_OS_MCP_PROJECT_ID": "project-123"}
+    assert server["env"] == {
+        "AI_WORK_OS_MCP_PROJECT_ID": "project-123",
+        "AI_WORK_OS_MCP_TURN_ID": "turn-123",
+    }
     assert path.stat().st_mode & 0o777 == 0o600
 
 

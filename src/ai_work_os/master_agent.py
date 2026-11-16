@@ -218,7 +218,10 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None) -> Path:
                 config = {"mcpServers": {"awos": {
                     "type": "stdio", "command": sys.executable,
                     "args": ["-m", "ai_work_os.mcp_control_plane"],
-                    "env": {"AI_WORK_OS_MCP_PROJECT_ID": project_id},
+                    "env": {
+                        "AI_WORK_OS_MCP_PROJECT_ID": project_id,
+                        "AI_WORK_OS_MCP_TURN_ID": os.getenv("AI_WORK_OS_MCP_TURN_ID", ""),
+                    },
                 }}}
             else:
                 config = {"mcpServers": {}}

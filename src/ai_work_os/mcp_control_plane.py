@@ -348,7 +348,7 @@ def call_tool(
             except IntegrityError:
                 db.rollback()
                 previous = db.scalar(select(MCPToolInvocation).where(
-                    MCPToolInvocation.turn_id == TURN_ID,
+                    MCPToolInvocation.turn_id == invocation_turn_id,
                     MCPToolInvocation.request_id == request_key,
                 ))
                 if previous is None or previous.tool_name != name or previous.arguments_hash != arguments_hash:

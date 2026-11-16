@@ -3,6 +3,7 @@ import json
 import stat
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -294,6 +295,7 @@ def test_claim_turn_serializes_turns_within_one_conversation(monkeypatch):
 def test_master_agent_mcp_broker_is_project_scoped_and_uses_private_socket(tmp_path, monkeypatch):
     engine, factory = isolated_db(monkeypatch)
     monkeypatch.setattr(mcp, "SessionLocal", factory)
+    turn_id = str(uuid4())
     with factory() as db:
         project = Project(name="Broker project", slug="broker-project", workspace_path=str(tmp_path), status="active")
         other = Project(name="Other project", slug="other-project", workspace_path=str(tmp_path), status="active")
@@ -303,31 +305,73 @@ def test_master_agent_mcp_broker_is_project_scoped_and_uses_private_socket(tmp_p
             project_id=other.id, title="Private task", prompt="private",
             workspace_path=str(tmp_path), permission_mode="plan",
         )
-        db.add(foreign_task)
+        conversation = Conversation(
+            project_id=project.id, title="Broker conversation", status="active",
+        )
+        db.add_all([foreign_task, conversation])
+        db.flush()
+        message = ConversationMessage(
+            conversation_id=conversation.id, role="user", content="Create one task",
+            message_metadata={},
+        )
+        db.add(message)
+        db.flush()
+        turn = AgentTurn(
+            id=turn_id, conversation_id=conversation.id, user_message_id=message.id,
+            status="running", adapter="claude-code",
+        )
+        db.add(turn)
         db.commit()
         project_id, foreign_task_id = project.id, foreign_task.id
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    turn_dir = tmp_path / turn_id
 
     async def exercise_broker():
-        server, socket_path = await master_agent._start_mcp_broker(tmp_path, project_id, workspace)
+        server, socket_path = await master_agent._start_mcp_broker(turn_dir, project_id, workspace)
         try:
             assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
+
             async def request(payload):
                 reader, writer = await asyncio.open_unix_connection(str(socket_path))
-                writer.write(json.dumps(payload).encode("utf-8") + b"\n")
+                writer.write(json.dumps(payload).encode("utf-8") + b"\\n")
                 await writer.drain()
                 response = json.loads(await reader.readline())
                 writer.close()
                 await writer.wait_closed()
                 return response
+
             overview = await request({"name": "get_project_overview", "arguments": {}})
             assert overview["ok"] is True
             assert overview["value"]["id"] == project_id
             denied = await request({"name": "get_task", "arguments": {"task_id": foreign_task_id}})
             assert denied["ok"] is False
             assert "not found" in denied["error"]
+
+            create_payload = {
+                "name": "create_task", "request_id": "broker-create-1",
+                "arguments": {"title": "Exactly once", "prompt": "Create one task"},
+            }
+            first = await request(create_payload)
+            retry = await request(create_payload)
+            assert first["ok"] is True and retry["ok"] is True
+            assert first["value"]["id"] == retry["value"]["id"]
+            changed = await request({
+                **create_payload,
+                "arguments": {"title": "Different", "prompt": "Different task"},
+            })
+            assert changed["ok"] is False
+            assert "different tool arguments" in changed["error"]
+            missing_id = await request({
+                "name": "create_task",
+                "arguments": {"title": "No id", "prompt": "Must be rejected"},
+            })
+            assert missing_id["ok"] is False
+            with factory() as db:
+                assert len(list(db.scalars(
+                    select(Task).where(Task.project_id == project_id)
+                ))) == 1
         finally:
             server.close()
             await server.wait_closed()
@@ -337,7 +381,6 @@ def test_master_agent_mcp_broker_is_project_scoped_and_uses_private_socket(tmp_p
         asyncio.run(exercise_broker())
     finally:
         engine.dispose()
-
 
 def test_master_agent_closes_mcp_broker_when_sandbox_setup_fails(tmp_path, monkeypatch):
     engine, factory = isolated_db(monkeypatch)

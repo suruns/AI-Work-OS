@@ -22,6 +22,11 @@ STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
 
 
 @app.get("/", include_in_schema=False)
+def chat_home():
+    return FileResponse(WEB_DIR / "chat.html")
+
+
+@app.get("/dashboard", include_in_schema=False)
 def dashboard():
     return FileResponse(WEB_DIR / "index.html")
 
@@ -545,16 +550,32 @@ def update_conversation(conversation_id: str, body: ConversationUpdate) -> dict:
 def list_conversation_messages(
     conversation_id: str,
     after_id: int = Query(default=0, ge=0),
+    before_id: int = Query(default=0, ge=0),
+    latest: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[ConversationMessage]:
     with SessionLocal() as db:
         if db.get(Conversation, conversation_id) is None:
             raise HTTPException(status_code=404, detail="conversation not found")
+        if after_id and before_id:
+            raise HTTPException(status_code=422, detail="after_id and before_id cannot be used together")
+        query = select(ConversationMessage).where(
+            ConversationMessage.conversation_id == conversation_id,
+        )
+        if after_id:
+            query = query.where(ConversationMessage.id > after_id)
+            return list(db.scalars(
+                query.order_by(ConversationMessage.id).limit(limit)
+            ))
+        if before_id:
+            query = query.where(ConversationMessage.id < before_id)
+        if latest or before_id:
+            rows = list(db.scalars(
+                query.order_by(ConversationMessage.id.desc()).limit(limit)
+            ))
+            return list(reversed(rows))
         return list(db.scalars(
-            select(ConversationMessage).where(
-                ConversationMessage.conversation_id == conversation_id,
-                ConversationMessage.id > after_id,
-            ).order_by(ConversationMessage.id).limit(limit)
+            query.order_by(ConversationMessage.id).limit(limit)
         ))
 
 
@@ -631,14 +652,21 @@ def create_conversation_message(conversation_id: str, body: ConversationMessageC
 
 @app.get("/conversations/{conversation_id}/turns", response_model=list[AgentTurnRead])
 def list_conversation_turns(
-    conversation_id: str, limit: int = Query(default=100, ge=1, le=500),
+    conversation_id: str,
+    latest: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AgentTurn]:
     with SessionLocal() as db:
         if db.get(Conversation, conversation_id) is None:
             raise HTTPException(status_code=404, detail="conversation not found")
+        query = select(AgentTurn).where(AgentTurn.conversation_id == conversation_id)
+        if latest:
+            rows = list(db.scalars(
+                query.order_by(AgentTurn.created_at.desc(), AgentTurn.id.desc()).limit(limit)
+            ))
+            return list(reversed(rows))
         return list(db.scalars(
-            select(AgentTurn).where(AgentTurn.conversation_id == conversation_id)
-            .order_by(AgentTurn.created_at, AgentTurn.id).limit(limit)
+            query.order_by(AgentTurn.created_at, AgentTurn.id).limit(limit)
         ))
 
 
@@ -655,15 +683,22 @@ def get_agent_turn(turn_id: str) -> AgentTurn:
 def list_agent_turn_events(
     turn_id: str,
     after_id: int = Query(default=0, ge=0),
+    latest: bool = Query(default=False),
     limit: int = Query(default=500, ge=1, le=1000),
 ) -> list[AgentTurnEvent]:
     with SessionLocal() as db:
         if db.get(AgentTurn, turn_id) is None:
             raise HTTPException(status_code=404, detail="agent turn not found")
+        query = select(AgentTurnEvent).where(
+            AgentTurnEvent.turn_id == turn_id, AgentTurnEvent.id > after_id,
+        )
+        if latest and after_id == 0:
+            rows = list(db.scalars(
+                query.order_by(AgentTurnEvent.id.desc()).limit(limit)
+            ))
+            return list(reversed(rows))
         return list(db.scalars(
-            select(AgentTurnEvent).where(
-                AgentTurnEvent.turn_id == turn_id, AgentTurnEvent.id > after_id,
-            ).order_by(AgentTurnEvent.id).limit(limit)
+            query.order_by(AgentTurnEvent.id).limit(limit)
         ))
 
 

@@ -6,7 +6,9 @@ Claude Code. It is launched as a child of the trusted Master Agent turn.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -16,7 +18,7 @@ from sqlalchemy import func, select
 BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow
+    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, utcnow
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
 else:
@@ -25,6 +27,7 @@ else:
     Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = utcnow = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
+TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
 PROTOCOL_VERSION = "2024-11-05"
 MAX_MESSAGE_BYTES = 1_000_000
 MAX_LIMIT = 50
@@ -250,12 +253,41 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
     }
 
 
-def call_tool(name: str, args: dict, *, project_id: str | None = None) -> Any:
+def call_tool(
+    name: str, args: dict, request_id: str | int | float | None = None, *,
+    project_id: str | None = None, turn_id: str | None = None,
+) -> Any:
     if not isinstance(args, dict):
         raise ToolError("tool arguments must be an object")
-    if SessionLocal is None:
-        raise ToolError("Sandboxed MCP clients cannot access the database directly.")
+    invocation_turn_id = turn_id or TURN_ID
+    if name in {"create_task", "create_workflow"} and request_id is not None:
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
+            raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
+        if isinstance(request_id, float) and not math.isfinite(request_id):
+            raise ToolError("JSON-RPC request id must be finite")
+        request_key = ("s:" if isinstance(request_id, str) else "n:") + str(request_id)
+        if not request_key or len(request_key) > 128:
+            raise ToolError("JSON-RPC request id must contain 1 to 128 characters")
+        if not invocation_turn_id:
+            raise ToolError("idempotent create calls require a Master Agent turn scope")
+        arguments_hash = hashlib.sha256(
+            json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+    else:
+        request_key = None
+        arguments_hash = None
+
     with SessionLocal() as db:
+        if request_key is not None:
+            previous = db.scalar(select(MCPToolInvocation).where(
+                MCPToolInvocation.turn_id == invocation_turn_id,
+                MCPToolInvocation.request_id == request_key,
+            ))
+            if previous is not None:
+                if previous.tool_name != name or previous.arguments_hash != arguments_hash:
+                    raise ToolError("JSON-RPC request id was already used with different tool arguments")
+                return previous.result
+
         project = _project(db, project_id)
         if name == "get_project_overview":
             counts = {}
@@ -301,10 +333,32 @@ def call_tool(name: str, args: dict, *, project_id: str | None = None) -> Any:
             return {**_workflow_summary(db, workflow), "tasks": [_task_summary(task) for task in tasks],
                     "dependencies": [{"upstream_task_id": edge.upstream_task_id,
                                       "downstream_task_id": edge.downstream_task_id} for edge in edges]}
-        if name == "create_task":
-            return _create_task(db, project, args)
-        if name == "create_workflow":
-            return _create_workflow(db, project, args)
+        if name in {"create_task", "create_workflow"}:
+            value = (
+                _create_task(db, project, args)
+                if name == "create_task"
+                else _create_workflow(db, project, args)
+            )
+            if request_key is None:
+                db.commit()
+                return value
+            db.add(MCPToolInvocation(
+                turn_id=invocation_turn_id, project_id=project.id,
+                request_id=request_key, tool_name=name,
+                arguments_hash=arguments_hash, result=value,
+            ))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                previous = db.scalar(select(MCPToolInvocation).where(
+                    MCPToolInvocation.turn_id == invocation_turn_id,
+                    MCPToolInvocation.request_id == request_key,
+                ))
+                if previous is None or previous.tool_name != name or previous.arguments_hash != arguments_hash:
+                    raise ToolError("tool call idempotency conflict")
+                return previous.result
+            return value
     raise ToolError(f"unknown tool: {name}")
 
 
@@ -328,7 +382,12 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            value = _broker_call(name, args) if BROKER_SOCKET else call_tool(name, args)
+            if name in {"create_task", "create_workflow"} and request_id is None:
+                raise ToolError("mutating MCP tool calls require a JSON-RPC request id")
+            value = (
+                _broker_call(name, args, request_id)
+                if BROKER_SOCKET else call_tool(name, args, request_id=request_id)
+            )
             return {"jsonrpc": "2.0", "id": request_id, "result": {
                 "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}],
                 "isError": False,
@@ -344,9 +403,11 @@ def _reply(message: dict) -> dict | None:
     return None
 
 
-def _broker_call(name: str, args: dict) -> Any:
+def _broker_call(name: str, args: dict, request_id: str | int | float | None) -> Any:
     import socket
-    request = json.dumps({"name": name, "arguments": args}, ensure_ascii=False).encode("utf-8") + b"\n"
+    request = json.dumps({
+        "name": name, "arguments": args, "request_id": request_id,
+    }, ensure_ascii=False).encode("utf-8") + b"\n"
     if len(request) > MAX_MESSAGE_BYTES:
         raise ToolError("MCP broker request exceeds the message size limit")
     try:

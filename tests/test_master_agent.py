@@ -423,3 +423,71 @@ def test_master_agent_closes_mcp_broker_when_sandbox_setup_fails(tmp_path, monke
             assert db.get(AgentTurn, turn_id).status == "failed"
     finally:
         engine.dispose()
+
+
+def test_persist_event_is_fenced_to_current_unexpired_worker(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        turn_id, _ = queued_turn(factory)
+        assert master_agent._claim_turn("current-worker") == turn_id
+
+        assert master_agent._persist_event(
+            turn_id, "stale-worker", "turn.stale", {"value": "must-not-appear"},
+        ) is False
+        with factory() as db:
+            turn = db.get(AgentTurn, turn_id)
+            turn.lease_expires_at = master_agent.now() - timedelta(seconds=1)
+            db.commit()
+
+        assert master_agent._persist_event(
+            turn_id, "current-worker", "turn.expired", {"value": "must-not-appear"},
+        ) is False
+        with factory() as db:
+            names = list(db.scalars(
+                select(AgentTurnEvent.event_type).where(AgentTurnEvent.turn_id == turn_id)
+            ))
+            assert names == ["turn.started"]
+    finally:
+        engine.dispose()
+
+
+def test_cli_event_persistence_keeps_metadata_but_drops_content(monkeypatch):
+    engine, factory = isolated_db(monkeypatch)
+    try:
+        turn_id, _ = queued_turn(factory)
+        assert master_agent._claim_turn("worker-test") == turn_id
+        raw = {
+            "type": "assistant",
+            "session_id": "session-safe",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "PRIVATE_ASSISTANT_TEXT"},
+                    {"type": "tool_use", "id": "tool-1", "name": "Read",
+                     "input": {"file_path": "/workspace/secret.txt"}},
+                    {"type": "tool_result", "tool_use_id": "tool-1",
+                     "content": "PRIVATE_FILE_CONTENT"},
+                ],
+            },
+        }
+        assert master_agent._persist_event(
+            turn_id, "worker-test", "claude.assistant", raw,
+        ) is True
+        assert master_agent._persist_event(
+            turn_id, "worker-test", "assistant.delta",
+            {"text": "PRIVATE_STREAMED_TEXT"},
+        ) is True
+        with factory() as db:
+            events = list(db.scalars(
+                select(AgentTurnEvent).where(AgentTurnEvent.turn_id == turn_id)
+                .order_by(AgentTurnEvent.id)
+            ))
+            serialized = str([event.payload for event in events])
+            assert "PRIVATE_ASSISTANT_TEXT" not in serialized
+            assert "PRIVATE_FILE_CONTENT" not in serialized
+            assert "PRIVATE_STREAMED_TEXT" not in serialized
+            assert "/workspace/secret.txt" not in serialized
+            assert "tool_activity" in serialized
+            assert "char_count" in serialized
+    finally:
+        engine.dispose()

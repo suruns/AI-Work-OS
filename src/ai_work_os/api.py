@@ -22,6 +22,11 @@ STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
 
 
 @app.get("/", include_in_schema=False)
+def chat_home():
+    return FileResponse(WEB_DIR / "chat.html")
+
+
+@app.get("/dashboard", include_in_schema=False)
 def dashboard():
     return FileResponse(WEB_DIR / "index.html")
 

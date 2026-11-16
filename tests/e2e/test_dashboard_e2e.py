@@ -74,7 +74,7 @@ def dashboard(tmp_path: Path, request: pytest.FixtureRequest):
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             try:
-                page.goto(base_url, wait_until="domcontentloaded")
+                page.goto(base_url + "/dashboard", wait_until="domcontentloaded")
                 page.locator("#connection").filter(
                     has_text="API connected"
                 ).wait_for(timeout=10_000)

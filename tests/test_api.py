@@ -13,7 +13,7 @@ from ai_work_os.api import app
 from ai_work_os import api as api_module
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
-from ai_work_os.models import Task, TaskEvent, Workflow, utcnow
+from ai_work_os.models import AgentTurnEvent, Task, TaskEvent, Workflow, utcnow
 
 client = TestClient(app)
 
@@ -32,7 +32,7 @@ def test_health():
 
 
 def test_dashboard_task_selection_is_scoped_to_task_rows():
-    response = client.get("/")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     html = response.text
     # Workflow rows also use the shared .task styling class, but have no task data-id.
@@ -43,7 +43,7 @@ def test_dashboard_task_selection_is_scoped_to_task_rows():
 
 
 def test_dashboard_is_served():
-    response = client.get("/")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     assert "AI Work OS" in response.text
     assert "function renderTaskResult(events)" in response.text
@@ -2203,7 +2203,7 @@ def test_task_diagnostics_returns_404_for_missing_task():
 
 
 def test_dashboard_exposes_failure_analysis_and_execution_replay_entry_points():
-    response = client.get("/")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     assert '"/tasks/"+encodeURIComponent(id)+"/diagnostics"' in response.text
     assert "Failure analysis" in response.text
@@ -3183,3 +3183,73 @@ def test_conversation_creation_rejects_archived_project(tmp_path):
     assert rejected.status_code == 409
 
 
+
+
+def test_chat_history_latest_pages_and_incremental_event_cursor(tmp_path):
+    conversation = client.post("/conversations", json={"title": "Long history"})
+    assert conversation.status_code == 201
+    conversation_id = conversation.json()["id"]
+    turn_ids = []
+    message_ids = []
+    for index in range(5):
+        response = client.post(
+            f"/conversations/{conversation_id}/messages",
+            json={"content": f"history message {index}", "client_message_id": f"history-{index}"},
+        )
+        assert response.status_code == 202
+        message_ids.append(response.json()["message"]["id"])
+        turn_ids.append(response.json()["turn"]["id"])
+
+    latest_messages = client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"latest": True, "limit": 2},
+    )
+    assert [item["id"] for item in latest_messages.json()] == message_ids[-2:]
+    older_messages = client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"before_id": message_ids[3], "limit": 2},
+    )
+    assert [item["id"] for item in older_messages.json()] == message_ids[1:3]
+    invalid_cursor = client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"after_id": message_ids[0], "before_id": message_ids[3]},
+    )
+    assert invalid_cursor.status_code == 422
+    assert [item["id"] for item in client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"after_id": message_ids[2], "limit": 2},
+    ).json()] == message_ids[3:5]
+
+    latest_turns = client.get(
+        f"/conversations/{conversation_id}/turns",
+        params={"latest": True, "limit": 2},
+    )
+    assert [item["id"] for item in latest_turns.json()] == turn_ids[-2:]
+
+    with SessionLocal() as db:
+        db.add_all([
+            AgentTurnEvent(turn_id=turn_ids[-1], event_type=f"history.event.{index}",
+                           payload={"index": index})
+            for index in range(4)
+        ])
+        db.commit()
+    latest_events = client.get(
+        f"/agent-turns/{turn_ids[-1]}/events",
+        params={"latest": True, "limit": 2},
+    )
+    assert [item["payload"]["index"] for item in latest_events.json()] == [2, 3]
+    cursor = latest_events.json()[-1]["id"]
+    assert client.get(
+        f"/agent-turns/{turn_ids[-1]}/events",
+        params={"after_id": cursor, "limit": 2},
+    ).json() == []
+
+
+def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
+    html = client.get("/").text
+    assert 'latest=true&limit=500' in html
+    assert 'after_id="+lastMessageId' in html
+    assert 'eventCursors.get(t.id)' in html
+    assert 'before_id="+messages[0].id' in html
+    assert 'id="load-older-messages"' in html
+    assert 'after_id="+cursor' in html

@@ -27,7 +27,14 @@ def ensure_schema_compatibility() -> None:
     if not inspector.has_table("tasks"):
         return
     columns = {column["name"] for column in inspector.get_columns("tasks")}
+    workflow_columns = {column["name"] for column in inspector.get_columns("workflows")} if inspector.has_table("workflows") else set()
     with engine.begin() as connection:
+        if "project_id" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN project_id VARCHAR(36) REFERENCES projects(id) ON DELETE SET NULL"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_project_id ON tasks (project_id)"))
+        if "project_id" not in workflow_columns:
+            connection.execute(text("ALTER TABLE workflows ADD COLUMN project_id VARCHAR(36) REFERENCES projects(id) ON DELETE SET NULL"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_workflows_project_id ON workflows (project_id)"))
         if "workflow_id" not in columns:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN workflow_id VARCHAR(36) REFERENCES workflows(id)"))
         if "blocked_reason" not in columns:

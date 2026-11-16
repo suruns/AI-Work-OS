@@ -109,3 +109,14 @@ def ensure_schema_compatibility() -> None:
                 connection.execute(text("ALTER TABLE agent_turns ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0"))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_turns_worker_id ON agent_turns (worker_id)"))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_turns_lease_expires_at ON agent_turns (lease_expires_at)"))
+
+    if inspector.has_table("mcp_tool_invocations"):
+        invocation_columns = {
+            column["name"] for column in inspector.get_columns("mcp_tool_invocations")
+        }
+        if "arguments_hash" not in invocation_columns:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE mcp_tool_invocations "
+                    "ADD COLUMN arguments_hash VARCHAR(64) NOT NULL DEFAULT ''"
+                ))

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import site
 import socket
 import sys
 import uuid
@@ -206,7 +207,9 @@ def build_master_command(
     return command
 
 
-def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> Path:
+def _write_mcp_config(
+    turn_dir: Path, project_id: str | None, *, broker_socket: bool = False,
+) -> Path:
     path = turn_dir / "mcp-config.isolated.json"
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -215,13 +218,20 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> P
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
             if project_id:
+                server_env = (
+                    {
+                        "AI_WORK_OS_MCP_BROKER_SOCKET": "/run/awos-mcp.sock",
+                        "AI_WORK_OS_MCP_TURN_ID": turn_dir.name,
+                    }
+                    if broker_socket else {
+                        "AI_WORK_OS_MCP_PROJECT_ID": project_id,
+                        "AI_WORK_OS_MCP_TURN_ID": turn_dir.name,
+                    }
+                )
                 config = {"mcpServers": {"awos": {
                     "type": "stdio", "command": sys.executable,
                     "args": ["-m", "ai_work_os.mcp_control_plane"],
-                    "env": {
-                        "AI_WORK_OS_MCP_PROJECT_ID": project_id,
-                        "AI_WORK_OS_MCP_TURN_ID": turn_id,
-                    },
+                    "env": server_env,
                 }}}
             else:
                 config = {"mcpServers": {}}
@@ -232,10 +242,166 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> P
     return path
 
 
-def _persist_event(turn_id: str, event_type: str, payload: dict) -> None:
+
+async def _handle_mcp_broker(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    project_id: str, turn_id: str,
+) -> None:
+    from .mcp_control_plane import ToolError, call_tool
+    try:
+        raw = await asyncio.wait_for(reader.readline(), timeout=30)
+        if not raw or len(raw) > 1_000_000:
+            raise ToolError("invalid MCP broker request size")
+        request = json.loads(raw)
+        name = request.get("name")
+        arguments = request.get("arguments", {})
+        request_id = request.get("request_id")
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            raise ToolError("invalid MCP broker request")
+        if name in {"create_task", "create_workflow"} and request_id is None:
+            raise ToolError("mutating MCP broker calls require a JSON-RPC request id")
+        value = await asyncio.to_thread(
+            call_tool, name, arguments, request_id,
+            project_id=project_id, turn_id=turn_id,
+        )
+        response = {"ok": True, "value": value}
+    except ToolError as exc:
+        response = {"ok": False, "error": str(exc)[:2000]}
+    except Exception as exc:
+        response = {"ok": False, "error": f"broker internal error: {type(exc).__name__}"}
+    try:
+        writer.write(json.dumps(response, ensure_ascii=False, default=str).encode("utf-8") + b"\n")
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def _start_mcp_broker(turn_dir: Path, project_id: str, workspace: Path):
+    socket_path = Path("/tmp") / f"awos-mcp-{turn_dir.name}.sock"
+    try:
+        socket_path.relative_to(workspace.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        socket_path = Path("/var/tmp") / f"awos-mcp-{turn_dir.name}.sock"
+    try:
+        socket_path.relative_to(workspace.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        raise ValueError("cannot place MCP broker socket outside the project workspace")
+    if len(str(socket_path).encode()) >= 104:
+        raise ValueError("MCP broker socket path is too long for Unix domain sockets")
+    if socket_path.is_symlink():
+        raise ValueError("MCP broker socket path must not be a symlink")
+    if socket_path.exists():
+        if not socket_path.is_socket():
+            raise ValueError("MCP broker socket path is occupied by a non-socket file")
+        socket_path.unlink()
+    server = await asyncio.start_unix_server(
+        lambda reader, writer: _handle_mcp_broker(reader, writer, project_id, turn_dir.name),
+        path=str(socket_path), limit=1_000_001,
+    )
+    try:
+        os.chmod(socket_path, 0o600)
+    except OSError:
+        server.close()
+        await server.wait_closed()
+        socket_path.unlink(missing_ok=True)
+        raise
+    return server, socket_path
+
+
+def _mcp_runtime_paths() -> tuple[Path, ...]:
+    """Read-only Python/runtime roots needed by the sandboxed stdio MCP client."""
+    paths = {
+        Path(sys.executable).resolve(strict=True),
+        Path(sys.prefix).resolve(strict=True),
+        Path(sys.base_prefix).resolve(strict=True),
+        Path(__file__).resolve(strict=True).parent.parent,
+    }
+    for value in [*site.getsitepackages(), site.getusersitepackages()]:
+        candidate = Path(value).expanduser()
+        if candidate.exists():
+            paths.add(candidate.resolve(strict=True))
+    return tuple(sorted(paths, key=lambda item: str(item)))
+
+def _safe_cli_event_payload(event_type: str, payload: dict) -> dict:
+    """Persist CLI event metadata only; never retain file contents, prompts, or tool arguments."""
+    if event_type == "assistant.delta":
+        value = payload.get("text")
+        return {"char_count": len(value)} if isinstance(value, str) else {}
+
+    if event_type == "claude.non_json_output":
+        value = payload.get("line")
+        return {"line_char_count": len(value)} if isinstance(value, str) else {}
+
+    safe_keys = {
+        "session_id", "subtype", "tool_use_id", "tool_name", "name",
+        "status", "is_error", "stop_reason", "num_turns", "duration_ms",
+        "duration_api_ms", "total_cost_usd", "usage", "model",
+        "permission_mode", "error_code",
+    }
+    safe = {key: payload[key] for key in safe_keys if key in payload}
+    message = payload.get("message")
+    if isinstance(message, dict):
+        if isinstance(message.get("stop_reason"), str):
+            safe["stop_reason"] = message["stop_reason"]
+        if isinstance(message.get("model"), str):
+            safe["model"] = message["model"]
+        blocks = message.get("content")
+        if isinstance(blocks, list):
+            tools = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    tools.append({
+                        key: block[key] for key in ("id", "name")
+                        if isinstance(block.get(key), str)
+                    })
+                elif block.get("type") == "tool_result":
+                    content = block.get("content")
+                    tools.append({
+                        "tool_use_id": block.get("tool_use_id"),
+                        "result_char_count": len(content) if isinstance(content, str) else None,
+                        "is_error": bool(block.get("is_error", False)),
+                    })
+            if tools:
+                safe["tool_activity"] = tools
+    return safe
+
+
+def _persist_event(
+    turn_id: str, worker_id: str, event_type: str, payload: dict,
+) -> bool:
+    observed_at = now()
+    safe_payload = (
+        _safe_cli_event_payload(event_type, payload)
+        if event_type.startswith("claude.") or event_type == "assistant.delta"
+        else payload
+    )
     with SessionLocal() as db:
-        _event(db, turn_id, event_type, _bounded_payload(payload))
+        # Fence every event write just like lease renewal and turn completion.
+        # A stale process must not append records after its lease expires or is replaced.
+        result = db.execute(
+            update(AgentTurn)
+            .where(
+                AgentTurn.id == turn_id,
+                AgentTurn.status == "running",
+                AgentTurn.worker_id == worker_id,
+                AgentTurn.lease_expires_at > observed_at,
+            )
+            .values(updated_at=AgentTurn.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return False
+        _event(db, turn_id, event_type, _bounded_payload(safe_payload))
         db.commit()
+        return True
 
 
 def _extract_text(event: dict) -> str | None:
@@ -421,6 +587,8 @@ def _finish_turn(
 
 async def execute_turn(turn_id: str, worker_id: str) -> None:
     proc: asyncio.subprocess.Process | None = None
+    broker_server: asyncio.AbstractServer | None = None
+    broker_socket_host: Path | None = None
     final_text: str | None = None
     exit_code: int | None = None
     error: str | None = None
@@ -445,11 +613,13 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         turn_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = turn_dir / "stdout.jsonl"
         stderr_path = turn_dir / "stderr.log"
-        if project is not None and sandbox_mode() == "bubblewrap":
-            raise RuntimeError(
-                "Project-scoped MCP is not yet supported inside Bubblewrap; refusing to expose the host database or runtime"
-            )
-        mcp_config = _write_mcp_config(turn_dir, project.id if project else None, turn_id)
+        stderr_bytes = 0
+        use_mcp_broker = bool(project is not None and sandbox_mode() == "bubblewrap")
+        if use_mcp_broker:
+            broker_server, broker_socket_host = await _start_mcp_broker(turn_dir, project.id, workspace)
+        mcp_config = _write_mcp_config(
+            turn_dir, project.id if project else None, broker_socket=use_mcp_broker,
+        )
         claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
         claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if claude_config_dir.is_symlink():
@@ -460,10 +630,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         subprocess_env["CLAUDE_CONFIG_DIR"] = str(claude_config_dir)
         invocation = build_sandbox_invocation(
             command, workspace, turn_dir, "plan", subprocess_env,
-            mcp_config_path=mcp_config, execution_kind="task",
+            mcp_config_path=mcp_config, execution_kind="master_agent",
             claude_config_dir=claude_config_dir,
+            mcp_broker_socket_path=broker_socket_host,
+            mcp_runtime_paths=_mcp_runtime_paths() if broker_socket_host else (),
         )
-        _persist_event(turn_id, "turn.executor_started", {
+        _persist_event(turn_id, worker_id, "turn.executor_started", {
             "command": [
                 "<claude>", "--print", "--output-format", "stream-json",
                 "--verbose", "--include-partial-messages", "--permission-mode", "default",
@@ -507,14 +679,22 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 assert proc is not None and proc.stdout is not None
                 while line := await proc.stdout.readline():
                     decoded = line.decode("utf-8", errors="replace")
-                    out.write(decoded)
-                    out.flush()
                     try:
                         event = json.loads(decoded)
                     except json.JSONDecodeError:
-                        _persist_event(turn_id, "claude.non_json_output", {"line": decoded[:4000]})
+                        out.write(json.dumps({
+                            "event_type": "claude.non_json_output",
+                            "payload": {"line_char_count": len(decoded)},
+                        }) + "\n")
+                        out.flush()
+                        _persist_event(turn_id, worker_id, "claude.non_json_output", {"line": decoded[:4000]})
                         continue
                     event_type = str(event.get("type", "unknown"))
+                    safe_payload = _safe_cli_event_payload(f"claude.{event_type}", event)
+                    out.write(json.dumps({
+                        "event_type": f"claude.{event_type}", "payload": safe_payload,
+                    }, ensure_ascii=False) + "\n")
+                    out.flush()
                     observed_session = event.get("session_id")
                     if observed_session:
                         _persist_session_id(turn_id, worker_id, str(observed_session))
@@ -525,15 +705,17 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                         nested = event.get("event") or {}
                         delta = nested.get("delta") or {}
                         if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
-                            _persist_event(turn_id, "assistant.delta", {"text": delta["text"]})
+                            _persist_event(turn_id, worker_id, "assistant.delta", {"text": delta["text"]})
                     elif event_type in {"system", "assistant", "result", "user", "tool_use", "tool_result"}:
-                        _persist_event(turn_id, f"claude.{event_type}", event)
+                        _persist_event(turn_id, worker_id, f"claude.{event_type}", event)
 
             async def read_stderr() -> None:
+                nonlocal stderr_bytes
                 assert proc is not None and proc.stderr is not None
                 while chunk := await proc.stderr.read(4096):
-                    err.write(chunk.decode("utf-8", errors="replace"))
-                    err.flush()
+                    stderr_bytes += len(chunk)
+                err.write(json.dumps({"stderr_bytes": stderr_bytes}) + "\n")
+                err.flush()
 
             readers = [asyncio.create_task(read_stdout()), asyncio.create_task(read_stderr())]
             deadline = asyncio.get_running_loop().time() + TURN_TIMEOUT_SECONDS
@@ -549,7 +731,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     stopped = await _terminate(proc)
                     terminal_status = "cancelled"
                     error = "Cancelled by request"
-                    _persist_event(turn_id, "turn.cancelled", {
+                    _persist_event(turn_id, worker_id, "turn.cancelled", {
                         "reason": "cancel_requested",
                         "process_tree_stopped": stopped,
                     })
@@ -559,7 +741,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     stopped = await _terminate(proc)
                     terminal_status = "failed"
                     error = f"Master Agent turn timed out after {TURN_TIMEOUT_SECONDS} seconds"
-                    _persist_event(turn_id, "turn.timed_out", {
+                    _persist_event(turn_id, worker_id, "turn.timed_out", {
                         "timeout_seconds": TURN_TIMEOUT_SECONDS,
                         "process_tree_stopped": stopped,
                     })
@@ -568,7 +750,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     if not _renew_lease(turn_id, worker_id):
                         stopped = await _terminate(proc)
                         error = "Master Agent worker lost its turn lease"
-                        _persist_event(turn_id, "turn.lease_lost", {
+                        _persist_event(turn_id, worker_id, "turn.lease_lost", {
                             "process_tree_stopped": stopped,
                         })
                         await asyncio.gather(*readers, return_exceptions=True)
@@ -581,13 +763,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             elif exit_code == 0 and final_text:
                 terminal_status = "succeeded"
             else:
-                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
                 error = (
                     f"Claude Code exited with code {exit_code} without a final assistant response"
                     if exit_code == 0 else f"Claude Code exited with code {exit_code}"
                 )
-                if stderr_text.strip():
-                    error += f": {stderr_text.strip()[-2000:]}"
+                if stderr_bytes:
+                    error += f": stderr output present ({stderr_bytes} bytes; content not retained)"
         _finish_turn(
             turn_id, worker_id, terminal_status,
             assistant_text=final_text if terminal_status == "succeeded" else None,
@@ -596,7 +777,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
     except asyncio.CancelledError:
         if proc is not None:
             stopped = await _terminate(proc)
-            _persist_event(turn_id, "turn.worker_interrupted", {
+            _persist_event(turn_id, worker_id, "turn.worker_interrupted", {
                 "reason": "worker_shutdown", "process_tree_stopped": stopped,
             })
         _finish_turn(
@@ -607,8 +788,17 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         raise
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        _persist_event(turn_id, "turn.executor_failed", {"error": error})
+        _persist_event(turn_id, worker_id, "turn.executor_failed", {"error": error})
         _finish_turn(turn_id, worker_id, "failed", error=error, exit_code=exit_code)
+    finally:
+        if broker_server is not None:
+            broker_server.close()
+            await broker_server.wait_closed()
+        if broker_socket_host is not None:
+            try:
+                broker_socket_host.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 async def run_master_agent() -> None:

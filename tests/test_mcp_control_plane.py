@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -253,3 +257,16 @@ def test_json_rpc_request_id_reuse_with_different_arguments_is_rejected(monkeypa
             assert len(list(db.scalars(select(Task)))) == 1
     finally:
         engine.dispose()
+
+
+def test_broker_client_import_does_not_initialize_host_database(tmp_path):
+    db_path = tmp_path / "host-storage" / "awos.db"
+    env = os.environ.copy()
+    env["AI_WORK_OS_MCP_BROKER_SOCKET"] = str(tmp_path / "missing-broker.sock")
+    env["AI_WORK_OS_DB"] = str(db_path)
+    code = (
+        "import sys; import ai_work_os.mcp_control_plane; "
+        "assert 'ai_work_os.db' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)
+    assert not db_path.parent.exists()

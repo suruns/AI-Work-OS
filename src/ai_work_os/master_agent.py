@@ -190,13 +190,12 @@ def build_master_command(
         "--output-format", "stream-json", "--verbose",
         "--include-partial-messages",
         "--append-system-prompt", SYSTEM_PROMPT,
-        "--permission-mode", "default",
+        "--permission-mode", "plan",
         "--tools", "Read,Glob,Grep",
         "--permission-prompts", "none",
         "--restricted",
         "--strict-mcp-config", "--mcp-config", str(mcp_config_path),
-        "--allowedTools", "mcp__awos__*",
-        "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit",
+        "--disallowedTools", "mcp__*", "Bash", "Edit", "Write", "NotebookEdit",
         "--max-turns", str(MAX_TURNS),
     ]
     if MASTER_MODEL:
@@ -232,10 +231,35 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> P
     return path
 
 
-def _persist_event(turn_id: str, event_type: str, payload: dict) -> None:
+def _persist_event(
+    turn_id: str, worker_id: str, event_type: str, payload: dict,
+) -> bool:
+    observed_at = now()
+    safe_payload = (
+        _safe_cli_event_payload(event_type, payload)
+        if event_type.startswith("claude.") or event_type == "assistant.delta"
+        else payload
+    )
     with SessionLocal() as db:
-        _event(db, turn_id, event_type, _bounded_payload(payload))
+        # Fence every event write just like lease renewal and turn completion.
+        # A stale process must not append records after its lease expires or is replaced.
+        result = db.execute(
+            update(AgentTurn)
+            .where(
+                AgentTurn.id == turn_id,
+                AgentTurn.status == "running",
+                AgentTurn.worker_id == worker_id,
+                AgentTurn.lease_expires_at > observed_at,
+            )
+            .values(updated_at=AgentTurn.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return False
+        _event(db, turn_id, event_type, _bounded_payload(safe_payload))
         db.commit()
+        return True
 
 
 def _extract_text(event: dict) -> str | None:
@@ -435,7 +459,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             conversation = db.get(Conversation, turn.conversation_id)
             user_message = db.get(ConversationMessage, turn.user_message_id)
             project = db.get(Project, conversation.project_id) if conversation and conversation.project_id else None
-            session_id = conversation.cli_session_id or turn.cli_session_id
+            session_id = turn.cli_session_id
             if conversation is None or user_message is None:
                 raise RuntimeError("AgentTurn is missing its conversation or user message")
             prompt = user_message.content
@@ -445,11 +469,9 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         turn_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = turn_dir / "stdout.jsonl"
         stderr_path = turn_dir / "stderr.log"
-        if project is not None and sandbox_mode() == "bubblewrap":
-            raise RuntimeError(
-                "Project-scoped MCP is not yet supported inside Bubblewrap; refusing to expose the host database or runtime"
-            )
-        mcp_config = _write_mcp_config(turn_dir, project.id if project else None, turn_id)
+        stderr_bytes = 0
+        stderr_bytes = 0
+        mcp_config = _write_empty_mcp_config(turn_dir)
         claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
         claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if claude_config_dir.is_symlink():
@@ -463,23 +485,22 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             mcp_config_path=mcp_config, execution_kind="task",
             claude_config_dir=claude_config_dir,
         )
-        _persist_event(turn_id, "turn.executor_started", {
+        _persist_event(turn_id, worker_id, worker_id, "turn.executor_started", {
             "command": [
                 "<claude>", "--print", "--output-format", "stream-json",
-                "--verbose", "--include-partial-messages", "--permission-mode", "default",
+                "--verbose", "--include-partial-messages", "--permission-mode", "plan",
                 "--tools", "Read,Glob,Grep", "--permission-prompts", "none", "--setting-sources", "project,local",
                 "--strict-mcp-config", "--mcp-config", "<isolated-mcp-config>",
-                "--allowedTools", "mcp__awos__*",
-                "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit",
+                "--disallowedTools", "mcp__*", "Bash", "Edit", "Write", "NotebookEdit",
                 "--max-turns", str(MAX_TURNS),
                 *(["--resume", "<persisted-session-id>"] if session_id else []),
             ],
             "workspace": str(workspace),
             "claude_config_dir": str(claude_config_dir),
-            "permission_mode": "default",
+            "permission_mode": "plan",
             "configured_model": MASTER_MODEL or "cli_default",
-            "tool_policy": "read_only_builtin_tools_with_allowlisted_project_mcp",
-            "mcp_policy": "conversation_project_allowlist" if project else "disabled_projectless",
+            "tool_policy": "deny_shell_and_file_edits",
+            "mcp_policy": "deny_all",
             "sandbox": invocation.metadata,
             "timeout_seconds": TURN_TIMEOUT_SECONDS,
             "stdout_path": str(stdout_path),
@@ -507,14 +528,22 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 assert proc is not None and proc.stdout is not None
                 while line := await proc.stdout.readline():
                     decoded = line.decode("utf-8", errors="replace")
-                    out.write(decoded)
-                    out.flush()
                     try:
                         event = json.loads(decoded)
                     except json.JSONDecodeError:
-                        _persist_event(turn_id, "claude.non_json_output", {"line": decoded[:4000]})
+                        out.write(json.dumps({
+                            "event_type": "claude.non_json_output",
+                            "payload": {"line_char_count": len(decoded)},
+                        }) + "\n")
+                        out.flush()
+                        _persist_event(turn_id, worker_id, worker_id, "claude.non_json_output", {"line": decoded[:4000]})
                         continue
                     event_type = str(event.get("type", "unknown"))
+                    safe_payload = _safe_cli_event_payload(f"claude.{event_type}", event)
+                    out.write(json.dumps({
+                        "event_type": f"claude.{event_type}", "payload": safe_payload,
+                    }, ensure_ascii=False) + "\n")
+                    out.flush()
                     observed_session = event.get("session_id")
                     if observed_session:
                         _persist_session_id(turn_id, worker_id, str(observed_session))
@@ -525,15 +554,17 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                         nested = event.get("event") or {}
                         delta = nested.get("delta") or {}
                         if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
-                            _persist_event(turn_id, "assistant.delta", {"text": delta["text"]})
+                            _persist_event(turn_id, worker_id, worker_id, "assistant.delta", {"text": delta["text"]})
                     elif event_type in {"system", "assistant", "result", "user", "tool_use", "tool_result"}:
-                        _persist_event(turn_id, f"claude.{event_type}", event)
+                        _persist_event(turn_id, worker_id, worker_id, f"claude.{event_type}", event)
 
             async def read_stderr() -> None:
+                nonlocal stderr_bytes
                 assert proc is not None and proc.stderr is not None
                 while chunk := await proc.stderr.read(4096):
-                    err.write(chunk.decode("utf-8", errors="replace"))
-                    err.flush()
+                    stderr_bytes += len(chunk)
+                err.write(json.dumps({"stderr_bytes": stderr_bytes}) + "\n")
+                err.flush()
 
             readers = [asyncio.create_task(read_stdout()), asyncio.create_task(read_stderr())]
             deadline = asyncio.get_running_loop().time() + TURN_TIMEOUT_SECONDS
@@ -549,7 +580,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     stopped = await _terminate(proc)
                     terminal_status = "cancelled"
                     error = "Cancelled by request"
-                    _persist_event(turn_id, "turn.cancelled", {
+                    _persist_event(turn_id, worker_id, worker_id, "turn.cancelled", {
                         "reason": "cancel_requested",
                         "process_tree_stopped": stopped,
                     })
@@ -559,7 +590,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     stopped = await _terminate(proc)
                     terminal_status = "failed"
                     error = f"Master Agent turn timed out after {TURN_TIMEOUT_SECONDS} seconds"
-                    _persist_event(turn_id, "turn.timed_out", {
+                    _persist_event(turn_id, worker_id, worker_id, "turn.timed_out", {
                         "timeout_seconds": TURN_TIMEOUT_SECONDS,
                         "process_tree_stopped": stopped,
                     })
@@ -568,7 +599,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     if not _renew_lease(turn_id, worker_id):
                         stopped = await _terminate(proc)
                         error = "Master Agent worker lost its turn lease"
-                        _persist_event(turn_id, "turn.lease_lost", {
+                        _persist_event(turn_id, worker_id, worker_id, "turn.lease_lost", {
                             "process_tree_stopped": stopped,
                         })
                         await asyncio.gather(*readers, return_exceptions=True)
@@ -581,13 +612,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             elif exit_code == 0 and final_text:
                 terminal_status = "succeeded"
             else:
-                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
                 error = (
                     f"Claude Code exited with code {exit_code} without a final assistant response"
                     if exit_code == 0 else f"Claude Code exited with code {exit_code}"
                 )
-                if stderr_text.strip():
-                    error += f": {stderr_text.strip()[-2000:]}"
+                if stderr_bytes:
+                    error += f": stderr output present ({stderr_bytes} bytes; content not retained)"
         _finish_turn(
             turn_id, worker_id, terminal_status,
             assistant_text=final_text if terminal_status == "succeeded" else None,
@@ -596,7 +626,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
     except asyncio.CancelledError:
         if proc is not None:
             stopped = await _terminate(proc)
-            _persist_event(turn_id, "turn.worker_interrupted", {
+            _persist_event(turn_id, worker_id, worker_id, "turn.worker_interrupted", {
                 "reason": "worker_shutdown", "process_tree_stopped": stopped,
             })
         _finish_turn(
@@ -607,7 +637,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         raise
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        _persist_event(turn_id, "turn.executor_failed", {"error": error})
+        _persist_event(turn_id, worker_id, worker_id, "turn.executor_failed", {"error": error})
         _finish_turn(turn_id, worker_id, "failed", error=error, exit_code=exit_code)
 
 

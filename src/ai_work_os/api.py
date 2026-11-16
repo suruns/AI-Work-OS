@@ -550,17 +550,26 @@ def update_conversation(conversation_id: str, body: ConversationUpdate) -> dict:
 def list_conversation_messages(
     conversation_id: str,
     after_id: int = Query(default=0, ge=0),
+    before_id: int = Query(default=0, ge=0),
     latest: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[ConversationMessage]:
     with SessionLocal() as db:
         if db.get(Conversation, conversation_id) is None:
             raise HTTPException(status_code=404, detail="conversation not found")
+        if after_id and before_id:
+            raise HTTPException(status_code=422, detail="after_id and before_id cannot be used together")
         query = select(ConversationMessage).where(
             ConversationMessage.conversation_id == conversation_id,
-            ConversationMessage.id > after_id,
         )
-        if latest and after_id == 0:
+        if after_id:
+            query = query.where(ConversationMessage.id > after_id)
+            return list(db.scalars(
+                query.order_by(ConversationMessage.id).limit(limit)
+            ))
+        if before_id:
+            query = query.where(ConversationMessage.id < before_id)
+        if latest or before_id:
             rows = list(db.scalars(
                 query.order_by(ConversationMessage.id.desc()).limit(limit)
             ))

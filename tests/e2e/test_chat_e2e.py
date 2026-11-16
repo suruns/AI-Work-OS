@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from playwright.sync_api import Page
+
+pytestmark = pytest.mark.e2e
 
 
 def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashboard):

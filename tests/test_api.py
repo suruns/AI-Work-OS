@@ -32,7 +32,7 @@ def test_health():
 
 
 def test_dashboard_task_selection_is_scoped_to_task_rows():
-    response = client.get("/")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     html = response.text
     # Workflow rows also use the shared .task styling class, but have no task data-id.
@@ -43,7 +43,7 @@ def test_dashboard_task_selection_is_scoped_to_task_rows():
 
 
 def test_dashboard_is_served():
-    response = client.get("/")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     assert "AI Work OS" in response.text
     assert "function renderTaskResult(events)" in response.text
@@ -2203,7 +2203,7 @@ def test_task_diagnostics_returns_404_for_missing_task():
 
 
 def test_dashboard_exposes_failure_analysis_and_execution_replay_entry_points():
-    response = client.get("/")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     assert '"/tasks/"+encodeURIComponent(id)+"/diagnostics"' in response.text
     assert "Failure analysis" in response.text

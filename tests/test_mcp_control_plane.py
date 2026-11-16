@@ -172,7 +172,7 @@ def test_create_task_json_rpc_retry_returns_original_result(monkeypatch, tmp_pat
             assert len(list(db.scalars(select(Task).where(Task.project_id == project_id)))) == 1
             records = list(db.scalars(select(MCPToolInvocation)))
             assert len(records) == 1
-            assert records[0].request_id == "task-call-1"
+            assert records[0].request_id == "s:task-call-1"
     finally:
         engine.dispose()
 

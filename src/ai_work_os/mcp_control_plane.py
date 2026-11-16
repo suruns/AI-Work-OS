@@ -35,10 +35,11 @@ class ToolError(ValueError):
     pass
 
 
-def _project(db) -> Project:
-    if not PROJECT_ID:
+def _project(db, project_id: str | None = None) -> Project:
+    bound_project_id = project_id if project_id is not None else PROJECT_ID
+    if not bound_project_id:
         raise ToolError("This conversation is not attached to a project.")
-    project = db.get(Project, PROJECT_ID)
+    project = db.get(Project, bound_project_id)
     if project is None:
         raise ToolError("The conversation project no longer exists.")
     return project
@@ -248,9 +249,13 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
     }
 
 
-def call_tool(name: str, args: dict, request_id: str | int | float | None = None) -> Any:
+def call_tool(
+    name: str, args: dict, request_id: str | int | float | None = None, *,
+    project_id: str | None = None, turn_id: str | None = None,
+) -> Any:
     if not isinstance(args, dict):
         raise ToolError("tool arguments must be an object")
+    invocation_turn_id = turn_id or TURN_ID
     if name in {"create_task", "create_workflow"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
             raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
@@ -259,7 +264,7 @@ def call_tool(name: str, args: dict, request_id: str | int | float | None = None
         request_key = ("s:" if isinstance(request_id, str) else "n:") + str(request_id)
         if not request_key or len(request_key) > 128:
             raise ToolError("JSON-RPC request id must contain 1 to 128 characters")
-        if not TURN_ID:
+        if not invocation_turn_id:
             raise ToolError("idempotent create calls require a Master Agent turn scope")
         arguments_hash = hashlib.sha256(
             json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -271,7 +276,7 @@ def call_tool(name: str, args: dict, request_id: str | int | float | None = None
     with SessionLocal() as db:
         if request_key is not None:
             previous = db.scalar(select(MCPToolInvocation).where(
-                MCPToolInvocation.turn_id == TURN_ID,
+                MCPToolInvocation.turn_id == invocation_turn_id,
                 MCPToolInvocation.request_id == request_key,
             ))
             if previous is not None:
@@ -279,7 +284,7 @@ def call_tool(name: str, args: dict, request_id: str | int | float | None = None
                     raise ToolError("JSON-RPC request id was already used with different tool arguments")
                 return previous.result
 
-        project = _project(db)
+        project = _project(db, project_id)
         if name == "get_project_overview":
             counts = {}
             for model, key in ((Task, "tasks"), (Workflow, "workflows")):
@@ -334,7 +339,7 @@ def call_tool(name: str, args: dict, request_id: str | int | float | None = None
                 db.commit()
                 return value
             db.add(MCPToolInvocation(
-                turn_id=TURN_ID, project_id=project.id,
+                turn_id=invocation_turn_id, project_id=project.id,
                 request_id=request_key, tool_name=name,
                 arguments_hash=arguments_hash, result=value,
             ))

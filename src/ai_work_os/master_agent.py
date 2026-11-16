@@ -232,6 +232,53 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> P
     return path
 
 
+def _safe_cli_event_payload(event_type: str, payload: dict) -> dict:
+    """Persist CLI event metadata only; never retain file contents, prompts, or tool arguments."""
+    if event_type == "assistant.delta":
+        value = payload.get("text")
+        return {"char_count": len(value)} if isinstance(value, str) else {}
+
+    if event_type == "claude.non_json_output":
+        value = payload.get("line")
+        return {"line_char_count": len(value)} if isinstance(value, str) else {}
+
+    safe_keys = {
+        "session_id", "subtype", "tool_use_id", "tool_name", "name",
+        "status", "is_error", "stop_reason", "num_turns", "duration_ms",
+        "duration_api_ms", "total_cost_usd", "usage", "model",
+        "permission_mode", "error_code",
+    }
+    safe = {key: payload[key] for key in safe_keys if key in payload}
+    message = payload.get("message")
+    if isinstance(message, dict):
+        if isinstance(message.get("stop_reason"), str):
+            safe["stop_reason"] = message["stop_reason"]
+        if isinstance(message.get("model"), str):
+            safe["model"] = message["model"]
+        blocks = message.get("content")
+        if isinstance(blocks, list):
+            tools = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    tools.append({
+                        key: block[key] for key in ("id", "name")
+                        if isinstance(block.get(key), str)
+                    })
+                elif block.get("type") == "tool_result":
+                    content = block.get("content")
+                    tools.append({
+                        "tool_use_id": block.get("tool_use_id"),
+                        "result_char_count": len(content) if isinstance(content, str) else None,
+                        "is_error": bool(block.get("is_error", False)),
+                    })
+            if tools:
+                safe["tool_activity"] = tools
+    return safe
+
+
+
 def _persist_event(
     turn_id: str, worker_id: str, event_type: str, payload: dict,
 ) -> bool:

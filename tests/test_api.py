@@ -3209,7 +3209,7 @@ def test_chat_history_latest_pages_and_incremental_event_cursor(tmp_path):
         f"/conversations/{conversation_id}/messages",
         params={"before_id": message_ids[3], "limit": 2},
     )
-    assert [item["id"] for item in older_messages.json()] == message_ids[:2]
+    assert [item["id"] for item in older_messages.json()] == message_ids[1:3]
     invalid_cursor = client.get(
         f"/conversations/{conversation_id}/messages",
         params={"after_id": message_ids[0], "before_id": message_ids[3]},

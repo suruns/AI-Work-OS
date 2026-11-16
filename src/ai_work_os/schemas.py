@@ -126,3 +126,66 @@ class ProjectRead(BaseModel):
     counts: dict[str, dict[str, int]]
     model_config = {"from_attributes": True}
 
+class ConversationCreate(BaseModel):
+    project_id: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+
+
+class ConversationUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    status: Literal["active", "archived"] | None = None
+
+
+class ConversationMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=100_000)
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ConversationRead(BaseModel):
+    id: str
+    project_id: str | None
+    title: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+    message_count: int
+    pending_turn_count: int
+    last_message: dict | None = None
+
+
+class ConversationMessageRead(BaseModel):
+    id: int
+    conversation_id: str
+    role: str
+    content: str
+    client_message_id: str | None
+    metadata: dict = Field(validation_alias="message_metadata")
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class AgentTurnRead(BaseModel):
+    id: str
+    conversation_id: str
+    user_message_id: int
+    assistant_message_id: int | None
+    status: str
+    adapter: str
+    cli_session_id: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    error_summary: str | None
+    created_at: datetime
+    updated_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class AgentTurnEventRead(BaseModel):
+    id: int
+    turn_id: str
+    occurred_at: datetime
+    event_type: str
+    payload: dict
+    model_config = {"from_attributes": True}
+

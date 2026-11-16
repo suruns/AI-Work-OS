@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
@@ -123,6 +123,56 @@ class WorkflowTaskDependency(Base):
     upstream_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
     downstream_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
     workflow: Mapped[Workflow] = relationship(back_populates="dependencies")
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(240), default="New conversation", nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="active", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "client_message_id", name="uq_conversation_client_message"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(24), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    client_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    message_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class AgentTurn(Base):
+    __tablename__ = "agent_turns"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_message_id: Mapped[int] = mapped_column(ForeignKey("conversation_messages.id", ondelete="RESTRICT"), nullable=False, unique=True)
+    assistant_message_id: Mapped[int | None] = mapped_column(ForeignKey("conversation_messages.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False, index=True)
+    adapter: Mapped[str] = mapped_column(String(64), default="claude-code", nullable=False)
+    cli_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class AgentTurnEvent(Base):
+    __tablename__ = "agent_turn_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("agent_turns.id", ondelete="CASCADE"), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
 
 class Worker(Base):
     """Last-known liveness record for a long-running task worker process."""

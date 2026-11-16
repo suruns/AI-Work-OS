@@ -219,8 +219,14 @@ def _write_mcp_config(
             fd = -1
             if project_id:
                 server_env = (
-                    {"AI_WORK_OS_MCP_BROKER_SOCKET": "/run/awos-mcp.sock"}
-                    if broker_socket else {"AI_WORK_OS_MCP_PROJECT_ID": project_id}
+                    {
+                        "AI_WORK_OS_MCP_BROKER_SOCKET": "/run/awos-mcp.sock",
+                        "AI_WORK_OS_MCP_TURN_ID": turn_dir.name,
+                    }
+                    if broker_socket else {
+                        "AI_WORK_OS_MCP_PROJECT_ID": project_id,
+                        "AI_WORK_OS_MCP_TURN_ID": turn_dir.name,
+                    }
                 )
                 config = {"mcpServers": {"awos": {
                     "type": "stdio", "command": sys.executable,
@@ -238,7 +244,8 @@ def _write_mcp_config(
 
 
 async def _handle_mcp_broker(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, project_id: str,
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    project_id: str, turn_id: str,
 ) -> None:
     from .mcp_control_plane import ToolError, call_tool
     try:
@@ -248,9 +255,15 @@ async def _handle_mcp_broker(
         request = json.loads(raw)
         name = request.get("name")
         arguments = request.get("arguments", {})
+        request_id = request.get("request_id")
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ToolError("invalid MCP broker request")
-        value = await asyncio.to_thread(call_tool, name, arguments, project_id=project_id)
+        if name in {"create_task", "create_workflow"} and request_id is None:
+            raise ToolError("mutating MCP broker calls require a JSON-RPC request id")
+        value = await asyncio.to_thread(
+            call_tool, name, arguments, request_id,
+            project_id=project_id, turn_id=turn_id,
+        )
         response = {"ok": True, "value": value}
     except ToolError as exc:
         response = {"ok": False, "error": str(exc)[:2000]}
@@ -287,7 +300,7 @@ async def _start_mcp_broker(turn_dir: Path, project_id: str, workspace: Path):
             raise ValueError("MCP broker socket path is occupied by a non-socket file")
         socket_path.unlink()
     server = await asyncio.start_unix_server(
-        lambda reader, writer: _handle_mcp_broker(reader, writer, project_id),
+        lambda reader, writer: _handle_mcp_broker(reader, writer, project_id, turn_dir.name),
         path=str(socket_path), limit=1_000_001,
     )
     try:

@@ -70,6 +70,34 @@ def ensure_schema_compatibility() -> None:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN repair_attempt_count INTEGER NOT NULL DEFAULT 0"))
         connection.execute(text("UPDATE tasks SET available_at = created_at WHERE available_at IS NULL"))
 
+    if inspector.has_table("conversations"):
+        conversation_columns = {
+            column["name"] for column in inspector.get_columns("conversations")
+        }
+        with engine.begin() as connection:
+            if "cli_session_id" not in conversation_columns:
+                connection.execute(text(
+                    "ALTER TABLE conversations ADD COLUMN cli_session_id VARCHAR(128)"
+                ))
+            if inspector.has_table("agent_turns"):
+                connection.execute(text("""
+                    UPDATE conversations
+                    SET cli_session_id = (
+                        SELECT agent_turns.cli_session_id
+                        FROM agent_turns
+                        WHERE agent_turns.conversation_id = conversations.id
+                          AND agent_turns.cli_session_id IS NOT NULL
+                        ORDER BY agent_turns.created_at DESC, agent_turns.id DESC
+                        LIMIT 1
+                    )
+                    WHERE cli_session_id IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM agent_turns
+                        WHERE agent_turns.conversation_id = conversations.id
+                          AND agent_turns.cli_session_id IS NOT NULL
+                      )
+                """))
+
     if inspector.has_table("agent_turns"):
         turn_columns = {column["name"] for column in inspector.get_columns("agent_turns")}
         with engine.begin() as connection:
@@ -81,3 +109,14 @@ def ensure_schema_compatibility() -> None:
                 connection.execute(text("ALTER TABLE agent_turns ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0"))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_turns_worker_id ON agent_turns (worker_id)"))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_turns_lease_expires_at ON agent_turns (lease_expires_at)"))
+
+    if inspector.has_table("mcp_tool_invocations"):
+        invocation_columns = {
+            column["name"] for column in inspector.get_columns("mcp_tool_invocations")
+        }
+        if "arguments_hash" not in invocation_columns:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE mcp_tool_invocations "
+                    "ADD COLUMN arguments_hash VARCHAR(64) NOT NULL DEFAULT ''"
+                ))

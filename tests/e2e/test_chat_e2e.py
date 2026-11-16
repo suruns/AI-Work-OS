@@ -66,6 +66,7 @@ def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashbo
     page.locator(".message.user").filter(
         has_text="Please inspect this project"
     ).wait_for()
+    assert page.locator("#project-context").input_value() == project["id"]
     assert page.locator(".turn-chip").filter(has_text="cancelled").count() == 1
     assert page.locator("#event-list").get_by_text("turn.cancelled").count() == 1
 

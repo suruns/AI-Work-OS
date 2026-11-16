@@ -262,6 +262,7 @@ def call_tool(
     if SessionLocal is None:
         raise ToolError("Sandboxed MCP clients cannot access the database directly.")
     invocation_turn_id = turn_id or TURN_ID
+    bound_project_id = project_id if project_id is not None else PROJECT_ID
     if name in {"create_task", "create_workflow"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
             raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
@@ -286,8 +287,12 @@ def call_tool(
                 MCPToolInvocation.request_id == request_key,
             ))
             if previous is not None:
-                if previous.tool_name != name or previous.arguments_hash != arguments_hash:
-                    raise ToolError("JSON-RPC request id was already used with different tool arguments")
+                if (
+                    previous.project_id != bound_project_id
+                    or previous.tool_name != name
+                    or previous.arguments_hash != arguments_hash
+                ):
+                    raise ToolError("JSON-RPC request id was already used with different tool arguments or project scope")
                 return previous.result
 
         project = _project(db, project_id)

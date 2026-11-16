@@ -152,7 +152,7 @@ def test_finish_turn_persists_assistant_message_atomically(monkeypatch):
 
 def test_mcp_config_is_scoped_and_private(tmp_path):
     import json
-    path = master_agent._write_mcp_config(tmp_path, "project-123")
+    path = master_agent._write_mcp_config(tmp_path, "project-123", "turn-123")
     config = json.loads(path.read_text(encoding="utf-8"))
     server = config["mcpServers"]["awos"]
     assert server["args"] == ["-m", "ai_work_os.mcp_control_plane"]
@@ -162,7 +162,7 @@ def test_mcp_config_is_scoped_and_private(tmp_path):
 
 def test_projectless_mcp_config_disables_server(tmp_path):
     import json
-    path = master_agent._write_mcp_config(tmp_path, None)
+    path = master_agent._write_mcp_config(tmp_path, None, "turn-123")
     assert json.loads(path.read_text(encoding="utf-8")) == {"mcpServers": {}}
 
 def test_cancel_queued_turn_is_terminal_and_audited(monkeypatch):

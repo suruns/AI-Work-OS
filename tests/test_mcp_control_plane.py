@@ -223,9 +223,33 @@ def test_json_rpc_request_id_cannot_be_reused_for_another_tool(monkeypatch, tmp_
             }},
         })
         assert conflict["result"]["isError"] is True
-        assert "different tool" in conflict["result"]["content"][0]["text"]
+        assert "different tool arguments" in conflict["result"]["content"][0]["text"]
         with factory() as db:
             assert len(list(db.scalars(select(Task)))) == 1
             assert len(list(db.scalars(select(Workflow)))) == 0
+    finally:
+        engine.dispose()
+
+ 
+def test_json_rpc_request_id_reuse_with_different_arguments_is_rejected(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        first = mcp._reply({
+            "jsonrpc": "2.0", "id": "same-id", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "Original", "prompt": "Original arguments",
+            }},
+        })
+        assert first["result"]["isError"] is False
+        retry = mcp._reply({
+            "jsonrpc": "2.0", "id": "same-id", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "Different", "prompt": "Different arguments",
+            }},
+        })
+        assert retry["result"]["isError"] is True
+        assert "different tool arguments" in retry["result"]["content"][0]["text"]
+        with factory() as db:
+            assert len(list(db.scalars(select(Task)))) == 1
     finally:
         engine.dispose()

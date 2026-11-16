@@ -19,6 +19,9 @@ def _walk(value):
     if isinstance(value, dict):
         if value.get("type") == "tool_use" and isinstance(value.get("name"), str):
             yield value["name"]
+        for item in value.get("tool_activity") or []:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                yield item["name"]
         for child in value.values():
             yield from _walk(child)
     elif isinstance(value, list):

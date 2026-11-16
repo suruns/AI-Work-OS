@@ -3205,6 +3205,16 @@ def test_chat_history_latest_pages_and_incremental_event_cursor(tmp_path):
         params={"latest": True, "limit": 2},
     )
     assert [item["id"] for item in latest_messages.json()] == message_ids[-2:]
+    older_messages = client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"before_id": message_ids[3], "limit": 2},
+    )
+    assert [item["id"] for item in older_messages.json()] == message_ids[:2]
+    invalid_cursor = client.get(
+        f"/conversations/{conversation_id}/messages",
+        params={"after_id": message_ids[0], "before_id": message_ids[3]},
+    )
+    assert invalid_cursor.status_code == 422
     assert [item["id"] for item in client.get(
         f"/conversations/{conversation_id}/messages",
         params={"after_id": message_ids[2], "limit": 2},
@@ -3240,4 +3250,6 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert 'latest=true&limit=500' in html
     assert 'after_id="+lastMessageId' in html
     assert 'eventCursors.get(t.id)' in html
+    assert 'before_id="+messages[0].id' in html
+    assert 'id="load-older-messages"' in html
     assert 'after_id="+cursor' in html

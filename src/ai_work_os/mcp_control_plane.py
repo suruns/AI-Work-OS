@@ -364,6 +364,8 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
+            if name in {"create_task", "create_workflow"} and request_id is None:
+                raise ToolError("mutating MCP tool calls require a JSON-RPC request id")
             value = call_tool(name, args, request_id=request_id)
             return {"jsonrpc": "2.0", "id": request_id, "result": {
                 "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}],

@@ -178,6 +178,21 @@ class AgentTurnEvent(Base):
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class MCPToolInvocation(Base):
+    """Durable idempotency record for a mutating MCP tool call within one AgentTurn."""
+    __tablename__ = "mcp_tool_invocations"
+    __table_args__ = (
+        UniqueConstraint("turn_id", "request_id", name="uq_mcp_invocation_turn_request"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("agent_turns.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class Worker(Base):
     """Last-known liveness record for a long-running task worker process."""
     __tablename__ = "workers"

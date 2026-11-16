@@ -268,3 +268,71 @@ def test_bubblewrap_rejects_claude_session_directory_inside_workspace(tmp_path, 
             {"PATH": f"{claude.parent}:{fake_bin}"},
             claude_config_dir=state_dir,
         )
+
+
+def test_master_agent_mcp_broker_socket_and_runtime_are_narrow_mounts(tmp_path, monkeypatch):
+    workspace, task_dir, fake_bin = tmp_path / "workspace", tmp_path / "task", tmp_path / "bin"
+    runtime, socket_dir = tmp_path / "python-runtime", tmp_path / "broker"
+    workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir(); runtime.mkdir(); (runtime / "ai_work_os").mkdir(); socket_dir.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    import socket
+    broker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    broker_path = socket_dir / "broker.sock"
+    broker.bind(str(broker_path))
+    broker_path.chmod(0o600)
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    result = build_sandbox_invocation(
+        [str(claude), "--print"], workspace, task_dir, "plan",
+        {"PATH": f"{claude.parent}:{fake_bin}"}, execution_kind="master_agent",
+        mcp_broker_socket_path=broker_path, mcp_runtime_paths=(runtime,),
+    )
+    try:
+        command = result.command
+        binds = [command[i:i+3] for i in range(len(command)-2) if command[i] == "--bind"]
+        ro_binds = [command[i:i+3] for i in range(len(command)-2) if command[i] == "--ro-bind"]
+        assert ["--bind", str(broker_path.resolve()), "/run/awos-mcp.sock"] in binds
+        assert command.index("--bind") < command.index("--tmpfs")
+        assert ["--ro-bind", str(runtime.resolve()), str(runtime.resolve())] in ro_binds
+        assert result.metadata["mcp_broker_socket"] == "/run/awos-mcp.sock"
+        assert result.metadata["execution_kind"] == "master_agent"
+        assert result.env["PYTHONPATH"] == str(runtime.resolve())
+    finally:
+        broker.close()
+
+
+def test_master_agent_mcp_broker_rejects_non_socket_path(tmp_path, monkeypatch):
+    workspace, task_dir, fake_bin = tmp_path / "workspace", tmp_path / "task", tmp_path / "bin"
+    workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    regular = tmp_path / "not-a-socket"
+    regular.write_text("no")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    with pytest.raises(ValueError, match="Unix domain socket"):
+        build_sandbox_invocation(
+            [str(claude)], workspace, task_dir, "plan", {"PATH": f"{claude.parent}:{fake_bin}"},
+            execution_kind="master_agent", mcp_broker_socket_path=regular,
+        )
+
+
+def test_master_agent_mcp_runtime_rejects_home_directory_mount(tmp_path, monkeypatch):
+    workspace, task_dir, fake_bin = tmp_path / "workspace", tmp_path / "task", tmp_path / "bin"
+    workspace.mkdir(); task_dir.mkdir(); fake_bin.mkdir()
+    bwrap = fake_bin / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    claude, _node = _fake_claude_runtime(workspace / "runtime")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_BWRAP_BIN", str(bwrap))
+    with pytest.raises(ValueError, match="too broad"):
+        build_sandbox_invocation(
+            [str(claude)], workspace, task_dir, "plan", {"PATH": f"{claude.parent}:{fake_bin}"},
+            execution_kind="master_agent", mcp_runtime_paths=(Path.home(),),
+        )

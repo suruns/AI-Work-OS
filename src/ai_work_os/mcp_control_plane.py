@@ -12,16 +12,18 @@ import sys
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import (
-    Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, utcnow,
+    Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, utcnow,
 )
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
+TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
 PROTOCOL_VERSION = "2024-11-05"
 MAX_MESSAGE_BYTES = 1_000_000
 MAX_LIMIT = 50
@@ -153,8 +155,7 @@ def _create_task(db, project: Project, args: dict) -> dict:
         "status": "queued", "project_id": project.id,
         "created_via": "master_agent_mcp",
     }))
-    db.commit()
-    db.refresh(task)
+    db.flush()
     return _task_summary(task)
 
 
@@ -234,8 +235,7 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
             "status": "queued", "workflow_id": workflow.id,
             "project_id": project.id, "created_via": "master_agent_mcp",
         }))
-    db.commit()
-    db.refresh(workflow)
+    db.flush()
     return {
         **_workflow_summary(db, workflow),
         "tasks": [{"key": key, **_task_summary(task)} for key, task in created.items()],
@@ -246,10 +246,31 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
     }
 
 
-def call_tool(name: str, args: dict) -> Any:
+def call_tool(name: str, args: dict, request_id: str | int | None = None) -> Any:
     if not isinstance(args, dict):
         raise ToolError("tool arguments must be an object")
+    if name in {"create_task", "create_workflow"} and request_id is not None:
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+            raise ToolError("create tool calls require a string or integer JSON-RPC request id")
+        request_key = str(request_id)
+        if not request_key or len(request_key) > 128:
+            raise ToolError("JSON-RPC request id must contain 1 to 128 characters")
+        if not TURN_ID:
+            raise ToolError("idempotent create calls require a Master Agent turn scope")
+    else:
+        request_key = None
+
     with SessionLocal() as db:
+        if request_key is not None:
+            previous = db.scalar(select(MCPToolInvocation).where(
+                MCPToolInvocation.turn_id == TURN_ID,
+                MCPToolInvocation.request_id == request_key,
+            ))
+            if previous is not None:
+                if previous.tool_name != name:
+                    raise ToolError("JSON-RPC request id was already used for a different tool")
+                return previous.result
+
         project = _project(db)
         if name == "get_project_overview":
             counts = {}
@@ -295,10 +316,31 @@ def call_tool(name: str, args: dict) -> Any:
             return {**_workflow_summary(db, workflow), "tasks": [_task_summary(task) for task in tasks],
                     "dependencies": [{"upstream_task_id": edge.upstream_task_id,
                                       "downstream_task_id": edge.downstream_task_id} for edge in edges]}
-        if name == "create_task":
-            return _create_task(db, project, args)
-        if name == "create_workflow":
-            return _create_workflow(db, project, args)
+        if name in {"create_task", "create_workflow"}:
+            value = (
+                _create_task(db, project, args)
+                if name == "create_task"
+                else _create_workflow(db, project, args)
+            )
+            if request_key is None:
+                db.commit()
+                return value
+            db.add(MCPToolInvocation(
+                turn_id=TURN_ID, project_id=project.id,
+                request_id=request_key, tool_name=name, result=value,
+            ))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                previous = db.scalar(select(MCPToolInvocation).where(
+                    MCPToolInvocation.turn_id == TURN_ID,
+                    MCPToolInvocation.request_id == request_key,
+                ))
+                if previous is None or previous.tool_name != name:
+                    raise ToolError("tool call idempotency conflict")
+                return previous.result
+            return value
     raise ToolError(f"unknown tool: {name}")
 
 
@@ -322,7 +364,7 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            value = call_tool(name, args)
+            value = call_tool(name, args, request_id=request_id)
             return {"jsonrpc": "2.0", "id": request_id, "result": {
                 "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}],
                 "isError": False,

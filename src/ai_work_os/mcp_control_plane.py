@@ -259,6 +259,8 @@ def call_tool(
 ) -> Any:
     if not isinstance(args, dict):
         raise ToolError("tool arguments must be an object")
+    if SessionLocal is None:
+        raise ToolError("Sandboxed MCP clients cannot access the database directly.")
     invocation_turn_id = turn_id or TURN_ID
     if name in {"create_task", "create_workflow"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):

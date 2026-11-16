@@ -56,7 +56,7 @@ def main() -> int:
         from ai_work_os.db import Base, SessionLocal, engine
         from ai_work_os.models import (
             AgentTurn, AgentTurnEvent, Conversation, ConversationMessage,
-            Project, Task, Worker, Workflow, WorkflowTaskDependency,
+            MCPToolInvocation, Project, Task, Worker, Workflow, WorkflowTaskDependency,
         )
         from ai_work_os.master_agent import _claim_turn, execute_turn
 
@@ -144,8 +144,13 @@ Do not use shell commands or file-editing tools."""
             second_events = list(db.scalars(select(AgentTurnEvent).where(
                 AgentTurnEvent.turn_id == second_turn_id
             )))
+            invocations = list(db.scalars(select(MCPToolInvocation).where(
+                MCPToolInvocation.turn_id == first_turn_id
+            )))
             second_message = db.get(ConversationMessage, second_turn.assistant_message_id)
             second_text = second_message.content if second_message else ""
+        first_stdout = (storage / "master-agent" / first_turn_id / "stdout.jsonl").read_text(encoding="utf-8")
+        first_stderr = (storage / "master-agent" / first_turn_id / "stderr.log").read_text(encoding="utf-8")
         called = {
             _normalize_tool_name(name)
             for event in first_events
@@ -165,6 +170,7 @@ Do not use shell commands or file-editing tools."""
             not missing
             and len(project_tasks) == 4
             and len(workflows) == 1
+            and len(invocations) == 2
             and len(edges) == 2
             and len(workers) == 0
             and len(workflows) == 1 and workflows[0].status == "queued"
@@ -184,6 +190,13 @@ Do not use shell commands or file-editing tools."""
             and "--resume" not in first_start.payload.get("command", [])
             and "--resume" in second_start.payload.get("command", [])
             and db_text not in json.dumps(first_start.payload if first_start else {})
+            and all(
+                not ({"content", "input", "text", "result", "line"} & set((event.payload or {}).keys()))
+                for event in first_events if event.event_type.startswith("claude.")
+            )
+            and "Bubblewrap MCP task" not in first_stdout
+            and "Bubblewrap MCP DAG" not in first_stdout
+            and "stderr_bytes" in first_stderr
             and not first_socket.exists() and not second_socket.exists()
         )
         first_config_path = storage / "master-agent" / first_turn_id / "mcp-config.isolated.json"
@@ -201,6 +214,7 @@ Do not use shell commands or file-editing tools."""
         print("PASS: Bubblewrap project MCP broker, queued DAG, and resumed follow-up session")
         print("tools=" + ",".join(sorted(required)))
         print(f"tasks={len(project_tasks)} workflows={len(workflows)} dag_edges={len(edges)} workers={len(workers)}")
+        print(f"mcp_invocations={len(invocations)} event_redaction=passed")
         print(f"session_id={conversation.cli_session_id}")
         print("broker_socket_cleanup=passed")
         return 0

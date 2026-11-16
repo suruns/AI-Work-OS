@@ -6,7 +6,9 @@ Claude Code. It is launched as a child of the trusted Master Agent turn.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -246,19 +248,25 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
     }
 
 
-def call_tool(name: str, args: dict, request_id: str | int | None = None) -> Any:
+def call_tool(name: str, args: dict, request_id: str | int | float | None = None) -> Any:
     if not isinstance(args, dict):
         raise ToolError("tool arguments must be an object")
     if name in {"create_task", "create_workflow"} and request_id is not None:
-        if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
-            raise ToolError("create tool calls require a string or integer JSON-RPC request id")
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
+            raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
+        if isinstance(request_id, float) and not math.isfinite(request_id):
+            raise ToolError("JSON-RPC request id must be finite")
         request_key = str(request_id)
         if not request_key or len(request_key) > 128:
             raise ToolError("JSON-RPC request id must contain 1 to 128 characters")
         if not TURN_ID:
             raise ToolError("idempotent create calls require a Master Agent turn scope")
+        arguments_hash = hashlib.sha256(
+            json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
     else:
         request_key = None
+        arguments_hash = None
 
     with SessionLocal() as db:
         if request_key is not None:
@@ -267,8 +275,8 @@ def call_tool(name: str, args: dict, request_id: str | int | None = None) -> Any
                 MCPToolInvocation.request_id == request_key,
             ))
             if previous is not None:
-                if previous.tool_name != name:
-                    raise ToolError("JSON-RPC request id was already used for a different tool")
+                if previous.tool_name != name or previous.arguments_hash != arguments_hash:
+                    raise ToolError("JSON-RPC request id was already used with different tool arguments")
                 return previous.result
 
         project = _project(db)
@@ -327,7 +335,8 @@ def call_tool(name: str, args: dict, request_id: str | int | None = None) -> Any
                 return value
             db.add(MCPToolInvocation(
                 turn_id=TURN_ID, project_id=project.id,
-                request_id=request_key, tool_name=name, result=value,
+                request_id=request_key, tool_name=name,
+                arguments_hash=arguments_hash, result=value,
             ))
             try:
                 db.commit()
@@ -337,7 +346,7 @@ def call_tool(name: str, args: dict, request_id: str | int | None = None) -> Any
                     MCPToolInvocation.turn_id == TURN_ID,
                     MCPToolInvocation.request_id == request_key,
                 ))
-                if previous is None or previous.tool_name != name:
+                if previous is None or previous.tool_name != name or previous.arguments_hash != arguments_hash:
                     raise ToolError("tool call idempotency conflict")
                 return previous.result
             return value

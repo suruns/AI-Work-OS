@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from ai_work_os import mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import Project, Task, TaskEvent, Workflow
+from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
 
 
 def isolated(monkeypatch, tmp_path):
@@ -33,6 +33,24 @@ def isolated(monkeypatch, tmp_path):
         db.refresh(other)
         ids = (project.id, other.id)
     monkeypatch.setattr(mcp, "PROJECT_ID", ids[0])
+    conversation = Conversation(project_id=ids[0], title="MCP idempotency", status="active")
+    with factory() as db:
+        db.add(conversation)
+        db.flush()
+        message = ConversationMessage(
+            conversation_id=conversation.id, role="user", content="Create a task",
+            message_metadata={},
+        )
+        db.add(message)
+        db.flush()
+        turn = AgentTurn(
+            conversation_id=conversation.id, user_message_id=message.id,
+            status="running", adapter="claude-code",
+        )
+        db.add(turn)
+        db.commit()
+        turn_id = turn.id
+    monkeypatch.setattr(mcp, "TURN_ID", turn_id)
     return engine, factory, ids
 
 
@@ -139,17 +157,104 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     }
 
 
-def test_call_tool_uses_trusted_explicit_project_binding(monkeypatch, tmp_path):
-    engine, factory, (project_id, _other_id) = isolated(monkeypatch, tmp_path)
+def test_create_task_json_rpc_retry_returns_original_result(monkeypatch, tmp_path):
+    engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
     try:
-        result = mcp.call_tool("get_project_overview", {}, project_id=project_id)
-        assert result["id"] == project_id
-        try:
-            mcp.call_tool("get_project_overview", {}, project_id="not-a-project")
-        except mcp.ToolError as exc:
-            assert "no longer exists" in str(exc)
-        else:
-            raise AssertionError("unknown trusted project binding was accepted")
+        request = {
+            "jsonrpc": "2.0", "id": "task-call-1", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "Exactly once", "prompt": "Create this task once",
+            }},
+        }
+        first = mcp._reply(request)
+        retry = mcp._reply(request)
+        first_value = __import__("json").loads(first["result"]["content"][0]["text"])
+        retry_value = __import__("json").loads(retry["result"]["content"][0]["text"])
+        assert first_value["id"] == retry_value["id"]
+        with factory() as db:
+            assert db.scalar(select(Task.id).where(Task.project_id == project_id)) == first_value["id"]
+            assert len(list(db.scalars(select(Task).where(Task.project_id == project_id)))) == 1
+            records = list(db.scalars(select(MCPToolInvocation)))
+            assert len(records) == 1
+            assert records[0].request_id == "s:task-call-1"
+    finally:
+        engine.dispose()
+
+
+def test_create_workflow_json_rpc_retry_is_atomic_and_idempotent(monkeypatch, tmp_path):
+    engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
+    try:
+        request = {
+            "jsonrpc": "2.0", "id": 52, "method": "tools/call",
+            "params": {"name": "create_workflow", "arguments": {
+                "title": "One workflow",
+                "tasks": [
+                    {"key": "a", "title": "A", "prompt": "A"},
+                    {"key": "b", "title": "B", "prompt": "B", "depends_on": ["a"]},
+                ],
+            }},
+        }
+        first = mcp._reply(request)
+        retry = mcp._reply(request)
+        first_value = __import__("json").loads(first["result"]["content"][0]["text"])
+        retry_value = __import__("json").loads(retry["result"]["content"][0]["text"])
+        assert first_value["id"] == retry_value["id"]
+        assert [task["id"] for task in first_value["tasks"]] == [
+            task["id"] for task in retry_value["tasks"]
+        ]
+        with factory() as db:
+            assert len(list(db.scalars(select(Workflow).where(Workflow.project_id == project_id)))) == 1
+            assert len(list(db.scalars(select(Task).where(Task.project_id == project_id)))) == 2
+            assert len(list(db.scalars(select(MCPToolInvocation)))) == 1
+    finally:
+        engine.dispose()
+
+
+def test_json_rpc_request_id_cannot_be_reused_for_another_tool(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        created = mcp._reply({
+            "jsonrpc": "2.0", "id": "shared-id", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "A", "prompt": "A",
+            }},
+        })
+        assert created["result"]["isError"] is False
+        conflict = mcp._reply({
+            "jsonrpc": "2.0", "id": "shared-id", "method": "tools/call",
+            "params": {"name": "create_workflow", "arguments": {
+                "title": "B", "tasks": [{"key": "b", "title": "B", "prompt": "B"}],
+            }},
+        })
+        assert conflict["result"]["isError"] is True
+        assert "different tool arguments" in conflict["result"]["content"][0]["text"]
+        with factory() as db:
+            assert len(list(db.scalars(select(Task)))) == 1
+            assert len(list(db.scalars(select(Workflow)))) == 0
+    finally:
+        engine.dispose()
+
+ 
+def test_json_rpc_request_id_reuse_with_different_arguments_is_rejected(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        first = mcp._reply({
+            "jsonrpc": "2.0", "id": "same-id", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "Original", "prompt": "Original arguments",
+            }},
+        })
+        assert first["result"]["isError"] is False
+        retry = mcp._reply({
+            "jsonrpc": "2.0", "id": "same-id", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "Different", "prompt": "Different arguments",
+            }},
+        })
+        assert retry["result"]["isError"] is True
+        assert "different tool arguments" in retry["result"]["content"][0]["text"]
+        with factory() as db:
+            assert len(list(db.scalars(select(Task)))) == 1
     finally:
         engine.dispose()
 

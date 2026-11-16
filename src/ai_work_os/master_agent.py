@@ -479,6 +479,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         turn_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = turn_dir / "stdout.jsonl"
         stderr_path = turn_dir / "stderr.log"
+        stderr_bytes = 0
         mcp_config = _write_empty_mcp_config(turn_dir)
         claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
         claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -536,14 +537,22 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 assert proc is not None and proc.stdout is not None
                 while line := await proc.stdout.readline():
                     decoded = line.decode("utf-8", errors="replace")
-                    out.write(decoded)
-                    out.flush()
                     try:
                         event = json.loads(decoded)
                     except json.JSONDecodeError:
+                        out.write(json.dumps({
+                            "event_type": "claude.non_json_output",
+                            "payload": {"line_char_count": len(decoded)},
+                        }) + "\n")
+                        out.flush()
                         _persist_event(turn_id, worker_id, "claude.non_json_output", {"line": decoded[:4000]})
                         continue
                     event_type = str(event.get("type", "unknown"))
+                    safe_payload = _safe_cli_event_payload(f"claude.{event_type}", event)
+                    out.write(json.dumps({
+                        "event_type": f"claude.{event_type}", "payload": safe_payload,
+                    }, ensure_ascii=False) + "\n")
+                    out.flush()
                     observed_session = event.get("session_id")
                     if observed_session:
                         _persist_session_id(turn_id, worker_id, str(observed_session))
@@ -559,10 +568,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                         _persist_event(turn_id, worker_id, f"claude.{event_type}", event)
 
             async def read_stderr() -> None:
+                nonlocal stderr_bytes
                 assert proc is not None and proc.stderr is not None
                 while chunk := await proc.stderr.read(4096):
-                    err.write(chunk.decode("utf-8", errors="replace"))
-                    err.flush()
+                    stderr_bytes += len(chunk)
+                err.write(json.dumps({"stderr_bytes": stderr_bytes}) + "\n")
+                err.flush()
 
             readers = [asyncio.create_task(read_stdout()), asyncio.create_task(read_stderr())]
             deadline = asyncio.get_running_loop().time() + TURN_TIMEOUT_SECONDS
@@ -610,13 +621,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             elif exit_code == 0 and final_text:
                 terminal_status = "succeeded"
             else:
-                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
                 error = (
                     f"Claude Code exited with code {exit_code} without a final assistant response"
                     if exit_code == 0 else f"Claude Code exited with code {exit_code}"
                 )
-                if stderr_text.strip():
-                    error += f": {stderr_text.strip()[-2000:]}"
+                if stderr_bytes:
+                    error += f": stderr output present ({stderr_bytes} bytes; content not retained)"
         _finish_turn(
             turn_id, worker_id, terminal_status,
             assistant_text=final_text if terminal_status == "succeeded" else None,

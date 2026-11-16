@@ -10,6 +10,11 @@ import uuid
 from pathlib import Path
 
 
+def _normalize_tool_name(name: str) -> str:
+    """Normalize Claude Code MCP tool names for stable acceptance checks."""
+    return name.removeprefix("mcp__awos__")
+
+
 def _walk(value):
     if isinstance(value, dict):
         if value.get("type") == "tool_use" and isinstance(value.get("name"), str):
@@ -141,7 +146,11 @@ Do not use shell commands or file-editing tools."""
             )))
             second_message = db.get(ConversationMessage, second_turn.assistant_message_id)
             second_text = second_message.content if second_message else ""
-        called = set(name for event in first_events for name in _walk(event.payload))
+        called = {
+            _normalize_tool_name(name)
+            for event in first_events
+            for name in _walk(event.payload)
+        }
         required = {
             "get_project_overview", "list_tasks", "create_task", "create_workflow",
         }

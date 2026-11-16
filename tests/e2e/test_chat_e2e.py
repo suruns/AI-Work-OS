@@ -58,7 +58,7 @@ def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashbo
           const turn = await response.json();
           return turn.status === 'cancelled';
         }""",
-        turn_id,
+        arg=turn_id,
         timeout=10_000,
     )
     page.reload(wait_until="domcontentloaded")

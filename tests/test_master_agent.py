@@ -335,7 +335,7 @@ def test_master_agent_mcp_broker_is_project_scoped_and_uses_private_socket(tmp_p
 
             async def request(payload):
                 reader, writer = await asyncio.open_unix_connection(str(socket_path))
-                writer.write(json.dumps(payload).encode("utf-8") + b"\\n")
+                writer.write(json.dumps(payload).encode("utf-8") + b"\n")
                 await writer.drain()
                 response = json.loads(await reader.readline())
                 writer.close()

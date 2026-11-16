@@ -256,7 +256,7 @@ def call_tool(name: str, args: dict, request_id: str | int | float | None = None
             raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
         if isinstance(request_id, float) and not math.isfinite(request_id):
             raise ToolError("JSON-RPC request id must be finite")
-        request_key = str(request_id)
+        request_key = ("s:" if isinstance(request_id, str) else "n:") + str(request_id)
         if not request_key or len(request_key) > 128:
             raise ToolError("JSON-RPC request id must contain 1 to 128 characters")
         if not TURN_ID:

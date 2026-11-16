@@ -206,7 +206,7 @@ def build_master_command(
     return command
 
 
-def _write_mcp_config(turn_dir: Path, project_id: str | None) -> Path:
+def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> Path:
     path = turn_dir / "mcp-config.isolated.json"
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -220,7 +220,7 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None) -> Path:
                     "args": ["-m", "ai_work_os.mcp_control_plane"],
                     "env": {
                         "AI_WORK_OS_MCP_PROJECT_ID": project_id,
-                        "AI_WORK_OS_MCP_TURN_ID": os.getenv("AI_WORK_OS_MCP_TURN_ID", ""),
+                        "AI_WORK_OS_MCP_TURN_ID": turn_id,
                     },
                 }}}
             else:
@@ -449,7 +449,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             raise RuntimeError(
                 "Project-scoped MCP is not yet supported inside Bubblewrap; refusing to expose the host database or runtime"
             )
-        mcp_config = _write_mcp_config(turn_dir, project.id if project else None)
+        mcp_config = _write_mcp_config(turn_dir, project.id if project else None, turn_id)
         claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
         claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if claude_config_dir.is_symlink():

@@ -10,11 +10,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
+from starlette.requests import Request
 
 from ai_work_os.api import app
 from ai_work_os.db import Base, SessionLocal
 from ai_work_os import worker
-from ai_work_os.execution_approval import approval_is_valid
+from ai_work_os.execution_approval import approval_is_valid, require_local_control_plane
 from ai_work_os.models import ExecutionApproval, Project, Task, TaskEvent, utcnow
 
 client = TestClient(app)
@@ -383,3 +385,45 @@ def test_repair_runner_rechecks_approval_before_repair_process_spawn(monkeypatch
             assert not any(event.event_type == "repair.started" for event in events)
     finally:
         engine.dispose()
+
+
+def test_local_approval_guard_rejects_dns_rebinding_host_and_origin():
+    request = Request({
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/execution-approvals/123/approve",
+        "raw_path": b"/execution-approvals/123/approve",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"attacker.example"),
+            (b"origin", b"http://attacker.example"),
+        ],
+        "client": ("127.0.0.1", 43122),
+        "server": ("127.0.0.1", 8000),
+    })
+    with pytest.raises(HTTPException) as exc:
+        require_local_control_plane(request)
+    assert exc.value.status_code == 403
+
+
+def test_local_approval_guard_accepts_loopback_host_and_origin():
+    request = Request({
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/execution-approvals/123/approve",
+        "raw_path": b"/execution-approvals/123/approve",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"127.0.0.1:8000"),
+            (b"origin", b"http://127.0.0.1:8000"),
+        ],
+        "client": ("127.0.0.1", 43122),
+        "server": ("127.0.0.1", 8000),
+    })
+    require_local_control_plane(request)

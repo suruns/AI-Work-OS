@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 import ipaddress
+from urllib.parse import urlsplit
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -15,12 +16,41 @@ from .db import SessionLocal
 from .models import ExecutionApproval, Project, Task, TaskEvent, utcnow
 
 def require_local_control_plane(request: Request) -> None:
-    host = request.client.host if request.client else ""
+    client_host = request.client.host if request.client else ""
+    if client_host == "testclient":
+        return
     try:
-        if host != "testclient" and not ipaddress.ip_address(host).is_loopback:
+        if not ipaddress.ip_address(client_host).is_loopback:
             raise HTTPException(status_code=403, detail="审批控制台仅允许本机访问")
     except ValueError:
         raise HTTPException(status_code=403, detail="无法确认本机访问来源")
+
+    # A loopback client address alone is not enough: a hostile web page can
+    # target localhost, and DNS rebinding can make an attacker-controlled Host
+    # resolve to 127.0.0.1. Accept only explicit loopback host/origin names.
+    allowed_hosts = {"localhost", "127.0.0.1", "::1"}
+    host_header = request.headers.get("host", "")
+    try:
+        request_host = urlsplit(f"//{host_header}").hostname
+    except ValueError:
+        request_host = None
+    if request_host not in allowed_hosts:
+        raise HTTPException(status_code=403, detail="审批控制台 Host 必须是 localhost 或回环地址")
+
+    origin = request.headers.get("origin")
+    if origin:
+        try:
+            parsed_origin = urlsplit(origin)
+            origin_host = parsed_origin.hostname
+        except ValueError:
+            origin_host = None
+            parsed_origin = None
+        if (
+            parsed_origin is None
+            or parsed_origin.scheme not in {"http", "https"}
+            or origin_host not in allowed_hosts
+        ):
+            raise HTTPException(status_code=403, detail="审批控制台 Origin 必须来自本机回环地址")
 
 
 router = APIRouter(

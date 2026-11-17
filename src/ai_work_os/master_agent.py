@@ -138,8 +138,8 @@ def recover_orphaned_turns() -> int:
                     status="failed", finished_at=recovered_at,
                     worker_id=None, lease_expires_at=None,
                     error_summary=(
-                        "Master Agent worker lease expired. The turn was not replayed automatically; "
-                        "inspect its events and Claude session before retrying."
+                        "Master Agent Worker 租约已过期。本轮不会自动重放；"
+                        "重试前请检查事件记录和 Claude 会话。"
                     ),
                 )
             )
@@ -265,9 +265,9 @@ async def _handle_mcp_broker(
         )
         response = {"ok": True, "value": value}
     except ToolError as exc:
-        response = {"ok": False, "error": str(exc)[:2000]}
+        response = {"ok": False, "error": f"MCP 工具调用失败：{exc}"[:2000]}
     except Exception as exc:
-        response = {"ok": False, "error": f"broker internal error: {type(exc).__name__}"}
+        response = {"ok": False, "error": f"MCP broker 内部错误：{type(exc).__name__}"}
     try:
         writer.write(json.dumps(response, ensure_ascii=False, default=str).encode("utf-8") + b"\n")
         await writer.drain()
@@ -729,7 +729,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if _cancel_requested(turn_id, worker_id):
                     stopped = await _terminate(proc)
                     terminal_status = "cancelled"
-                    error = "Cancelled by request"
+                    error = "用户请求取消本轮对话。"
                     _persist_event(turn_id, worker_id, "turn.cancelled", {
                         "reason": "cancel_requested",
                         "process_tree_stopped": stopped,
@@ -739,7 +739,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if current >= deadline:
                     stopped = await _terminate(proc)
                     terminal_status = "failed"
-                    error = f"Master Agent turn timed out after {TURN_TIMEOUT_SECONDS} seconds"
+                    error = f"Master Agent 处理超时（{TURN_TIMEOUT_SECONDS} 秒）。"
                     _persist_event(turn_id, worker_id, "turn.timed_out", {
                         "timeout_seconds": TURN_TIMEOUT_SECONDS,
                         "process_tree_stopped": stopped,
@@ -748,7 +748,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if current >= next_renewal:
                     if not _renew_lease(turn_id, worker_id):
                         stopped = await _terminate(proc)
-                        error = "Master Agent worker lost its turn lease"
+                        error = "Master Agent Worker 租约丢失。"
                         _persist_event(turn_id, worker_id, "turn.lease_lost", {
                             "process_tree_stopped": stopped,
                         })
@@ -767,7 +767,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                     if exit_code == 0 else f"Claude Code exited with code {exit_code}"
                 )
                 if stderr_bytes:
-                    error += f": stderr output present ({stderr_bytes} bytes; content not retained)"
+                    error += f": 检测到标准错误输出（{stderr_bytes} 字节；为保护隐私未保存内容）"
         _finish_turn(
             turn_id, worker_id, terminal_status,
             assistant_text=final_text if terminal_status == "succeeded" else None,
@@ -781,12 +781,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             })
         _finish_turn(
             turn_id, worker_id, "failed",
-            error="Master Agent worker interrupted; inspect the CLI session before retrying",
+            error="Master Agent Worker 中断；重试前请检查 CLI 会话状态。",
             exit_code=proc.returncode if proc is not None else None,
         )
         raise
     except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+        error = f"Master Agent 执行失败（{type(exc).__name__}）：{exc}"
         _persist_event(turn_id, worker_id, "turn.executor_failed", {"error": error})
         _finish_turn(turn_id, worker_id, "failed", error=error, exit_code=exit_code)
     finally:

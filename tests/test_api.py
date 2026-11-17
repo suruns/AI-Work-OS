@@ -2191,7 +2191,7 @@ def test_task_diagnostics_classifies_worker_loss_and_unknown_without_inference(t
     with SessionLocal() as db:
         lost = db.get(Task, worker_task)
         lost.status = "failed"
-        lost.error_summary = "Worker lease expired"
+        lost.error_summary = "Worker 租约已过期"
         db.add(TaskEvent(task_id=worker_task, event_type="worker.orphaned_task_recovered",
                          payload={"automatic_retry": False}))
         db.get(Task, unknown_task).status = "succeeded"

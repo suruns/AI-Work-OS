@@ -36,7 +36,7 @@ let projects=[],conversations=[],activeConversationId=null,activeConversation=nu
 function setError(message){$("error").textContent=message||""}
 function statusZh(value){return ({queued:"排队中",running:"执行中",succeeded:"已成功",failed:"失败",cancelled:"已取消",blocked:"已阻塞",pending:"待审批",approved:"已批准",rejected:"已拒绝",revoked:"已撤销",expired:"已过期"})[value]||value}
 function roleZh(value){return value==="user"?"你":value==="assistant"?"Master Agent":value}
-function eventZh(value){return ({"turn.queued":"对话已排队","turn.started":"Agent 开始处理","turn.finished":"Agent 处理完成","turn.failed":"Agent 处理失败","turn.cancel_requested":"已请求取消","turn.cancelled":"本轮已取消","execution.approval_requested":"写入执行待审批"})[value]||value}
+function eventZh(value){return ({"turn.queued":"对话已排队","turn.started":"Agent 开始处理","turn.finished":"Agent 处理完成","turn.failed":"Agent 处理失败","turn.executor_failed":"Agent 执行失败","turn.cancel_requested":"已请求取消","turn.cancelled":"本轮已取消","execution.approval_requested":"写入执行待审批"})[value]||value}
 
 function currentProject(){return $("project-context").value||null}
 function renderProjects(){const selected=$("project-context").value;$("project-context").innerHTML='<option value="">不绑定项目 · 普通对话</option>'+projects.filter(p=>p.status==="active").map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+' · '+esc(p.slug)+'</option>').join("");if(projects.some(p=>p.id===selected))$("project-context").value=selected}

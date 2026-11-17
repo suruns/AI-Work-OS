@@ -612,3 +612,19 @@ def test_worker_persists_expired_approval_audit_without_claiming_task(tmp_path, 
             assert sum(event.event_type == "execution.approval_expired" for event in events) == 1
     finally:
         engine.dispose()
+
+
+def test_cancelled_task_invalidates_approved_scope(tmp_path):
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        record.status = "cancelled"
+        db.commit()
+        assert approval_is_valid(db, record) is False
+    current = client.get(f"/execution-approvals/{approval['id']}").json()
+    assert current["status"] == "revoked"
+    assert current["scope_valid"] is False
+    assert current["can_resubmit"] is False

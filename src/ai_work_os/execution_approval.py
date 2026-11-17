@@ -163,6 +163,8 @@ def approval_is_valid(db, task: Task) -> bool:
     if not task.requires_approval:
         return task.permission_mode == "plan"
     approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id).with_for_update())
+    if task.status not in {"queued", "running"}:
+        return False
     if approval is None or approval.status != "approved":
         return False
     expires = approval.expires_at
@@ -225,7 +227,8 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "runtime_policy": runtime_execution_policy(),
         "can_resubmit": can_resubmit,
         "scope_valid": bool(
-            task and project and project.status == "active"
+            task and task.status in {"queued", "running"}
+            and project and project.status == "active"
             and approval.scope_hash == task_scope_hash(task)
             and approval.project_id == task.project_id
             and str(Path(task.workspace_path).expanduser().resolve(strict=False))

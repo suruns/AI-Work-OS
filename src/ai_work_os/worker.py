@@ -1264,6 +1264,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     break
             failed_details = json.dumps(verification_results, ensure_ascii=True, indent=2)[-12000:]
             repair_prompt = (
+                "请默认使用简体中文撰写面向用户的说明和最终报告；任务明确指定其他语言时遵从任务。\\n\\n"
                 "A bounded automatic repair was explicitly enabled for this task.\n"
                 "Fix only the cause of the failed acceptance checks in the existing workspace. "
                 "Do not broaden scope, remove or weaken tests, alter verification commands, "

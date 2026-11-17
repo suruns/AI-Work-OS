@@ -77,7 +77,15 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "requested_at": approval.requested_at, "decided_at": approval.decided_at,
         "expires_at": approval.expires_at, "decision_source": approval.decision_source,
         "decision_note": approval.decision_note,
-        "scope_valid": bool(task and approval.scope_hash == task_scope_hash(task)),
+        "scope_valid": bool(
+            task and project
+            and approval.scope_hash == task_scope_hash(task)
+            and approval.project_id == task.project_id
+            and str(Path(task.workspace_path).expanduser().resolve(strict=False))
+                == str(Path(project.workspace_path).expanduser().resolve(strict=False))
+            and approval.workspace_path
+                == str(Path(project.workspace_path).expanduser().resolve(strict=False))
+        ),
     }
 
 

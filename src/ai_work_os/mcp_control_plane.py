@@ -121,7 +121,7 @@ def _tools() -> list[dict[str, Any]]:
         },
         {
             "name": "request_execution",
-            "description": "Create a configured-mode task and submit it for explicit user approval. This only requests execution; it does not approve or start the task. The user must approve it in the local control panel.",
+            "description": "在当前项目中创建 configured 模式任务并提交用户审批。此工具只申请执行，不会批准或启动任务；用户必须在本机控制台明确批准。",
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string", "minLength": 1, "maxLength": 240},
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},

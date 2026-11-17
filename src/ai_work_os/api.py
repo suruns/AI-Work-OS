@@ -638,7 +638,7 @@ def create_conversation_message(conversation_id: str, body: ConversationMessageC
             turn_id=turn.id, event_type="turn.queued",
             payload={"conversation_id": conversation_id, "message_id": message.id},
         ))
-        if conversation.title == "New conversation":
+        if conversation.title in {"New conversation", "新对话"}:
             first_line = content.splitlines()[0].strip()
             conversation.title = first_line[:72] or "New conversation"
         conversation.updated_at = utcnow()

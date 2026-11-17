@@ -171,3 +171,15 @@ def test_approved_queued_task_can_have_approval_revoked(tmp_path):
     with SessionLocal() as db:
         record = db.get(Task, task["id"])
         assert approval_is_valid(db, record) is False
+
+
+def test_archived_project_invalidates_pending_write_execution(tmp_path):
+    project, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200
+    with SessionLocal() as db:
+        db.get(Project, project["id"]).status = "archived"
+        db.commit()
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is False

@@ -107,6 +107,7 @@ def request_execution_approval(task_id: str) -> dict:
         )
         task.requires_approval = True
         db.add(approval)
+        db.flush()
         db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
             "approval_id": approval.id, "project_id": project.id,
             "permission_mode": task.permission_mode, "expires_at": approval.expires_at.isoformat(),
@@ -152,6 +153,8 @@ def get_execution_approval(approval_id: str) -> dict:
 
 def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
     with SessionLocal() as db:
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         approval = db.get(ExecutionApproval, approval_id)
         if approval is None:
             raise HTTPException(status_code=404, detail="审批记录不存在")
@@ -207,6 +210,8 @@ def reject_execution(approval_id: str, body: dict | None = None) -> dict:
 @router.post("/{approval_id}/revoke")
 def revoke_execution(approval_id: str, body: dict | None = None) -> dict:
     with SessionLocal() as db:
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         approval = db.get(ExecutionApproval, approval_id)
         if approval is None:
             raise HTTPException(status_code=404, detail="审批记录不存在")

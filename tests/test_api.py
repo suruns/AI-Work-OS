@@ -1327,7 +1327,7 @@ def test_failed_parent_blocks_all_descendants(tmp_path):
     assert states[task_ids["build"]] == "blocked"
     assert detail["status"] == "failed"
     blocked = next(task for task in detail["tasks"] if task["id"] == task_ids["build"])
-    assert "prerequisite task" in blocked["blocked_reason"]
+    assert "前置任务" in blocked["blocked_reason"]
 
 
 def test_workflow_cancel_cancels_queued_tasks(tmp_path):
@@ -1563,7 +1563,7 @@ def test_cancelled_member_does_not_cancel_workflow_or_starve_others(tmp_path):
     detail, by_title = _workflow_states(workflow_id)
     assert by_title["A"]["status"] == "cancelled"
     assert by_title["C"]["status"] == "blocked"
-    assert "cancelled" in by_title["C"]["blocked_reason"]
+    assert "已取消" in by_title["C"]["blocked_reason"]
     assert ids["A"] in by_title["C"]["blocked_reason"]
     assert detail["status"] in {"queued", "running"}
     assert detail["status"] != "cancelled"
@@ -1621,7 +1621,7 @@ def test_multi_level_cancellation_blocks_descendants_only(tmp_path):
     assert by_title["B"]["status"] == "blocked"
     assert by_title["C"]["status"] == "blocked"
     for key in ("B", "C"):
-        assert "cancelled" in by_title[key]["blocked_reason"]
+        assert "已取消" in by_title[key]["blocked_reason"]
         assert ids["A"] in by_title[key]["blocked_reason"]
     assert by_title["D"]["status"] == "queued"
     assert detail["status"] in {"queued", "running"}

@@ -682,7 +682,6 @@ async def run_repair_attempt(
     repair_number: int,
     max_repair_attempts: int,
     verification_commands: list[str],
-    worker_id: str | None = None,
 ) -> tuple[bool, list[dict], str | None]:
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
@@ -725,8 +724,15 @@ async def run_repair_attempt(
             mcp_config_path=mcp_config_path, execution_kind="repair",
         )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            if worker_id is not None:
-                proc = await _spawn_task_process(task_id, worker_id, invocation)
+            with SessionLocal() as db:
+                current_task = db.get(Task, task_id)
+                repair_worker_id = (
+                    current_task.worker_id
+                    if current_task is not None and current_task.status == "running"
+                    else None
+                )
+            if repair_worker_id is not None:
+                proc = await _spawn_task_process(task_id, repair_worker_id, invocation)
                 if proc is None:
                     with SessionLocal() as db:
                         current = db.get(Task, task_id)
@@ -1347,7 +1353,6 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             passed, repair_results, repair_error = await run_repair_attempt(
                 task_id, workspace, permission_mode, repair_prompt, task_dir,
                 repair_number, max_repair_attempts, verification_commands,
-                worker_id=worker_id,
             )
             verification_results = repair_results
             if passed:

@@ -298,12 +298,12 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
             if state_change == "revoke":
                 blocked = [event for event in events if event.event_type == "execution.approval_invalid"]
-                assert len(blocked) == 1
+                assert len(blocked) == 1, f"events={[(event.event_type, event.payload) for event in events]!r}; error={record.error_summary!r}"
                 assert blocked[0].payload["process_started"] is False
                 assert blocked[0].payload["check"] == "immediately_before_spawn"
             else:
                 cancelled = [event for event in events if event.event_type == "task.cancelled"]
-                assert len(cancelled) == 1
+                assert len(cancelled) == 1, f"events={[(event.event_type, event.payload) for event in events]!r}; error={record.error_summary!r}"
                 assert cancelled[0].payload["process_started"] is False
     finally:
         engine.dispose()

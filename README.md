@@ -13,6 +13,12 @@ AI Work OS 是面向 CLI 编程 Agent 的项目级工作控制台，提供持久
 3. 再启动 Worker：`python -m ai_work_os.worker`
 4. 最后启动 Master Agent：`python -m ai_work_os.master_agent`
 
+也可以在完成依赖安装后使用一条命令按正确顺序启动三个进程，并在 API 健康检查通过后才启动 Worker / Master Agent：
+
+```bash
+bash scripts/start-local.sh
+```
+
 浏览器打开 `http://127.0.0.1:8000/` 进入聊天界面，`http://127.0.0.1:8000/dashboard` 查看任务、产物和写入审批。
 
 > **安全提醒：** Master Agent 的普通任务创建仍是只读 plan 模式。写入任务必须通过 `request_execution` 提交申请，并由用户在本机 Dashboard 明确批准。当前审批控制面仅适用于可信本机部署，不支持远程身份认证或多用户 RBAC。详见 [Phase 11.5 中文实施说明](docs/phase-11-5-implementation.md)。

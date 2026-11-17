@@ -19,7 +19,7 @@ BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
     from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
-    from .execution_approval import task_scope_hash
+    from .execution_approval import DEFAULT_TTL_HOURS, task_scope_hash
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
 else:
@@ -385,7 +385,7 @@ def call_tool(
                     task_id=task.id, project_id=project.id,
                     workspace_path=project.workspace_path,
                     scope_hash=task_scope_hash(task), status="pending",
-                    expires_at=utcnow() + __import__("datetime").timedelta(hours=24),
+                    expires_at=utcnow() + __import__("datetime").timedelta(hours=DEFAULT_TTL_HOURS),
                 )
                 db.add(approval)
                 db.flush()

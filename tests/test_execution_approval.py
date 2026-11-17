@@ -1,11 +1,17 @@
 from uuid import uuid4
+import asyncio
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from fastapi.testclient import TestClient
 
 from ai_work_os.api import app
-from ai_work_os.db import SessionLocal
+from ai_work_os.db import Base, SessionLocal
+from ai_work_os import worker
 from ai_work_os.execution_approval import approval_is_valid
-from ai_work_os.models import Task
+from ai_work_os.models import ExecutionApproval, Project, Task, TaskEvent, utcnow
 
 client = TestClient(app)
 
@@ -84,3 +90,54 @@ def test_approval_is_invalidated_when_project_workspace_changes(tmp_path):
     with SessionLocal() as db:
         record = db.get(Task, task["id"])
         assert approval_is_valid(db, record) is False
+
+
+def test_worker_never_claims_unapproved_configured_task_or_starts_after_revocation(monkeypatch, tmp_path):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(name="隔离测试", slug="isolated-approval", workspace_path=str(tmp_path), status="active")
+            db.add(project)
+            db.flush()
+            task = Task(
+                project_id=project.id, title="受控任务", prompt="创建文件",
+                workspace_path=str(tmp_path), permission_mode="configured",
+                requires_approval=True, status="queued",
+            )
+            db.add(task)
+            db.flush()
+            approval = ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(tmp_path),
+                scope_hash=__import__("ai_work_os.execution_approval", fromlist=["task_scope_hash"]).task_scope_hash(task),
+                status="pending", expires_at=utcnow() + __import__("datetime").timedelta(hours=1),
+            )
+            db.add(approval)
+            db.commit()
+            task_id, approval_id = task.id, approval.id
+
+        assert worker.claim_task() is None
+        with factory() as db:
+            db.get(ExecutionApproval, approval_id).status = "approved"
+            db.commit()
+        assert worker.claim_task() == task_id
+
+        with factory() as db:
+            db.get(ExecutionApproval, approval_id).status = "revoked"
+            db.commit()
+
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("Claude subprocess setup must not run for a revoked approval")
+        monkeypatch.setattr(worker, "write_isolated_mcp_config", forbidden)
+        asyncio.run(worker._execute_task(task_id, "legacy-worker"))
+        with factory() as db:
+            record = db.get(Task, task_id)
+            assert record.status == "failed"
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
+            invalid = [event for event in events if event.event_type == "execution.approval_invalid"]
+            assert len(invalid) == 1
+            assert invalid[0].payload["process_started"] is False
+    finally:
+        engine.dispose()

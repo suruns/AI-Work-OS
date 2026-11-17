@@ -2,6 +2,8 @@ from uuid import uuid4
 from pathlib import Path
 import subprocess
 import asyncio
+from types import SimpleNamespace
+import pytest
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -210,3 +212,98 @@ def test_cancelling_queued_task_invalidates_pending_approval(tmp_path):
         record = db.get(ExecutionApproval, approval["id"])
         assert record.status == "revoked"
         assert record.decision_source == "task_state"
+
+
+
+@pytest.mark.parametrize("state_change, expected_status", [
+    ("revoke", "failed"),
+    ("cancel", "cancelled"),
+])
+def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
+    monkeypatch, tmp_path, state_change, expected_status
+):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", factory)
+    monkeypatch.setattr(worker, "STORAGE", tmp_path / "storage")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    try:
+        with factory() as db:
+            project = Project(
+                name="启动竞态测试", slug=f"spawn-{uuid4().hex}",
+                workspace_path=str(workspace), status="active",
+            )
+            db.add(project)
+            db.flush()
+            task = Task(
+                project_id=project.id, title="启动前门禁", prompt="创建一个文件",
+                workspace_path=str(workspace), permission_mode="configured",
+                requires_approval=True, status="running", worker_id="race-worker",
+                attempt_count=1, cancel_requested=0,
+                lease_expires_at=utcnow() + __import__("datetime").timedelta(minutes=2),
+            )
+            db.add(task)
+            db.flush()
+            approval = ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(workspace),
+                scope_hash=__import__(
+                    "ai_work_os.execution_approval", fromlist=["task_scope_hash"]
+                ).task_scope_hash(task),
+                status="approved",
+                expires_at=utcnow() + __import__("datetime").timedelta(hours=1),
+            )
+            db.add(approval)
+            db.commit()
+            task_id, approval_id = task.id, approval.id
+
+        async def snapshot(*args, **kwargs):
+            return {"files": []}
+
+        monkeypatch.setattr(worker, "capture_workspace_snapshot", snapshot)
+        monkeypatch.setattr(worker, "claude_setting_sources", lambda: ["project", "local"])
+
+        def prepare_config(*args, **kwargs):
+            # Simulate a decision/cancellation arriving after the early validation
+            # and during worker setup, immediately before the final spawn fence.
+            with factory() as db:
+                if state_change == "revoke":
+                    db.get(ExecutionApproval, approval_id).status = "revoked"
+                else:
+                    db.get(Task, task_id).cancel_requested = 1
+                db.commit()
+            return tmp_path / "mcp.json"
+
+        monkeypatch.setattr(worker, "write_isolated_mcp_config", prepare_config)
+        monkeypatch.setattr(worker, "build_command", lambda *args, **kwargs: ["fake-claude"])
+        monkeypatch.setattr(
+            worker, "build_task_sandbox_invocation",
+            lambda *args, **kwargs: SimpleNamespace(
+                command=("fake-claude",), cwd=str(workspace), env={}
+            ),
+        )
+
+        async def forbidden_spawn(*args, **kwargs):
+            raise AssertionError("Claude child process must not start after approval/cancel changes")
+
+        monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", forbidden_spawn)
+        asyncio.run(worker._execute_task(task_id, "race-worker"))
+
+        with factory() as db:
+            record = db.get(Task, task_id)
+            assert record.status == expected_status
+            assert record.worker_id is None
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
+            if state_change == "revoke":
+                blocked = [event for event in events if event.event_type == "execution.approval_invalid"]
+                assert len(blocked) == 1
+                assert blocked[0].payload["process_started"] is False
+                assert blocked[0].payload["check"] == "immediately_before_spawn"
+            else:
+                cancelled = [event for event in events if event.event_type == "task.cancelled"]
+                assert len(cancelled) == 1
+                assert cancelled[0].payload["process_started"] is False
+    finally:
+        engine.dispose()

@@ -735,14 +735,9 @@ async def run_repair_attempt(
             mcp_config_path=mcp_config_path, execution_kind="repair",
         )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd,
-                env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            proc = await _spawn_task_process(task_id, worker_id, invocation)
+            if proc is None:
+                return
 
             async def drain(stream, target):
                 while chunk := await stream.read(4096):
@@ -900,6 +895,74 @@ async def run_repair_attempt(
         "verification": results,
     })
     return passed, results, None
+
+
+async def _spawn_task_process(task_id: str, worker_id: str, invocation):
+    """Atomically fence cancellation, lease ownership, and approval immediately before spawn.
+
+    Keep the database write reservation until the child exists. A concurrent cancel
+    request therefore either wins before spawn, or is recorded immediately after
+    spawn and handled by the normal process-group cancellation loop.
+    """
+    with SessionLocal() as db:
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        task = db.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None or task.status != "running" or task.worker_id != worker_id:
+            db.rollback()
+            return None
+
+        if task.cancel_requested:
+            task.status = "cancelled"
+            task.finished_at = now()
+            task.error_summary = "任务在执行进程启动前已取消。"
+            task.worker_id = None
+            task.lease_expires_at = None
+            db.add(TaskEvent(task_id=task.id, event_type="task.cancelled", payload={
+                "status": "cancelled", "reason": "cancelled_before_process_start",
+                "process_started": False,
+            }))
+            db.commit()
+            return None
+
+        lease_expires_at = task.lease_expires_at
+        if lease_expires_at is not None:
+            if lease_expires_at.tzinfo is None:
+                lease_expires_at = lease_expires_at.replace(tzinfo=timezone.utc)
+            if lease_expires_at <= now():
+                db.rollback()
+                return None
+
+        if task.permission_mode != "plan" and (
+            not task.requires_approval or not approval_is_valid(db, task)
+        ):
+            db.add(TaskEvent(task_id=task.id, event_type="execution.approval_invalid", payload={
+                "reason": "approval_missing_expired_or_scope_changed",
+                "process_started": False,
+                "check": "immediately_before_spawn",
+            }))
+            task.status = "failed"
+            task.finished_at = now()
+            task.error_summary = "执行审批无效、已过期或任务范围发生变化；未启动执行进程。"
+            task.worker_id = None
+            task.lease_expires_at = None
+            db.commit()
+            return None
+
+        # Hold the row/write lock across process creation so a cancellation cannot
+        # slip between the final state check and the actual child-process spawn.
+        proc = await asyncio.create_subprocess_exec(
+            *invocation.command,
+            cwd=invocation.cwd,
+            env=invocation.env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
+        )
+        db.commit()
+        return proc
 
 
 async def _execute_task(task_id: str, worker_id: str) -> None:

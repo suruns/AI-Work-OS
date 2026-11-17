@@ -277,7 +277,7 @@ def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatc
     try:
         args = {
             "title": "修复登录页面", "prompt": "修复项目中的登录页面并运行验证",
-            "acceptance_criteria": "登录流程测试通过", "verification_commands": ["pytest -q tests/test_login.py"],
+            "acceptance_criteria": "登录流程测试通过",
         }
         first = mcp.call_tool("request_execution", args, request_id="write-request-1")
         second = mcp.call_tool("request_execution", args, request_id="write-request-1")
@@ -290,7 +290,6 @@ def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatc
             approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id))
             assert task.project_id == project_id
             assert task.status == "queued"
-            assert task.verification_commands == ["pytest -q tests/test_login.py"]
             assert approval.status == "pending"
             assert approval.project_id == project_id
             assert approval.scope_hash

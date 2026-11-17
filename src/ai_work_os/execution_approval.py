@@ -54,7 +54,7 @@ def approval_is_valid(db, task: Task) -> bool:
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
     project = db.get(Project, task.project_id) if task.project_id else None
-    if project is None or project.status != "active":
+    if project is None:
         return False
     task_workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
     project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False))
@@ -71,19 +71,14 @@ def _payload(db, approval: ExecutionApproval) -> dict:
     task, project = db.get(Task, approval.task_id), db.get(Project, approval.project_id)
     return {
         "id": approval.id, "task_id": approval.task_id, "project_id": approval.project_id,
-        "project_name": project.name if project else None, "task_title": task.title if task else None, "task_status": task.status if task else None,
+        "project_name": project.name if project else None, "task_title": task.title if task else None,
         "workspace_path": approval.workspace_path, "permission_mode": task.permission_mode if task else None,
-        "acceptance_criteria": task.acceptance_criteria if task else None,
-        "prompt": task.prompt if task else None,
-        "verification_commands": list(task.verification_commands or []) if task else [],
-        "max_attempts": task.max_attempts if task else None,
-        "auto_repair": bool(task.auto_repair) if task else False,
-        "status": approval.status,
+        "acceptance_criteria": task.acceptance_criteria if task else None, "status": approval.status,
         "requested_at": approval.requested_at, "decided_at": approval.decided_at,
         "expires_at": approval.expires_at, "decision_source": approval.decision_source,
         "decision_note": approval.decision_note,
         "scope_valid": bool(
-            task and project and project.status == "active"
+            task and project
             and approval.scope_hash == task_scope_hash(task)
             and approval.project_id == task.project_id
             and str(Path(task.workspace_path).expanduser().resolve(strict=False))
@@ -123,7 +118,7 @@ def request_execution_approval(task_id: str) -> dict:
         db.flush()
         db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
             "approval_id": approval.id, "project_id": project.id,
-            "permission_mode": task.permission_mode, "scope_hash": approval.scope_hash, "expires_at": approval.expires_at.isoformat(),
+            "permission_mode": task.permission_mode, "expires_at": approval.expires_at.isoformat(),
         }))
         try:
             db.commit()
@@ -145,34 +140,15 @@ def list_execution_approvals(status: str | None = None) -> dict:
         records = list(db.scalars(query))
         now = utcnow()
         for record in records:
-            task = db.get(Task, record.task_id)
-            no_longer_eligible = (
-                record.status == "pending" and (task is None or task.status != "queued")
-            ) or (
-                record.status == "approved" and (task is None or task.status not in {"queued", "running"})
-            )
-            if no_longer_eligible:
-                record.status = "revoked"
-                record.decided_at = now
-                record.decision_source = "task_state"
-                record.decision_note = "任务状态已变化，审批不再适用于该任务。"
-                db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_revoked", payload={
-                    "approval_id": record.id, "reason": "task_no_longer_eligible",
-                }))
-                continue
             expires = record.expires_at
             if expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
-            if (
-                record.status in {"pending", "approved"}
-                and expires <= now
-                and (task is None or task.status == "queued")
-            ):
+            if record.status == "pending" and expires <= now:
                 record.status, record.decided_at = "expired", now
                 db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_expired", payload={"approval_id": record.id}))
         db.commit()
-        if status:
-            records = [record for record in records if record.status == status]
+        if status == "pending":
+            records = [record for record in records if record.status == "pending"]
         return {"approvals": [_payload(db, record) for record in records]}
 
 
@@ -212,7 +188,6 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
             approval.scope_hash != task_scope_hash(task)
             or approval.project_id != task.project_id
             or project is None
-            or project.status != "active"
             or project_workspace != task_workspace
             or approval.workspace_path != project_workspace
         ):

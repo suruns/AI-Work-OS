@@ -619,6 +619,14 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             ),
         )
         for candidate in candidates:
+            # Lock in the same task -> approval -> project order used by the
+            # local decision endpoints. A concurrent revoke must win before a
+            # task can transition from queued to running.
+            candidate = db.scalar(
+                select(Task).where(Task.id == candidate.id).with_for_update()
+            )
+            if candidate is None or candidate.status != "queued" or candidate.available_at > started_at:
+                continue
             if candidate.permission_mode != "plan" and (
                 not candidate.requires_approval or not approval_is_valid(db, candidate)
             ):

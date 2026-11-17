@@ -124,7 +124,7 @@ def task_scope_hash(task: Task) -> str:
 def approval_is_valid(db, task: Task) -> bool:
     if not task.requires_approval:
         return task.permission_mode == "plan"
-    approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id))
+    approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id).with_for_update())
     if approval is None or approval.status != "approved":
         return False
     expires = approval.expires_at
@@ -208,6 +208,11 @@ def request_execution_approval(task_id: str) -> dict:
             raise HTTPException(status_code=404, detail="任务不存在")
         if task.status != "queued" or task.permission_mode != "configured" or not task.project_id:
             raise HTTPException(status_code=409, detail="只有绑定项目且排队中的受控写入任务可以申请审批")
+        existing = db.scalar(
+            select(ExecutionApproval)
+            .where(ExecutionApproval.task_id == task.id)
+            .with_for_update()
+        )
         project = db.scalar(select(Project).where(Project.id == task.project_id).with_for_update())
         if project is None or project.status != "active":
             raise HTTPException(status_code=409, detail="项目不存在或已归档")
@@ -218,11 +223,6 @@ def request_execution_approval(task_id: str) -> dict:
 
         scope_hash = task_scope_hash(task)
         now = utcnow()
-        existing = db.scalar(
-            select(ExecutionApproval)
-            .where(ExecutionApproval.task_id == task.id)
-            .with_for_update()
-        )
         if existing is not None:
             expires = existing.expires_at
             if expires.tzinfo is None:

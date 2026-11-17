@@ -501,3 +501,24 @@ def test_claude_settings_changes_invalidate_approval_scope(tmp_path, monkeypatch
     stale = client.get(f"/execution-approvals/{approval['id']}").json()
     assert stale["scope_valid"] is False
     assert stale["can_resubmit"] is True
+
+
+
+def test_revoked_approval_is_not_claimed_again(tmp_path):
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        record.status = "queued"
+        record.worker_id = None
+        record.lease_expires_at = None
+        db.commit()
+    revoked = client.post(f"/execution-approvals/{approval['id']}/revoke", json={})
+    assert revoked.status_code == 200
+    assert worker.claim_task() is None
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert record.status == "queued"
+        assert record.worker_id is None

@@ -162,6 +162,30 @@ def main() -> int:
         if not created_file.is_file() or created_file.read_text(encoding="utf-8").strip() != target_content:
             raise RuntimeError("批准任务没有生成预期文件内容")
         event_types = [event.event_type for event in events]
+        start_event = next(
+            (event for event in events if event.event_type == "executor.started"), None
+        )
+        command_text = str((start_event.payload or {}).get("command", "")) if start_event else ""
+        approval_events = [
+            event for event in events
+            if event.event_type in {"execution.approval_requested", "execution.approval_approved"}
+        ]
+        if (
+            start_event is None
+            or (start_event.payload or {}).get("permission_mode") != "configured"
+            or (start_event.payload or {}).get("mcp_policy") != "deny_all"
+            or "acceptEdits" not in command_text
+            or "Bash" not in command_text
+            or "mcp__*" not in command_text
+            or "bypassPermissions" in command_text
+            or "--dangerously-skip-permissions" in command_text
+        ):
+            raise RuntimeError("Worker 执行命令未满足 acceptEdits / 禁止 Bash 与 MCP / 禁止 bypass 的策略")
+        if any(
+            {"prompt", "content", "api_key", "token", "secret"} & set(event.payload or {})
+            for event in approval_events
+        ):
+            raise RuntimeError("审批审计事件包含不应记录的正文或密钥字段")
         required_events = {
             "execution.approval_requested", "execution.approval_approved",
             "executor.claimed", "executor.started", "verification.finished", "executor.finished",

@@ -1174,13 +1174,13 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                         if cancel_requested:
                             process_tree_stopped = await terminate_process_tree(proc)
                             terminal_reason = "cancelled"
-                            error_summary = "Cancelled by request"
+                            error_summary = "用户请求取消任务。"
                             add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
                             break
                         if asyncio.get_running_loop().time() >= deadline:
                             process_tree_stopped = await terminate_process_tree(proc)
                             terminal_reason = "timeout"
-                            error_summary = f"Task timed out after {MAX_TASK_SECONDS} seconds"
+                            error_summary = f"任务执行超时（{MAX_TASK_SECONDS} 秒）。"
                             add_event(task_id, "executor.timed_out", {
                                 "timeout_seconds": MAX_TASK_SECONDS,
                                 "exit_code": proc.returncode,
@@ -1195,18 +1195,18 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 if cancel_requested_after_exit and terminal_reason is None:
                     process_tree_stopped = await terminate_process_tree(proc)
                     terminal_reason = "cancelled"
-                    error_summary = "Cancelled by request"
+                    error_summary = "用户请求取消任务。"
                     add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
             except asyncio.CancelledError:
                 process_tree_stopped = await terminate_process_tree(proc)
                 terminal_reason = "worker_interrupted"
-                error_summary = "Worker interrupted; Claude subprocess tree terminated"
+                error_summary = "Worker 已中断；Claude 子进程树已终止。"
                 add_event(task_id, "executor.interrupted", {"reason": "worker_shutdown"})
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
             exit_code = proc.returncode
     except FileNotFoundError:
-        error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
+        error_summary, exit_code = f"未找到 Claude Code 可执行文件：{CLAUDE_BIN}", 127
     except Exception as exc:
         error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
         if mcp_config_attempted and mcp_config_path is None:
@@ -1222,8 +1222,8 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     if exit_code == 0 and error_summary is None and terminal_reason is None and not output_complete:
         terminal_reason = "incomplete_output"
         error_summary = (
-            "Claude Code exited with status 0 without a terminal result event "
-            "or a final assistant message."
+            "Claude Code 返回成功退出码，但没有提供终止结果事件"
+            "或最终回复。"
         )
     add_event(task_id, "executor.output_validated", {
         "complete": output_complete,
@@ -1335,9 +1335,9 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 terminal_reason = "verification_failed"
                 failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
                 error_summary = (
-                    f"Verification failed for command: {failed.get('command', 'unknown command')}"
-                    + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
-                    + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
+                    f"验证命令执行失败：{failed.get('command', 'unknown command')}"
+                    + ("（执行超时，超过 120 秒）" if failed.get("timed_out") else "")
+                    + (f"（退出码：{failed.get('exit_code')}）" if failed.get("exit_code") is not None else "")
                 )
         try:
             (task_dir / "verification.json").write_text(
@@ -1391,7 +1391,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 })
                 break
             if repair_error:
-                error_summary = f"Automatic repair attempt {repair_number} failed: {repair_error}"
+                error_summary = f"第 {repair_number} 次自动修复失败：{repair_error}"
             if repair_error == "cancelled":
                 terminal_reason = "cancelled"
                 verification_status = "not_run"
@@ -1458,12 +1458,12 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             return
         task.exit_code, task.session_id = exit_code, session_id
         task.repair_attempt_count = repair_attempt_count
-        attempt_error = error_summary or (None if exit_code == 0 else f"Claude Code exited with status {exit_code}")
+        attempt_error = error_summary or (None if exit_code == 0 else f"Claude Code 退出，状态码：{exit_code}")
         retry_scheduled = False
         if task.cancel_requested or terminal_reason == "cancelled":
             task.status = "cancelled"
             task.finished_at = now()
-            task.error_summary = attempt_error or "Cancelled by request"
+            task.error_summary = attempt_error or "用户请求取消任务。"
         elif exit_code == 0 and error_summary is None and verification_status != "failed":
             task.status = "succeeded"
             task.finished_at = now()
@@ -1485,7 +1485,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         else:
             task.status = "failed"
             task.finished_at = now()
-            task.error_summary = attempt_error or "Task failed"
+            task.error_summary = attempt_error or "任务执行失败。"
             if verification_status == "pending":
                 verification_status = "not_run"
         task.verification_status = verification_status
@@ -1557,9 +1557,9 @@ def recover_orphaned_running_tasks() -> int:
                 .values(
                     status="failed", finished_at=recovered_at, exit_code=125,
                     error_summary=(
-                        "Worker lease expired. The task was marked failed and was not retried "
-                        "automatically because the previous agent process may have produced side effects. "
-                        "Inspect workspace and process state before manually retrying."
+                        "Worker 租约已过期。任务已标记失败，未自动重试，"
+                        "因为上一次 Agent 进程可能已经产生副作用。"
+                        "手动重试前，请检查工作区和相关进程状态。"
                     ),
                     worker_id=None, lease_expires_at=None,
                 )
@@ -1616,7 +1616,7 @@ def _record_worker_interruption(task_id: str, worker_id: str) -> None:
         task.status = "failed"
         task.finished_at = finished_at
         task.exit_code = 130
-        task.error_summary = "Worker interrupted before task execution completed; inspect workspace and process state before retrying."
+        task.error_summary = "Worker 在任务执行完成前中断；手动重试前请检查工作区和相关进程状态。"
         task.worker_id = None
         task.lease_expires_at = None
         if task.verification_status == "pending":

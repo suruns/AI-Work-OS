@@ -763,8 +763,8 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 terminal_status = "succeeded"
             else:
                 error = (
-                    f"Claude Code exited with code {exit_code} without a final assistant response"
-                    if exit_code == 0 else f"Claude Code exited with code {exit_code}"
+                    f"Claude Code 退出码为 {exit_code}，但未返回最终回复。"
+                    if exit_code == 0 else f"Claude Code 退出，状态码：{exit_code}"
                 )
                 if stderr_bytes:
                     error += f": 检测到标准错误输出（{stderr_bytes} 字节；为保护隐私未保存内容）"

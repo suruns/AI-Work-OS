@@ -163,7 +163,8 @@ function renderTasks(){ $("task-count").textContent=tasks.length+" 项任务";$(
 async function refresh(){try{const [ts,st,ws,workers,insights]=await Promise.all([api("/tasks?limit=100"),api("/stats"),api("/workflows?limit=50"),api("/workers"),api("/insights?period_days="+encodeURIComponent($("insights-period").value))]);tasks=ts;renderWorkflows(ws);renderWorkers(workers);renderInsights(insights);$("s-total").textContent=st.total;$("s-queued").textContent=st.by_status.queued||0;$("s-running").textContent=st.by_status.running||0;$("s-succeeded").textContent=st.by_status.succeeded||0;$("connection").textContent="API 已连接";$("connection").style.color="var(--green)";if(selected&&!tasks.some(t=>t.id===selected))selected=null;if(!selected&&tasks.length)selected=tasks[0].id;renderTasks();await loadApprovals();if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow);if(selected)await loadDetail(selected);else $("detail").innerHTML='<div class="empty">选择一个任务查看执行时间线。</div>'}catch(e){$("connection").textContent="API 不可用";$("connection").style.color="var(--red)";$("toast").textContent=e.message}}
 
 let artifactCursor=null,artifactItems=[],artifactScannedTasks=0;
-function artifactKindZh(kind){return ({execution_log:"执行日志",error_log:"错误日志",workspace_change_report:"工作区变更报告",verification_report:"验证报告",repair_execution_log:"修复执行日志",repair_error_log:"修复错误日志",workspace_file:"工作区文件",file:"文件"})[kind]||kind;}\nfunction renderArtifactLibrary(data,append=false){
+function artifactKindZh(kind){return ({execution_log:"执行日志",error_log:"错误日志",workspace_change_report:"工作区变更报告",verification_report:"验证报告",repair_execution_log:"修复执行日志",repair_error_log:"修复错误日志",workspace_file:"工作区文件",file:"文件"})[kind]||kind;}
+function renderArtifactLibrary(data,append=false){
  const pageItems=data?.items||[];
  artifactItems=append?[...artifactItems,...pageItems]:pageItems;
  artifactScannedTasks+=data?.scanned_tasks||0;

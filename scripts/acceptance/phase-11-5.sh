@@ -30,6 +30,8 @@ export AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE=1
 export AI_WORK_OS_RUN_BUBBLEWRAP_MCP_ACCEPTANCE=1
 export AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE=1
 
+python -m playwright install chromium
+
 git fetch origin main:refs/remotes/origin/main
 git diff --check origin/main...HEAD
 
@@ -37,7 +39,9 @@ TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/awos-phase-11-5-acceptance.XXXXXX")"
 cleanup() {
   rm -rf "$TEMP_ROOT"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 mkdir -p "$TEMP_ROOT/storage"
 export AI_WORK_OS_DB="sqlite:///$TEMP_ROOT/automated-tests.db"
 export AI_WORK_OS_STORAGE="$TEMP_ROOT/storage"

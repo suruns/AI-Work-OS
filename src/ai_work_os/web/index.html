@@ -89,7 +89,7 @@ function aggregateEvents(events){
  }
  return visible;
 }
-async function api(url,opts={}){const r=await fetch(url,{headers:{"Content-Type":"application/json"},...opts});const data=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw new Error(data.detail||"请求失败");return data}
+async function api(url,opts={}){const r=await fetch(url,{headers:{"Content-Type":"application/json"},...opts});const data=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw new Error("请求失败（HTTP "+r.status+"）："+String(data.detail||"服务端未提供错误详情"));return data}
 function statusZh(value){return ({queued:"排队中",running:"执行中",succeeded:"已成功",failed:"失败",cancelled:"已取消",blocked:"已阻塞",idle:"空闲",busy:"忙碌",offline:"离线",lease_expired:"租约过期",pending:"待审批",approved:"已批准",rejected:"已拒绝",revoked:"已撤销",expired:"已过期"})[value]||value}
 function eventTypeZh(value){return ({
 "task.queued":"任务已排队","task.cancelled":"任务已取消","task.blocked":"任务已阻塞",

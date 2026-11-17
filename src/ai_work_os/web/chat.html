@@ -31,7 +31,7 @@
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const when=value=>{if(!value)return "";const s=typeof value==="string"&&!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)?value.replace(" ","T")+"Z":value;return new Date(s).toLocaleString()};
-async function api(url,options={}){const response=await fetch(url,{headers:{"Content-Type":"application/json"},...options});const data=await response.json().catch(()=>({detail:response.statusText}));if(!response.ok)throw new Error(data.detail||"请求失败");return data}
+async function api(url,options={}){const response=await fetch(url,{headers:{"Content-Type":"application/json"},...options});const data=await response.json().catch(()=>({detail:response.statusText}));if(!response.ok)throw new Error("请求失败（HTTP "+response.status+"）："+String(data.detail||"服务端未提供错误详情"));return data}
 let projects=[],conversations=[],activeConversationId=null,activeConversation=null,turns=[],messages=[],eventRows=[],eventCursors=new Map(),loadedConversationId=null,hasOlderMessages=false,loadingOlderMessages=false,pollBusy=false,lastError="";
 function setError(message){$("error").textContent=message||""}
 function statusZh(value){return ({queued:"排队中",running:"执行中",succeeded:"已成功",failed:"失败",cancelled:"已取消",blocked:"已阻塞",pending:"待审批",approved:"已批准",rejected:"已拒绝",revoked:"已撤销",expired:"已过期"})[value]||value}

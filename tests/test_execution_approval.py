@@ -57,6 +57,7 @@ def test_execution_approval_requires_explicit_decision_and_is_scope_bound(tmp_pa
     assert approval["scope_valid"] is True
     assert approval["prompt"] == "在项目中创建一个测试文件"
     assert approval["verification_commands"] == []
+    assert approval["max_repair_attempts"] == 0
 
     with SessionLocal() as db:
         record = db.get(Task, task["id"])

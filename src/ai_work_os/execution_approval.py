@@ -119,6 +119,7 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "prompt": task.prompt if task else None,
         "verification_commands": list(task.verification_commands or []) if task else [],
         "max_attempts": task.max_attempts if task else None,
+        "max_repair_attempts": task.max_repair_attempts if task else None,
         "auto_repair": bool(task.auto_repair) if task else False,
         "status": approval.status,
         "requested_at": approval.requested_at, "decided_at": approval.decided_at,

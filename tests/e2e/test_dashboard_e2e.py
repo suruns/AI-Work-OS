@@ -284,6 +284,7 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     assert "执行隔离：" in approval_copy
     assert "网络策略：" in approval_copy
     assert "权限配置来源：" in approval_copy
+    assert "最大自动修复次数：" in approval_copy
     page.once("dialog", lambda dialog: dialog.accept())
     approved_card.get_by_role("button", name="批准并允许执行").click()
     approved_status = page.request.get(base_url + f"/execution-approvals/{approved['id']}")

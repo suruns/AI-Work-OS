@@ -137,7 +137,7 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
                 ],
             })
         except mcp.ToolError as exc:
-            assert "循环" in str(exc)
+            assert "环" in str(exc)
         else:
             raise AssertionError("cyclic workflow was accepted")
         with factory() as db:

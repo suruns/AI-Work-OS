@@ -11,6 +11,13 @@ fi
 
 API_HOST="${AI_WORK_OS_API_HOST:-127.0.0.1}"
 API_PORT="${AI_WORK_OS_API_PORT:-8000}"
+case "$API_HOST" in
+  127.0.0.1|localhost|::1) ;;
+  *)
+    echo "错误：受控执行模式只允许 API 绑定本机回环地址（127.0.0.1、localhost 或 ::1）。" >&2
+    exit 2
+    ;;
+esac
 HEALTH_URL="http://${API_HOST}:${API_PORT}/health"
 
 api_pid=""

@@ -209,6 +209,13 @@ def test_local_start_script_waits_for_api_health_before_workers():
     assert source.index("uvicorn ai_work_os.api:app") < source.index('curl --silent')
     assert source.index('curl --silent') < source.index("python -m ai_work_os.worker")
     assert source.index("python -m ai_work_os.worker") < source.index("python -m ai_work_os.master_agent")
+    rejected = subprocess.run(
+        ["bash", str(script)],
+        env={**os.environ, "AI_WORK_OS_API_HOST": "0.0.0.0"},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert rejected.returncode == 2
+    assert "只允许 API 绑定本机回环地址" in rejected.stderr
 
 
 def test_cancelling_queued_task_invalidates_pending_approval(tmp_path):

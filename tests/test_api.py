@@ -364,7 +364,7 @@ def test_logged_command_redacts_secrets_and_preserves_effective_permission_args(
         assert mcp_path not in serialized
 
 
-def test_permission_modes_are_persisted_and_applied():
+def test_permission_modes_are_persisted_and_applied(tmp_path):
     from ai_work_os.worker import build_command
 
     plan = client.post("/tasks", json={
@@ -378,10 +378,17 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan_command[-4:] == ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]
     assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
+    project = client.post("/projects", json={
+        "name": "Configured mode project",
+        "slug": f"configured-mode-{uuid4().hex}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project.status_code == 201
     configured = client.post("/tasks", json={
+        "project_id": project.json()["id"],
         "title": "Local configured mode",
         "prompt": "Use configured CLI permissions",
-        "workspace_path": ".",
+        "workspace_path": str(tmp_path),
         "permission_mode": "configured",
     })
     assert configured.status_code == 201

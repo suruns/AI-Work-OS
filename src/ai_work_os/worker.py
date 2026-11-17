@@ -1208,7 +1208,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     except FileNotFoundError:
         error_summary, exit_code = f"未找到 Claude Code 可执行文件：{CLAUDE_BIN}", 127
     except Exception as exc:
-        error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
+        error_summary, exit_code = f"执行过程中发生错误（{type(exc).__name__}）：{exc}", 1
         if mcp_config_attempted and mcp_config_path is None:
             add_event(task_id, "executor.mcp_isolation_failed", {
                 "policy": "deny_all",
@@ -1335,7 +1335,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 terminal_reason = "verification_failed"
                 failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
                 error_summary = (
-                    f"验证命令执行失败：{failed.get('command', 'unknown command')}"
+                    f"验证命令执行失败：{failed.get('command', '未知命令')}"
                     + ("（执行超时，超过 120 秒）" if failed.get("timed_out") else "")
                     + (f"（退出码：{failed.get('exit_code')}）" if failed.get("exit_code") is not None else "")
                 )

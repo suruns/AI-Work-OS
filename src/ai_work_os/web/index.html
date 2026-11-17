@@ -133,13 +133,15 @@ function renderInsights(data){
 }
 async function loadApprovals(){
  try{
-  const responses=await Promise.all([api("/execution-approvals?status=pending"),api("/execution-approvals?status=approved")]);
-  const pending=responses[0].approvals||[];
-  const approved=(responses[1].approvals||[]).filter(a=>["queued","running"].includes(a.task_status));
-  const items=pending.concat(approved);
+  const response=await api("/execution-approvals");
+  const all=response.approvals||[];
+  const pending=all.filter(a=>a.status==="pending");
+  const approved=all.filter(a=>a.status==="approved"&&["queued","running"].includes(a.task_status));
+  const terminal=all.filter(a=>["rejected","revoked","expired"].includes(a.status)&&a.task_status==="queued");
+  const items=pending.concat(approved,terminal);
   $("approval-count").textContent=pending.length+" 项待审批 · "+approved.filter(a=>a.task_status==="queued").length+" 项已批准待执行";
   $("approval-list").innerHTML=items.length?items.map(a=>{
-   const needsResubmit=!a.scope_valid&&a.task_status==="queued";
+   const needsResubmit=a.task_status==="queued"&&(["rejected","revoked","expired"].includes(a.status)||!a.scope_valid);
    const actions=needsResubmit
     ? '<button class="primary resubmit-execution" data-task-id="'+esc(a.task_id)+'">重新申请审批</button>'
     : (a.status==="pending"
@@ -151,7 +153,7 @@ async function loadApprovals(){
    const runtime='<div class="meta">执行隔离：'+esc(sandboxLabel)+'<br>网络策略：'+esc(networkLabel)+'<br>模型：'+esc(policy.claude_model||"CLI 默认模型")+'<br>权限配置来源：'+esc(policy.claude_setting_sources||"project,local")+(policy.sandbox_runtime_paths?'<br>额外运行时路径：'+esc(policy.sandbox_runtime_paths):"")+'</div>';
    const scope=a.scope_valid?'<div class="meta" style="color:var(--green)">执行范围摘要有效</div>':'<div class="meta" style="color:var(--red)">执行范围已变化，不能批准或继续执行</div>';
    return '<article class="approval-card"><div class="task-head"><strong>'+esc(a.task_title||"未命名任务")+'</strong>'+pill(a.status)+'</div><div class="meta">项目：'+esc(a.project_name||a.project_id)+'<br>工作区：'+esc(a.workspace_path)+'<br>权限：受控写入<br>任务状态：'+esc(statusZh(a.task_status||"未知"))+'<br>到期时间：'+esc(date(a.expires_at))+'</div>'+runtime+(a.acceptance_criteria?'<div class="meta">验收标准：'+esc(a.acceptance_criteria)+'</div>':"")+(a.prompt?'<details class="approval-prompt"><summary>查看完整任务说明</summary><pre>'+esc(a.prompt)+'</pre></details>':"")+(a.verification_commands&&a.verification_commands.length?'<div class="meta">验证命令：<pre>'+esc(a.verification_commands.join("\\n"))+'</pre></div>':'<div class="meta">未配置自动验证命令</div>')+'<div class="meta">自动修复：'+(a.auto_repair?'已启用':'已关闭')+' · 最大尝试次数：'+esc(a.max_attempts||1)+'</div>'+scope+'<div class="approval-actions">'+actions+'</div></article>';
-  }).join(""):'<div class="empty">当前没有待审批或已批准待执行的写入任务。</div>';
+  }).join(""):'<div class="empty">当前没有需要处理的写入审批。</div>';
   document.querySelectorAll(".resubmit-execution").forEach(b=>b.addEventListener("click",async()=>{b.disabled=true;try{await api("/execution-approvals/request/"+encodeURIComponent(b.dataset.taskId),{method:"POST"});$("toast").textContent="已重新提交审批申请，请检查更新后的执行环境。";await refresh()}catch(e){$("toast").textContent=e.message;await loadApprovals()}}));
   document.querySelectorAll(".approve-execution").forEach(b=>b.addEventListener("click",async()=>{if(!confirm("确认批准该任务在指定项目工作区内执行写操作？"))return;b.disabled=true;try{await api("/execution-approvals/"+encodeURIComponent(b.dataset.id)+"/approve",{method:"POST",body:JSON.stringify({note:"用户在本机控制台明确批准"})});$("toast").textContent="已批准；Worker 将按队列规则领取任务。";await refresh()}catch(e){$("toast").textContent=e.message;await loadApprovals()}}));
   document.querySelectorAll(".reject-execution").forEach(b=>b.addEventListener("click",async()=>{b.disabled=true;try{await api("/execution-approvals/"+encodeURIComponent(b.dataset.id)+"/reject",{method:"POST",body:JSON.stringify({note:"用户在本机控制台拒绝"})});$("toast").textContent="已拒绝执行申请";await refresh()}catch(e){$("toast").textContent=e.message;await loadApprovals()}}));

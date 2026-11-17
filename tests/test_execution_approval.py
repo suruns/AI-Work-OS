@@ -430,3 +430,38 @@ def test_local_approval_guard_accepts_loopback_host_and_origin():
         "server": ("127.0.0.1", 8000),
     })
     require_local_control_plane(request)
+
+
+def test_runtime_policy_change_invalidates_and_allows_resubmission(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "off")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_NETWORK", "none")
+    _, task = _configured_task(tmp_path)
+    requested = client.post(f"/execution-approvals/request/{task['id']}")
+    assert requested.status_code == 200, requested.text
+    approval = requested.json()
+    assert approval["runtime_policy"]["sandbox_mode"] == "off"
+
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["scope_valid"] is True
+
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_MODE", "bubblewrap")
+    monkeypatch.setenv("AI_WORK_OS_SANDBOX_NETWORK", "host")
+    stale = client.get(f"/execution-approvals/{approval['id']}").json()
+    assert stale["scope_valid"] is False
+
+    resubmitted = client.post(f"/execution-approvals/request/{task['id']}")
+    assert resubmitted.status_code == 200, resubmitted.text
+    current = resubmitted.json()
+    assert current["id"] == approval["id"]
+    assert current["status"] == "pending"
+    assert current["scope_valid"] is True
+    assert current["runtime_policy"]["sandbox_mode"] == "bubblewrap"
+    assert current["runtime_policy"]["sandbox_network"] == "host"
+
+    events = client.get(f"/tasks/{task['id']}/events").json()
+    requested_events = [event for event in events if event["event_type"] == "execution.approval_requested"]
+    assert len(requested_events) == 2
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is False

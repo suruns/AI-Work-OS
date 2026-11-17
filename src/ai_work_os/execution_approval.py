@@ -95,7 +95,7 @@ def approval_is_valid(db, task: Task) -> bool:
     expires = approval.expires_at
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
-    project = db.get(Project, task.project_id) if task.project_id else None
+    project = db.scalar(select(Project).where(Project.id == task.project_id).with_for_update()) if task.project_id else None
     if project is None or project.status != "active":
         return False
     task_workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
@@ -148,7 +148,7 @@ def request_execution_approval(task_id: str) -> dict:
             raise HTTPException(status_code=404, detail="任务不存在")
         if task.status != "queued" or task.permission_mode != "configured" or not task.project_id:
             raise HTTPException(status_code=409, detail="只有绑定项目且排队中的 configured 任务可以申请写执行审批")
-        project = db.get(Project, task.project_id)
+        project = db.scalar(select(Project).where(Project.id == task.project_id).with_for_update())
         if project is None or project.status != "active":
             raise HTTPException(status_code=409, detail="项目不存在或已归档")
         workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
@@ -310,7 +310,7 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
             raise HTTPException(status_code=409, detail="审批已过期")
         if task is None or task.status != "queued" or not task.requires_approval:
             raise HTTPException(status_code=409, detail="任务已不处于可审批状态")
-        project = db.get(Project, approval.project_id)
+        project = db.scalar(select(Project).where(Project.id == approval.project_id).with_for_update())
         project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False)) if project else ""
         task_workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
         if (

@@ -125,7 +125,7 @@ def test_worker_never_claims_unapproved_configured_task_or_starts_after_revocati
             )
             db.add(approval)
             db.commit()
-            task_id, approval_id = task.id, approval.id
+            task_id, approval_id, project_id = task.id, approval.id, project.id
 
         assert worker.claim_task() is None
         with factory() as db:
@@ -219,6 +219,7 @@ def test_cancelling_queued_task_invalidates_pending_approval(tmp_path):
 
 @pytest.mark.parametrize("state_change, expected_status", [
     ("revoke", "failed"),
+    ("project_workspace", "failed"),
     ("cancel", "cancelled"),
 ])
 def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
@@ -272,6 +273,10 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
             with factory() as db:
                 if state_change == "revoke":
                     db.get(ExecutionApproval, approval_id).status = "revoked"
+                elif state_change == "project_workspace":
+                    other_workspace = tmp_path / "other-workspace"
+                    other_workspace.mkdir(exist_ok=True)
+                    db.get(Project, project_id).workspace_path = str(other_workspace)
                 else:
                     db.get(Task, task_id).cancel_requested = 1
                 db.commit()
@@ -301,7 +306,7 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
             assert record.worker_id is None
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
             assert not any(event.event_type == "executor.started" for event in events)
-            if state_change == "revoke":
+            if state_change in {"revoke", "project_workspace"}:
                 blocked = [event for event in events if event.event_type == "execution.approval_invalid"]
                 assert len(blocked) == 1, f"events={[(event.event_type, event.payload) for event in events]!r}; error={record.error_summary!r}"
                 assert blocked[0].payload["process_started"] is False

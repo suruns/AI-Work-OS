@@ -48,7 +48,7 @@
     <select id="artifact-library-kind" style="width:auto"><option value="">全部类型</option><option value="execution_log">执行日志</option><option value="error_log">错误日志</option><option value="workspace_change_report">工作区报告</option><option value="verification_report">验证报告</option><option value="repair_execution_log">修复日志</option><option value="repair_error_log">修复错误</option><option value="workspace_file">工作区文件</option></select>
     <button class="primary" type="submit" id="artifact-library-search">搜索</button>
   </form>
-  <div id="artifact-library-results" style="margin-top:12px"><div class="empty">搜索 to load artifacts from recent tasks.</div></div>
+  <div id="artifact-library-results" style="margin-top:12px"><div class="empty">搜索以加载近期任务产物。</div></div>
   <div class="actions" style="margin-top:10px"><button type="button" id="artifact-library-more" hidden>加载更早任务</button><span id="artifact-library-page-note" class="muted small"></span></div>
   <div class="muted small" style="margin-top:10px">搜索 pages are bounded to recent tasks. 加载更早任务 to continue; the cursor remains stable when newer tasks are created. Files are never moved, renamed, or deleted.</div>
 </section>
@@ -69,7 +69,7 @@
 <div id="workflow-rows" style="display:grid;gap:10px"></div>
 <div class="actions" style="margin:10px 0"><button type="button" id="add-workflow-task">＋ 添加任务步骤</button><button class="primary" type="submit" id="workflow-submit">加入工作流队列</button></div>
 <div class="muted small">为每个任务选择前置步骤；所有前置步骤成功后，该步骤才可执行。每个任务使用各自的权限与验证设置。</div>
-</form><div class="task-head" style="margin-top:18px"><strong>工作流</strong><span id="workflow-count" class="muted small"></span></div><div id="workflows" class="tasks" style="margin-top:10px;max-height:250px"><div class="empty">Loading workflows…</div></div><div id="workflow-detail" style="margin-top:12px"></div></section>
+</form><div class="task-head" style="margin-top:18px"><strong>工作流</strong><span id="workflow-count" class="muted small"></span></div><div id="workflows" class="tasks" style="margin-top:10px;max-height:250px"><div class="empty">正在加载工作流…</div></div><div id="workflow-detail" style="margin-top:12px"></div></section>
 <section class="panel"><div id="detail"><div class="empty">选择一个任务查看执行时间线。</div></div></section>
 </div><p class="muted small" style="margin-top:18px">仅供本地开发使用 · 请使用可信工作区 · 接受 Agent 修改前务必检查变更。</p>
 </main>
@@ -144,7 +144,7 @@ function renderArtifactLibrary(data,append=false){
  artifactItems=append?[...artifactItems,...pageItems]:pageItems;
  artifactScannedTasks+=data?.scanned_tasks||0;
  $("artifact-library-count").textContent=artifactItems.length+" shown · "+artifactScannedTasks+" tasks scanned";
- $("artifact-library-results").innerHTML=artifactItems.length?'<div class="artifact-list">'+artifactItems.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"workspace_file")+' · '+esc(item.size_bytes??0)+' bytes</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join("")+'</div>':'<div class="empty">No matching artifacts found in the scanned tasks.</div>';
+ $("artifact-library-results").innerHTML=artifactItems.length?'<div class="artifact-list">'+artifactItems.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"workspace_file")+' · '+esc(item.size_bytes??0)+' bytes</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join("")+'</div>':'<div class="empty">扫描的任务中没有匹配的产物。</div>';
  if(data.truncated)$("artifact-library-results").insertAdjacentHTML("beforeend",'<div class="muted small" style="margin-top:8px">This page reached its result limit. Narrow the search to see more matches within these tasks.</div>');
  $("artifact-library-more").hidden=!data.next_cursor_task_id;
  $("artifact-library-page-note").textContent=data.truncated?"This page reached the item limit. Narrow the search and start again to avoid skipping matches.":(data.has_more_tasks?"More older tasks are available.":"End of task history · "+artifactScannedTasks+" tasks scanned");
@@ -174,7 +174,7 @@ function renderTaskResult(events){
 function renderArtifacts(data){
  const artifacts=data?.artifacts||[],files=data?.workspace_files||[];
  const rows=items=>items.length?'<div class="artifact-list">'+items.map(item=>'<div class="artifact-row"><span style="overflow-wrap:anywhere">'+esc(item.name||item.path)+'<div class="muted small">'+esc(item.kind||'file')+' · '+esc(item.size_bytes||0)+' bytes</div></span><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join('')+'</div>':'<div class="muted small" style="margin-top:6px">暂无可用内容</div>';
- return '<div class="event"><div class="task-head"><strong>任务日志与报告</strong><span class="muted small">'+artifacts.length+' items</span></div>'+rows(artifacts)+'<div class="task-head" style="margin-top:16px"><strong>工作区文件 changed during task</strong><span class="muted small">'+files.length+' files</span></div>'+rows(files.map(f=>({...f,name:f.path,kind:'workspace file'})))+'<div class="muted small" style="margin-top:10px">仅可下载任务自身日志、报告及本任务记录的变更文件。日志可能包含源代码或机密信息。</div></div>';
+ return '<div class="event"><div class="task-head"><strong>任务日志与报告</strong><span class="muted small">'+artifacts.length+' items</span></div>'+rows(artifacts)+'<div class="task-head" style="margin-top:16px"><strong>任务执行期间发生变更的工作区文件</strong><span class="muted small">'+files.length+' 个文件</span></div>'+rows(files.map(f=>({...f,name:f.path,kind:'workspace file'})))+'<div class="muted small" style="margin-top:10px">仅可下载任务自身日志、报告及本任务记录的变更文件。日志可能包含源代码或机密信息。</div></div>';
 }
 function renderWorkspaceChanges(report){
  if(!report||!report.available)return '<div class="event"><div class="muted small">'+esc(report?.reason||"工作区变更报告暂不可用。")+'</div></div>';

@@ -970,15 +970,21 @@ async def _spawn_task_process(task_id: str, worker_id: str, invocation):
         # Keep the write reservation until the child exists. A concurrent cancel
         # either wins before spawn or is recorded just after spawn and handled by
         # the regular process-group cancellation loop.
-        proc = await asyncio.create_subprocess_exec(
-            *invocation.command,
-            cwd=invocation.cwd,
-            env=invocation.env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=(os.name == "posix"),
-        )
-        db.commit()
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *invocation.command,
+                cwd=invocation.cwd,
+                env=invocation.env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
+            db.commit()
+        except BaseException:
+            if proc is not None and proc.returncode is None:
+                await terminate_process_tree(proc)
+            raise
         return proc
 
 

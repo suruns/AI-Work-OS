@@ -157,6 +157,7 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     )
     assert "verification_commands" in request_schema["properties"]
     assert request_schema["properties"]["verification_commands"]["maxItems"] == 5
+    assert all(any("\u4e00" <= char <= "\u9fff" for char in tool["description"]) for tool in listed["result"]["tools"])
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
         "get_workflow", "create_task", "create_workflow", "request_execution",

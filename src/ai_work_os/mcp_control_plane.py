@@ -79,12 +79,12 @@ def _tools() -> list[dict[str, Any]]:
     return [
         {
             "name": "get_project_overview",
-            "description": "Read the current conversation's project summary.",
+            "description": "读取当前对话绑定项目的概览信息。",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "list_tasks",
-            "description": "List tasks in the current project.",
+            "description": "列出当前项目的任务，可按状态筛选。",
             "inputSchema": {"type": "object", "properties": {
                 "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled", "blocked"]},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20},
@@ -92,13 +92,13 @@ def _tools() -> list[dict[str, Any]]:
         },
         {
             "name": "get_task",
-            "description": "Read a task in the current project.",
+            "description": "读取当前项目中的指定任务详情。",
             "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
                             "required": ["task_id"], "additionalProperties": False},
         },
         {
             "name": "list_workflows",
-            "description": "List workflows in the current project.",
+            "description": "列出当前项目的工作流，可按状态筛选。",
             "inputSchema": {"type": "object", "properties": {
                 "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20},
@@ -106,13 +106,13 @@ def _tools() -> list[dict[str, Any]]:
         },
         {
             "name": "get_workflow",
-            "description": "Read a workflow and its tasks in the current project.",
+            "description": "读取当前项目中的指定工作流及其任务。",
             "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}},
                             "required": ["workflow_id"], "additionalProperties": False},
         },
         {
             "name": "create_task",
-            "description": "Queue a plan-mode task in the current project. It will not execute until claimed by a Worker.",
+            "description": "在当前项目中创建 plan 模式任务并排队；Worker 领取后仍仅按只读权限执行。",
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string", "minLength": 1, "maxLength": 240},
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
@@ -132,7 +132,7 @@ def _tools() -> list[dict[str, Any]]:
         },
         {
             "name": "create_workflow",
-            "description": "Queue a plan-mode workflow in the current project. Dependencies use task keys.",
+            "description": "在当前项目中创建 plan 模式工作流；任务依赖使用任务 key 表示。",
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string", "minLength": 1, "maxLength": 240},
                 "tasks": {"type": "array", "minItems": 1, "maxItems": 30, "items": {

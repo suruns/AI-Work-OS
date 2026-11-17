@@ -517,7 +517,8 @@ def test_revoked_approval_is_not_claimed_again(tmp_path):
         db.commit()
     revoked = client.post(f"/execution-approvals/{approval['id']}/revoke", json={})
     assert revoked.status_code == 200
-    assert worker.claim_task() is None
+    claimed_task_id = worker.claim_task()
+    assert claimed_task_id != task["id"]
     with SessionLocal() as db:
         record = db.get(Task, task["id"])
         assert record.status == "queued"

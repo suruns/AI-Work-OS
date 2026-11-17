@@ -262,7 +262,7 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
             )
             db.add(approval)
             db.commit()
-            task_id, approval_id = task.id, approval.id
+            task_id, approval_id, project_id = task.id, approval.id, project.id
 
         async def snapshot(*args, **kwargs):
             return {"files": []}

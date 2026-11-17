@@ -297,7 +297,9 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     revoke_pending_card.get_by_role("button", name="批准并允许执行").click()
     revoke_approved_card = page.locator("#approval-list .approval-card").filter(has_text="撤销测试任务")
     page.once("dialog", lambda dialog: dialog.accept())
-    revoke_approved_card.get_by_role("button", name="撤销审批").click()
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{revoked['id']}/revoke")) as revoke_response:
+        revoke_approved_card.get_by_role("button", name="撤销审批").click()
+    assert revoke_response.value.status == 200, revoke_response.value.text()
     revoked_status = page.request.get(base_url + f"/execution-approvals/{revoked['id']}")
     assert revoked_status.status == 200
     assert revoked_status.json()["status"] == "revoked"

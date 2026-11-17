@@ -45,13 +45,15 @@ def require_local_control_plane(request: Request) -> None:
         try:
             parsed_origin = urlsplit(origin)
             origin_host = parsed_origin.hostname
+            origin_port_value = parsed_origin.port
         except ValueError:
             origin_host = None
+            origin_port_value = None
             parsed_origin = None
         request_scheme = request.url.scheme
         expected_port = request_port or (443 if request_scheme == "https" else 80)
         origin_port = (
-            parsed_origin.port or (443 if parsed_origin.scheme == "https" else 80)
+            origin_port_value or (443 if parsed_origin.scheme == "https" else 80)
             if parsed_origin is not None else None
         )
         if (

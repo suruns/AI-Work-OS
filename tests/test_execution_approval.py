@@ -548,3 +548,25 @@ def test_local_approval_guard_rejects_cross_port_origin():
     with pytest.raises(HTTPException) as exc:
         require_local_control_plane(request)
     assert exc.value.status_code == 403
+
+
+def test_local_approval_guard_rejects_malformed_origin_port():
+    request = Request({
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/execution-approvals/123/approve",
+        "raw_path": b"/execution-approvals/123/approve",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"127.0.0.1:8000"),
+            (b"origin", b"http://127.0.0.1:invalid"),
+        ],
+        "client": ("127.0.0.1", 43122),
+        "server": ("127.0.0.1", 8000),
+    })
+    with pytest.raises(HTTPException) as exc:
+        require_local_control_plane(request)
+    assert exc.value.status_code == 403

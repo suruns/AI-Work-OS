@@ -137,7 +137,7 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
                 ],
             })
         except mcp.ToolError as exc:
-            assert "acyclic" in str(exc)
+            assert "循环" in str(exc)
         else:
             raise AssertionError("cyclic workflow was accepted")
         with factory() as db:
@@ -227,7 +227,7 @@ def test_json_rpc_request_id_cannot_be_reused_for_another_tool(monkeypatch, tmp_
             }},
         })
         assert conflict["result"]["isError"] is True
-        assert "different tool arguments" in conflict["result"]["content"][0]["text"]
+        assert "不同的工具参数" in conflict["result"]["content"][0]["text"]
         with factory() as db:
             assert len(list(db.scalars(select(Task)))) == 1
             assert len(list(db.scalars(select(Workflow)))) == 0
@@ -252,7 +252,7 @@ def test_json_rpc_request_id_reuse_with_different_arguments_is_rejected(monkeypa
             }},
         })
         assert retry["result"]["isError"] is True
-        assert "different tool arguments" in retry["result"]["content"][0]["text"]
+        assert "不同的工具参数" in retry["result"]["content"][0]["text"]
         with factory() as db:
             assert len(list(db.scalars(select(Task)))) == 1
     finally:

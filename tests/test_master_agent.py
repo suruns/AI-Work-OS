@@ -365,7 +365,7 @@ def test_master_agent_mcp_broker_is_project_scoped_and_uses_private_socket(tmp_p
                 "arguments": {"title": "Different", "prompt": "Different task"},
             })
             assert changed["ok"] is False
-            assert "different tool arguments" in changed["error"]
+            assert "不同的工具参数" in changed["error"]
             missing_id = await request({
                 "name": "create_task",
                 "arguments": {"title": "No id", "prompt": "Must be rejected"},

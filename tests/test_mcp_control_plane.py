@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from ai_work_os import mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
+from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
 
 
 def isolated(monkeypatch, tmp_path):
@@ -270,3 +270,31 @@ def test_broker_client_import_does_not_initialize_host_database(tmp_path):
     )
     subprocess.run([sys.executable, "-c", code], check=True, env=env)
     assert not db_path.parent.exists()
+
+
+def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatch, tmp_path):
+    engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
+    try:
+        args = {
+            "title": "修复登录页面", "prompt": "修复项目中的登录页面并运行验证",
+            "acceptance_criteria": "登录流程测试通过",
+        }
+        first = mcp.call_tool("request_execution", args, request_id="write-request-1")
+        second = mcp.call_tool("request_execution", args, request_id="write-request-1")
+        assert first == second
+        assert first["permission_mode"] == "configured"
+        assert first["requires_approval"] is True
+        assert first["approval_status"] == "pending"
+        with factory() as db:
+            task = db.get(Task, first["id"])
+            approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id))
+            assert task.project_id == project_id
+            assert task.status == "queued"
+            assert approval.status == "pending"
+            assert approval.project_id == project_id
+            assert approval.scope_hash
+            assert db.scalar(select(MCPToolInvocation).where(
+                MCPToolInvocation.request_id == "s:write-request-1"
+            )) is not None
+    finally:
+        engine.dispose()

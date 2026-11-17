@@ -92,6 +92,19 @@ def main() -> int:
         assert rejected.status_code == 200
         assert worker.claim_task(worker_id) is None
 
+        revoked_task = create_configured_task("撤销门禁测试", "不要执行任何操作。")
+        revoked_approval = request_approval(revoked_task["id"])
+        approved_revoked = client.post(
+            f"/execution-approvals/{revoked_approval['id']}/approve", json={}
+        )
+        assert approved_revoked.status_code == 200
+        revoked = client.post(
+            f"/execution-approvals/{revoked_approval['id']}/revoke", json={"note": "验收：撤销执行"}
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["status"] == "revoked"
+        assert worker.claim_task(worker_id) is None
+
         # A scope mutation after approval must invalidate the request.
         changed_task = create_configured_task("范围变更门禁测试", "原始任务范围。")
         changed_approval = request_approval(changed_task["id"])
@@ -197,7 +210,7 @@ def main() -> int:
             raise RuntimeError("批准执行期间意外触发审批失效事件")
 
         print("PASS: 受控执行审批闭环 + 真实 Claude Code + Bubblewrap 写入与验证")
-        print("pending/rejected/scope_changed/expired=blocked")
+        print("pending/rejected/revoked/scope_changed/expired=blocked")
         print(f"task_status={finished.status} verification={finished.verification_status}")
         print(f"created_file={created_file.name} audit_events={len(events)}")
         print("approval_audit=passed")

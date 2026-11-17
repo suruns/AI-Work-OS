@@ -59,6 +59,10 @@ def test_workflow_click_does_not_select_a_task_or_request_undefined(dashboard):
     ).click()
 
     page.locator("#workflow-detail").get_by_text("Workflow click isolation").wait_for()
+    workflow_copy = page.locator("#workflow-detail").inner_text()
+    assert "工作流步骤" in workflow_copy
+    assert "查看任务" in workflow_copy
+    assert "Workflow steps" not in workflow_copy
     page.locator("#detail").get_by_text("Keep task selection").wait_for()
     assert bad_requests == []
 

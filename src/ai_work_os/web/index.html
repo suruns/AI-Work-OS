@@ -50,7 +50,7 @@
   </form>
   <div id="artifact-library-results" style="margin-top:12px"><div class="empty">搜索以加载近期任务产物。</div></div>
   <div class="actions" style="margin-top:10px"><button type="button" id="artifact-library-more" hidden>加载更早任务</button><span id="artifact-library-page-note" class="muted small"></span></div>
-  <div class="muted small" style="margin-top:10px">搜索 pages are bounded to recent tasks. 加载更早任务 to continue; the cursor remains stable when newer tasks are created. Files are never moved, renamed, or deleted.</div>
+  <div class="muted small" style="margin-top:10px">搜索范围限定在近期任务中。点击“加载更早任务”继续浏览；即使新增任务，分页游标也保持稳定。文件不会被移动、重命名或删除。</div>
 </section>
 <div class="layout">
 <section class="panel"><h2>＋ 创建任务</h2><form id="create-form">
@@ -163,12 +163,12 @@ function renderTasks(){ $("task-count").textContent=tasks.length+" 项任务";$(
 async function refresh(){try{const [ts,st,ws,workers,insights]=await Promise.all([api("/tasks?limit=100"),api("/stats"),api("/workflows?limit=50"),api("/workers"),api("/insights?period_days="+encodeURIComponent($("insights-period").value))]);tasks=ts;renderWorkflows(ws);renderWorkers(workers);renderInsights(insights);$("s-total").textContent=st.total;$("s-queued").textContent=st.by_status.queued||0;$("s-running").textContent=st.by_status.running||0;$("s-succeeded").textContent=st.by_status.succeeded||0;$("connection").textContent="API 已连接";$("connection").style.color="var(--green)";if(selected&&!tasks.some(t=>t.id===selected))selected=null;if(!selected&&tasks.length)selected=tasks[0].id;renderTasks();await loadApprovals();if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow);if(selected)await loadDetail(selected);else $("detail").innerHTML='<div class="empty">选择一个任务查看执行时间线。</div>'}catch(e){$("connection").textContent="API 不可用";$("connection").style.color="var(--red)";$("toast").textContent=e.message}}
 
 let artifactCursor=null,artifactItems=[],artifactScannedTasks=0;
-function renderArtifactLibrary(data,append=false){
+function artifactKindZh(kind){return ({execution_log:"执行日志",error_log:"错误日志",workspace_change_report:"工作区变更报告",verification_report:"验证报告",repair_execution_log:"修复执行日志",repair_error_log:"修复错误日志",workspace_file:"工作区文件",file:"文件"})[kind]||kind;}\nfunction renderArtifactLibrary(data,append=false){
  const pageItems=data?.items||[];
  artifactItems=append?[...artifactItems,...pageItems]:pageItems;
  artifactScannedTasks+=data?.scanned_tasks||0;
  $("artifact-library-count").textContent=artifactItems.length+" 项 · 已扫描 "+artifactScannedTasks+" 个任务";
- $("artifact-library-results").innerHTML=artifactItems.length?'<div class="artifact-list">'+artifactItems.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(item.kind||"工作区文件")+' · '+esc(item.size_bytes??0)+' 字节</div><div class="muted small">'+esc(item.task_title)+' · '+esc(item.task_status)+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join("")+'</div>':'<div class="empty">扫描的任务中没有匹配的产物。</div>';
+ $("artifact-library-results").innerHTML=artifactItems.length?'<div class="artifact-list">'+artifactItems.map(item=>'<div class="artifact-row"><div style="min-width:0;overflow-wrap:anywhere"><strong>'+esc(item.name||item.path)+'</strong><div class="muted small">'+esc(artifactKindZh(item.kind||"workspace_file"))+' · '+esc(item.size_bytes??0)+' 字节</div><div class="muted small">'+esc(item.task_title)+' · '+esc(statusZh(item.task_status))+' · '+esc(item.workspace_path)+'</div></div><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join("")+'</div>':'<div class="empty">扫描的任务中没有匹配的产物。</div>';
  if(data.truncated)$("artifact-library-results").insertAdjacentHTML("beforeend",'<div class="muted small" style="margin-top:8px">本页已达到结果数量上限。请缩小搜索范围，以查看这些任务中的更多匹配项。</div>');
  $("artifact-library-more").hidden=!data.next_cursor_task_id;
  $("artifact-library-page-note").textContent=data.truncated?"本页已达到结果数量上限。请缩小搜索范围后重新搜索，避免遗漏匹配项。":(data.has_more_tasks?"还有更早的任务记录可供加载。":"已到任务历史末尾 · "+artifactScannedTasks+" 个任务");
@@ -197,7 +197,7 @@ function renderTaskResult(events){
 }
 function renderArtifacts(data){
  const artifacts=data?.artifacts||[],files=data?.workspace_files||[];
- const rows=items=>items.length?'<div class="artifact-list">'+items.map(item=>'<div class="artifact-row"><span style="overflow-wrap:anywhere">'+esc(item.name||item.path)+'<div class="muted small">'+esc(item.kind||'file')+' · '+esc(item.size_bytes||0)+' 字节</div></span><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join('')+'</div>':'<div class="muted small" style="margin-top:6px">暂无可用内容</div>';
+ const rows=items=>items.length?'<div class="artifact-list">'+items.map(item=>'<div class="artifact-row"><span style="overflow-wrap:anywhere">'+esc(item.name||item.path)+'<div class="muted small">'+esc(artifactKindZh(item.kind||'file'))+' · '+esc(item.size_bytes||0)+' 字节</div></span><a class="download-link" href="'+esc(item.download_url)+'">下载</a></div>').join('')+'</div>':'<div class="muted small" style="margin-top:6px">暂无可用内容</div>';
  return '<div class="event"><div class="task-head"><strong>任务日志与报告</strong><span class="muted small">'+artifacts.length+' items</span></div>'+rows(artifacts)+'<div class="task-head" style="margin-top:16px"><strong>任务执行期间发生变更的工作区文件</strong><span class="muted small">'+files.length+' 个文件</span></div>'+rows(files.map(f=>({...f,name:f.path,kind:'工作区文件'})))+'<div class="muted small" style="margin-top:10px">仅可下载任务自身日志、报告及本任务记录的变更文件。日志可能包含源代码或机密信息。</div></div>';
 }
 function renderWorkspaceChanges(report){

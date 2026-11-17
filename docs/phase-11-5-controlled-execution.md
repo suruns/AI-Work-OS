@@ -86,6 +86,20 @@
 - 不保证自动回滚所有文件系统副作用；变更审查与后续显式回滚机制独立设计。
 - 不把模型自述的“已修改/已测试”当作事实；以 Worker 状态、验证结果和工作区变更报告为准。
 
+## 真实受控写入验收（Linux 本机）
+
+在独立 worktree 中安装项目依赖，并确认 Claude Code CLI、Bubblewrap 与模型网关可用。真实验收会调用模型并在临时项目目录中创建一个文件：
+
+```bash
+AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE=1 \
+AI_WORK_OS_CLAUDE_MODEL=deepseek-flash \
+AI_WORK_OS_SANDBOX_MODE=bubblewrap \
+AI_WORK_OS_SANDBOX_NETWORK=host \
+pytest -q tests/test_execution_approval_acceptance.py
+```
+
+脚本会先验证 pending、rejected、审批后范围变化、expired 四种情况都无法领取任务，再通过本机审批接口批准一个 configured Task，由真实 Worker 在 Bubblewrap 中调用 Claude Code 创建指定文件并运行验证命令。脚本只在临时目录和临时 SQLite 数据库中操作，不会改动正式项目工作区。该测试会产生一次真实模型调用费用。
+
 ## 最终验收门槛
 
 1. 未审批、已拒绝、已过期、已撤销、范围摘要不匹配的任务，Claude 子进程启动次数为 0。

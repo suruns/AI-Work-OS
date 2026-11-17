@@ -473,3 +473,31 @@ def test_runtime_policy_change_invalidates_and_allows_resubmission(monkeypatch, 
     with SessionLocal() as db:
         record = db.get(Task, task["id"])
         assert approval_is_valid(db, record) is False
+
+
+
+def test_claude_settings_changes_invalidate_approval_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local")
+    project, task = _configured_task(tmp_path)
+    settings_dir = Path(project["workspace_path"]) / ".claude"
+    settings_dir.mkdir()
+    settings_file = settings_dir / "settings.local.json"
+    settings_file.write_text('{"permissions":{"allow":["Read"]}}', encoding="utf-8")
+
+    requested = client.post(f"/execution-approvals/request/{task['id']}")
+    assert requested.status_code == 200, requested.text
+    approval = requested.json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200, approved.text
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is True
+
+    settings_file.write_text('{"hooks":{"PreToolUse":[]}}', encoding="utf-8")
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is False
+
+    stale = client.get(f"/execution-approvals/{approval['id']}").json()
+    assert stale["scope_valid"] is False
+    assert stale["can_resubmit"] is True

@@ -63,17 +63,52 @@ DEFAULT_TTL_HOURS = max(1, min(168, int(os.getenv("AI_WORK_OS_APPROVAL_TTL_HOURS
 def runtime_execution_policy() -> dict:
     """Return the effective process-wide policy that changes execution risk."""
     return {
+        "claude_bin": os.getenv("AI_WORK_OS_CLAUDE_BIN", "claude").strip(),
         "claude_model": os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None,
         "claude_setting_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local").strip(),
+        "claude_config_dir": os.getenv("CLAUDE_CONFIG_DIR", "").strip() or None,
+        "bwrap_bin": os.getenv("AI_WORK_OS_BWRAP_BIN", "bwrap").strip(),
         "sandbox_mode": os.getenv("AI_WORK_OS_SANDBOX_MODE", "off").strip().lower(),
         "sandbox_network": os.getenv("AI_WORK_OS_SANDBOX_NETWORK", "none").strip().lower(),
         "sandbox_runtime_paths": os.getenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", ""),
     }
 
 
+def claude_settings_fingerprints(workspace: Path) -> dict:
+    """Bind approval to the settings files Claude will load for this task."""
+    raw_sources = os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local")
+    sources = [item.strip() for item in raw_sources.split(",") if item.strip()]
+    candidates = {}
+    if "project" in sources:
+        candidates["project"] = workspace / ".claude" / "settings.json"
+    if "local" in sources:
+        candidates["local"] = workspace / ".claude" / "settings.local.json"
+    if "user" in sources:
+        config_dir = Path(os.getenv("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
+        candidates["user"] = config_dir / "settings.json"
+
+    fingerprints = {}
+    for source, path in candidates.items():
+        if not path.exists() and not path.is_symlink():
+            fingerprints[source] = {"exists": False}
+            continue
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file():
+            raise ValueError(f"Claude {source} settings path is not a regular file: {path}")
+        content = resolved.read_bytes()
+        fingerprints[source] = {
+            "exists": True,
+            "resolved_path": str(resolved),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    return fingerprints
+
+
 def task_scope_hash(task: Task) -> str:
-    workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
+    workspace_path = Path(task.workspace_path).expanduser().resolve(strict=False)
+    workspace = str(workspace_path)
     payload = {
+        "claude_settings_fingerprints": claude_settings_fingerprints(workspace_path),
         "task_id": task.id, "project_id": task.project_id, "workspace_path": workspace,
         "title": task.title, "prompt_sha256": hashlib.sha256(task.prompt.encode("utf-8")).hexdigest(),
         "permission_mode": task.permission_mode, "acceptance_criteria": task.acceptance_criteria,

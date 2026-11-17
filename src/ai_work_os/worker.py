@@ -911,7 +911,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         prompt = task.prompt
         prompt = (
             "请默认使用简体中文（zh-CN）编写面向用户的说明、执行摘要和最终报告；"
-            "如果用户在任务要求中明确指定其他语言，则遵从该要求。代码、标识符、命令和原始错误保持原样。\\n\\n"
+            "如果用户在任务要求中明确指定其他语言，则遵从该要求。代码、标识符、命令和原始错误保持原样。\n\n"
             + prompt
         )
         permission_mode = task.permission_mode

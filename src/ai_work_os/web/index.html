@@ -133,11 +133,21 @@ function renderInsights(data){
 }
 async function loadApprovals(){
  try{
-  const data=await api("/execution-approvals?status=pending"),items=data.approvals||[];
-  $("approval-count").textContent=items.length+" 项待审批";
-  $("approval-list").innerHTML=items.length?items.map(a=>'<article class="approval-card"><div class="task-head"><strong>'+esc(a.task_title||"未命名任务")+'</strong>'+pill(a.status)+'</div><div class="meta">项目：'+esc(a.project_name||a.project_id)+'<br>工作区：'+esc(a.workspace_path)+'<br>权限：受控写入（configured）<br>到期时间：'+esc(date(a.expires_at))+'</div>'+(a.acceptance_criteria?'<div class="meta">验收标准：'+esc(a.acceptance_criteria)+'</div>':"")+(a.scope_valid?'<div class="meta" style="color:var(--green)">执行范围摘要有效</div>':'<div class="meta" style="color:var(--red)">执行范围已变化，不能批准</div>')+'<div class="approval-actions"><button class="primary approve-execution" data-id="'+esc(a.id)+'" '+(!a.scope_valid?'disabled':"")+' >批准并允许执行</button><button class="danger reject-execution" data-id="'+esc(a.id)+'">拒绝</button></div></article>').join(""):'<div class="empty">当前没有待审批的写入任务。</div>';
+  const responses=await Promise.all([api("/execution-approvals?status=pending"),api("/execution-approvals?status=approved")]);
+  const pending=responses[0].approvals||[];
+  const approved=(responses[1].approvals||[]).filter(a=>["queued","running"].includes(a.task_status));
+  const items=pending.concat(approved);
+  $("approval-count").textContent=pending.length+" 项待审批 · "+approved.filter(a=>a.task_status==="queued").length+" 项已批准待执行";
+  $("approval-list").innerHTML=items.length?items.map(a=>{
+   const actions=a.status==="pending"
+    ? '<button class="primary approve-execution" data-id="'+esc(a.id)+'" '+(!a.scope_valid?'disabled':"")+' >批准并允许执行</button><button class="danger reject-execution" data-id="'+esc(a.id)+'">拒绝</button>'
+    : (a.task_status==="queued" ? '<button class="danger revoke-execution" data-id="'+esc(a.id)+'">撤销审批</button>' : '<span class="muted small">任务已开始执行；如需停止，请使用任务取消操作。</span>');
+   const scope=a.scope_valid?'<div class="meta" style="color:var(--green)">执行范围摘要有效</div>':'<div class="meta" style="color:var(--red)">执行范围已变化，不能批准或继续执行</div>';
+   return '<article class="approval-card"><div class="task-head"><strong>'+esc(a.task_title||"未命名任务")+'</strong>'+pill(a.status)+'</div><div class="meta">项目：'+esc(a.project_name||a.project_id)+'<br>工作区：'+esc(a.workspace_path)+'<br>权限：受控写入（configured）<br>任务状态：'+esc(statusZh(a.task_status||"未知"))+'<br>到期时间：'+esc(date(a.expires_at))+'</div>'+(a.acceptance_criteria?'<div class="meta">验收标准：'+esc(a.acceptance_criteria)+'</div>':"")+scope+'<div class="approval-actions">'+actions+'</div></article>';
+  }).join(""):'<div class="empty">当前没有待审批或已批准待执行的写入任务。</div>';
   document.querySelectorAll(".approve-execution").forEach(b=>b.addEventListener("click",async()=>{if(!confirm("确认批准该任务在指定项目工作区内执行写操作？"))return;b.disabled=true;try{await api("/execution-approvals/"+encodeURIComponent(b.dataset.id)+"/approve",{method:"POST",body:JSON.stringify({note:"用户在本机控制台明确批准"})});$("toast").textContent="已批准；Worker 将按队列规则领取任务。";await refresh()}catch(e){$("toast").textContent=e.message;await loadApprovals()}}));
   document.querySelectorAll(".reject-execution").forEach(b=>b.addEventListener("click",async()=>{b.disabled=true;try{await api("/execution-approvals/"+encodeURIComponent(b.dataset.id)+"/reject",{method:"POST",body:JSON.stringify({note:"用户在本机控制台拒绝"})});$("toast").textContent="已拒绝执行申请";await refresh()}catch(e){$("toast").textContent=e.message;await loadApprovals()}}));
+  document.querySelectorAll(".revoke-execution").forEach(b=>b.addEventListener("click",async()=>{if(!confirm("确认撤销该任务的写入授权？"))return;b.disabled=true;try{await api("/execution-approvals/"+encodeURIComponent(b.dataset.id)+"/revoke",{method:"POST",body:JSON.stringify({note:"用户在本机控制台撤销授权"})});$("toast").textContent="已撤销审批；任务不会被 Worker 领取。";await refresh()}catch(e){$("toast").textContent=e.message;await loadApprovals()}}));
  }catch(e){$("approval-count").textContent="审批列表不可用";$("approval-list").innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
 }
 async function loadInsights(){try{const data=await api("/insights?period_days="+encodeURIComponent($("insights-period").value));renderInsights(data)}catch(e){$("i-limitations").textContent="执行概览不可用："+e.message}}

@@ -71,7 +71,7 @@ def _payload(db, approval: ExecutionApproval) -> dict:
     task, project = db.get(Task, approval.task_id), db.get(Project, approval.project_id)
     return {
         "id": approval.id, "task_id": approval.task_id, "project_id": approval.project_id,
-        "project_name": project.name if project else None, "task_title": task.title if task else None,
+        "project_name": project.name if project else None, "task_title": task.title if task else None, "task_status": task.status if task else None,
         "workspace_path": approval.workspace_path, "permission_mode": task.permission_mode if task else None,
         "acceptance_criteria": task.acceptance_criteria if task else None, "status": approval.status,
         "requested_at": approval.requested_at, "decided_at": approval.decided_at,
@@ -143,12 +143,12 @@ def list_execution_approvals(status: str | None = None) -> dict:
             expires = record.expires_at
             if expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
-            if record.status == "pending" and expires <= now:
+            if record.status in {"pending", "approved"} and expires <= now:
                 record.status, record.decided_at = "expired", now
                 db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_expired", payload={"approval_id": record.id}))
         db.commit()
-        if status == "pending":
-            records = [record for record in records if record.status == "pending"]
+        if status:
+            records = [record for record in records if record.status == status]
         return {"approvals": [_payload(db, record) for record in records]}
 
 

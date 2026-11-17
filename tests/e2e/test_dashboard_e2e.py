@@ -280,6 +280,10 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
 
     approved_card = page.locator("#approval-list .approval-card").filter(has_text="批准测试任务")
+    approval_copy = approved_card.inner_text()
+    assert "执行隔离：" in approval_copy
+    assert "网络策略：" in approval_copy
+    assert "权限配置来源：" in approval_copy
     page.once("dialog", lambda dialog: dialog.accept())
     approved_card.get_by_role("button", name="批准并允许执行").click()
     approved_status = page.request.get(base_url + f"/execution-approvals/{approved['id']}")
@@ -291,6 +295,10 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     rejected_status = page.request.get(base_url + f"/execution-approvals/{rejected['id']}")
     assert rejected_status.status == 200
     assert rejected_status.json()["status"] == "rejected"
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/request/{rejected_task['id']}")) as resubmit_response:
+        rejected_card.get_by_role("button", name="重新申请审批").click()
+    assert resubmit_response.value.status == 200, resubmit_response.value.text()
+    assert resubmit_response.value.json()["status"] == "pending"
 
     revoke_pending_card = page.locator("#approval-list .approval-card").filter(has_text="撤销测试任务")
     page.once("dialog", lambda dialog: dialog.accept())

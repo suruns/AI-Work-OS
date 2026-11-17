@@ -277,7 +277,10 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
             return tmp_path / "mcp.json"
 
         monkeypatch.setattr(worker, "write_isolated_mcp_config", prepare_config)
-        monkeypatch.setattr(worker, "build_command", lambda *args, **kwargs: ["fake-claude"])
+        monkeypatch.setattr(
+            worker, "build_command",
+            lambda *args, **kwargs: ["fake-claude", "-p", "测试提示词", "--mcp-config", "fake-config"],
+        )
         monkeypatch.setattr(
             worker, "build_task_sandbox_invocation",
             lambda *args, **kwargs: SimpleNamespace(
@@ -296,6 +299,7 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
             assert record.status == expected_status
             assert record.worker_id is None
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
+            assert not any(event.event_type == "executor.started" for event in events)
             if state_change == "revoke":
                 blocked = [event for event in events if event.event_type == "execution.approval_invalid"]
                 assert len(blocked) == 1, f"events={[(event.event_type, event.payload) for event in events]!r}; error={record.error_summary!r}"
@@ -371,7 +375,6 @@ def test_repair_runner_rechecks_approval_before_repair_process_spawn(monkeypatch
         monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", forbidden_spawn)
         passed, results, error = asyncio.run(worker.run_repair_attempt(
             task_id, workspace, "configured", "修复验证", task_dir, 1, 1, [],
-            worker_id="repair-worker",
         ))
         assert passed is False
         assert results == []

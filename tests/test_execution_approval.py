@@ -570,3 +570,20 @@ def test_local_approval_guard_rejects_malformed_origin_port():
     with pytest.raises(HTTPException) as exc:
         require_local_control_plane(request)
     assert exc.value.status_code == 403
+
+
+def test_worker_persists_expired_approval_audit_without_claiming_task(tmp_path):
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    with SessionLocal() as db:
+        record = db.get(ExecutionApproval, approval["id"])
+        record.expires_at = utcnow() - __import__("datetime").timedelta(seconds=1)
+        db.commit()
+
+    claimed = worker.claim_task()
+    assert claimed != task["id"]
+    with SessionLocal() as db:
+        record = db.get(ExecutionApproval, approval["id"])
+        assert record.status == "expired"
+        events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
+        assert sum(event.event_type == "execution.approval_expired" for event in events) == 1

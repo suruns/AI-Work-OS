@@ -608,6 +608,7 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
         ))
         task = None
+        approval_expired = False
         attempt_number = 1
         workflow_not_cancelled = or_(
             Task.workflow_id.is_(None),
@@ -634,6 +635,7 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
                 continue
             if candidate.permission_mode != "plan":
                 if expire_approval_if_needed(db, candidate, started_at):
+                    approval_expired = True
                     continue
                 if not candidate.requires_approval or not approval_is_valid(db, candidate):
                     continue
@@ -661,6 +663,10 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             task = candidate
             break
         if task is None:
+            if approval_expired:
+                db.commit()
+            else:
+                db.rollback()
             return None
         task_id = task.id
         if task.workflow_id is not None:

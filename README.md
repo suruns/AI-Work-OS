@@ -17,17 +17,15 @@ AI Work OS 是面向 CLI 编程 Agent 的项目级工作控制台，提供持久
 
 > **安全提醒：** Master Agent 的普通任务创建仍是只读 plan 模式。写入任务必须通过 `request_execution` 提交申请，并由用户在本机 Dashboard 明确批准。当前审批控制面仅适用于可信本机部署，不支持远程身份认证或多用户 RBAC。详见 [Phase 11.5 中文实施说明](docs/phase-11-5-implementation.md)。
 
-A control plane around existing coding agents. The first vertical slice targets Claude Code CLI and focuses on durable task records, execution events, logs, and a small HTTP API.
+## 项目状态
+当前版本面向单一可信开发者的本机试运行环境。API 与 Worker 为独立进程，SQLite 用作任务存储。当前尚未提供用户身份认证、多用户隔离或生产环境加固。
 
-## Status
-Local MVP for a single trusted developer machine. The API and worker are separate processes; SQLite is the task store. Authentication, multi-user isolation, and production deployment hardening are out of scope.
+## 环境要求
+- Python 3.11 或更高版本
+- 已安装并完成认证的 Claude Code CLI（可运行 `claude --version`、`claude auth status` 检查）
+- 一个可信的项目目录作为工作区
 
-## Requirements
-- Python 3.11+
-- Claude Code CLI installed and authenticated (claude --version, claude auth status)
-- A trusted project directory to use as a workspace
-
-## Run locally
+## 本机启动
 ~~~bash
 python -m venv .venv
 source .venv/bin/activate
@@ -36,29 +34,29 @@ cp .env.example .env
 uvicorn ai_work_os.api:app --reload
 ~~~
 
-In another terminal, start the worker:
+在另一个终端启动 Worker（必须先确认 API 健康检查成功）：
 ~~~bash
 source .venv/bin/activate
 python -m ai_work_os.worker
 ~~~
 
-Create a task:
+创建一个只读任务：
 ~~~bash
 curl -X POST http://127.0.0.1:8000/tasks -H 'content-type: application/json' -d '{"title":"Inspect project","prompt":"Only list files and summarize the project. Do not modify files.","workspace_path":"/absolute/path/to/a/trusted/project"}'
 ~~~
 
-Open http://127.0.0.1:8000/ for the task console and /docs for the API.
+打开 http://127.0.0.1:8000/ 使用对话界面，打开 /dashboard 查看任务控制台，打开 /docs 查看 API。
 
-For the chat-first Master Agent runtime, start a separate process after the API:
+Master Agent 也必须在 API 健康检查成功后再单独启动：
 
 ~~~bash
 source .venv/bin/activate
 python -m ai_work_os.master_agent
 ~~~
 
-The initial Master Agent runtime is read-only (Claude Code plan mode) and disables MCP servers. Project-linked conversations use the project's workspace; unlinked conversations use `AI_WORK_OS_MASTER_WORKSPACE` or a dedicated storage workspace. See [Phase 11.3 runtime notes](docs/phase-11-3-master-agent-runtime.md).
+Master Agent 普通任务创建保持只读（Claude Code plan 模式）。项目对话使用项目工作区；未绑定项目的对话使用 `AI_WORK_OS_MASTER_WORKSPACE` 或专用存储工作区。详见 [Phase 11.3 运行说明](docs/phase-11-3-master-agent-runtime.md)。
 
-## Safety
+## 安全说明
 
 - Phase 10.1 adds an opt-in Linux Bubblewrap execution boundary. It is **off by default** for compatibility; set `AI_WORK_OS_SANDBOX_MODE=bubblewrap` only after local preflight and acceptance. When enabled, missing Bubblewrap, invalid paths, or mount setup errors fail the task before starting the agent; there is no unsandboxed fallback. The Worker must run as a non-root user; the sandbox keeps that host UID/GID and disables nested user namespaces.
 - Bubblewrap defaults to `AI_WORK_OS_SANDBOX_NETWORK=none`. Claude API calls require explicitly choosing `host` networking, which permits outbound network access and carries data-exfiltration risk. Workspace access is enforced by OS mounts: `plan` is read-only; configured/editing tasks are read-write. The task MCP config is mounted read-only by itself; the real home directory, user Claude settings, Worker storage, and database are not mounted. If task artifacts happen to live inside the selected workspace, their directory is overlaid with an empty tmpfs and only the MCP config is separately exposed. Nested host mountpoints inside a workspace are rejected.
@@ -74,7 +72,7 @@ The initial Master Agent runtime is read-only (Claude Code plan mode) and disabl
 - This MCP policy is a Claude Code CLI configuration boundary, not an OS sandbox. It does not isolate filesystem access, environment secrets, built-in tools, or arbitrary host processes. Keep the worker on trusted hosts and do not treat it as protection against a compromised CLI or execution outside this MCP boundary.
 - CLI output is stored under storage/tasks/<task-id>/; it may contain source code or secrets. Protect this directory.
 - Bind the API to localhost unless authentication and network controls have been configured.
-- New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use project/local Claude Code settings" when the task is expected to edit files; this uses project and project-local permission settings while excluding user settings by default. Set `AI_WORK_OS_CLAUDE_SETTING_SOURCES=user,project,local` only when you intentionally want the user's global settings loaded.
+- 新任务默认使用 Claude Code `plan` 只读模式。需要修改文件时，任务必须使用 `configured` 模式并通过本机 Dashboard 明确审批；未获审批的任务不会被 Worker 领取。该模式使用项目级与项目本地权限配置，默认排除用户级设置。
 - Plan mode is a Claude Code permission control, not an OS-level sandbox. Continue to use trusted workspaces and review agent activity.
 
 ## Initial API

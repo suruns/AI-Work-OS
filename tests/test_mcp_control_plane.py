@@ -153,7 +153,7 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     names = {tool["name"] for tool in listed["result"]["tools"]}
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
-        "get_workflow", "create_task", "create_workflow",
+        "get_workflow", "create_task", "create_workflow", "request_execution",
     }
 
 

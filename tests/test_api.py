@@ -47,12 +47,12 @@ def test_dashboard_is_served():
     assert response.status_code == 200
     assert "AI Work OS" in response.text
     assert "function renderTaskResult(events)" in response.text
-    assert "Agent result" in response.text
+    assert "Agent 执行结果" in response.text
     assert "function renderArtifacts(data)" in response.text
     assert "function renderArtifactLibrary(data,append=false)" in response.text
-    assert "Artifact library" in response.text
+    assert "产物库" in response.text
     assert 'api("/artifacts?"' in response.text
-    assert "Workspace files changed during task" in response.text
+    assert "任务执行期间发生变更的工作区文件" in response.text
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
     assert "workflowDetailToken" in response.text
@@ -2206,8 +2206,8 @@ def test_dashboard_exposes_failure_analysis_and_execution_replay_entry_points():
     response = client.get("/dashboard")
     assert response.status_code == 200
     assert '"/tasks/"+encodeURIComponent(id)+"/diagnostics"' in response.text
-    assert "Failure analysis" in response.text
-    assert "Execution replay" in response.text
+    assert "失败分析" in response.text
+    assert "执行回放" in response.text
 
 
 def test_task_diagnostics_prioritizes_nested_verification_timeout(tmp_path):

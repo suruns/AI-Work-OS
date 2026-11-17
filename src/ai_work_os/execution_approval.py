@@ -229,6 +229,8 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "scope_valid": bool(
             task and task.status in {"queued", "running"}
             and project and project.status == "active"
+            and approval.status in {"pending", "approved"}
+            and expires > utcnow()
             and approval.scope_hash == task_scope_hash(task)
             and approval.project_id == task.project_id
             and str(Path(task.workspace_path).expanduser().resolve(strict=False))

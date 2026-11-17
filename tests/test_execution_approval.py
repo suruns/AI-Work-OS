@@ -162,6 +162,9 @@ def test_expired_approval_is_not_listed_as_pending_and_cannot_be_approved(tmp_pa
     pending = client.get("/execution-approvals?status=pending")
     assert pending.status_code == 200
     assert all(item["id"] != approval["id"] for item in pending.json()["approvals"])
+    expired_detail = client.get(f"/execution-approvals/{approval['id']}").json()
+    assert expired_detail["status"] == "expired"
+    assert expired_detail["scope_valid"] is False
     rejected = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
     assert rejected.status_code == 409
     with SessionLocal() as db:

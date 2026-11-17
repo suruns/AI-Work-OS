@@ -111,6 +111,16 @@ def approval_is_valid(db, task: Task) -> bool:
 
 def _payload(db, approval: ExecutionApproval) -> dict:
     task, project = db.get(Task, approval.task_id), db.get(Project, approval.project_id)
+    effective_status = approval.status
+    expires = approval.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if effective_status == "pending" and (task is None or task.status != "queued"):
+        effective_status = "revoked"
+    elif effective_status == "approved" and (task is None or task.status not in {"queued", "running"}):
+        effective_status = "revoked"
+    elif effective_status in {"pending", "approved"} and task is not None and task.status == "queued" and expires <= utcnow():
+        effective_status = "expired"
     return {
         "id": approval.id, "task_id": approval.task_id, "project_id": approval.project_id,
         "project_name": project.name if project else None, "task_title": task.title if task else None, "task_status": task.status if task else None,
@@ -121,7 +131,7 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "max_attempts": task.max_attempts if task else None,
         "max_repair_attempts": task.max_repair_attempts if task else None,
         "auto_repair": bool(task.auto_repair) if task else False,
-        "status": approval.status,
+        "status": effective_status,
         "requested_at": approval.requested_at, "decided_at": approval.decided_at,
         "expires_at": approval.expires_at, "decision_source": approval.decision_source,
         "decision_note": approval.decision_note,
@@ -138,140 +148,18 @@ def _payload(db, approval: ExecutionApproval) -> dict:
     }
 
 
-@router.post("/request/{task_id}")
-def request_execution_approval(task_id: str) -> dict:
-    with SessionLocal() as db:
-        if db.bind is not None and db.bind.dialect.name == "sqlite":
-            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
-        if task is None:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        if task.status != "queued" or task.permission_mode != "configured" or not task.project_id:
-            raise HTTPException(status_code=409, detail="只有绑定项目且排队中的 configured 任务可以申请写执行审批")
-        project = db.scalar(select(Project).where(Project.id == task.project_id).with_for_update())
-        if project is None or project.status != "active":
-            raise HTTPException(status_code=409, detail="项目不存在或已归档")
-        workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
-        project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False))
-        if workspace != project_workspace:
-            raise HTTPException(status_code=409, detail="任务工作区与项目工作区不一致")
-
-        scope_hash = task_scope_hash(task)
-        now = utcnow()
-        existing = db.scalar(
-            select(ExecutionApproval)
-            .where(ExecutionApproval.task_id == task.id)
-            .with_for_update()
-        )
-        if existing is not None:
-            expires = existing.expires_at
-            if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            if (
-                existing.scope_hash == scope_hash
-                and existing.workspace_path == workspace
-                and existing.status == "pending"
-                and expires > now
-            ):
-                return _payload(db, existing)
-            if (
-                existing.status == "approved"
-                and existing.scope_hash == scope_hash
-                and approval_is_valid(db, task)
-            ):
-                return _payload(db, existing)
-
-            previous_status = existing.status
-            if previous_status in {"pending", "approved"} and expires <= now:
-                existing.status = "expired"
-                existing.decided_at = now
-                db.add(TaskEvent(task_id=task.id, event_type="execution.approval_expired", payload={
-                    "approval_id": existing.id, "reason": "expired_before_resubmission",
-                }))
-            existing.status = "pending"
-            existing.project_id = project.id
-            existing.workspace_path = workspace
-            existing.scope_hash = scope_hash
-            existing.requested_at = now
-            existing.decided_at = None
-            existing.expires_at = now + timedelta(hours=DEFAULT_TTL_HOURS)
-            existing.decision_source = None
-            existing.decision_note = None
-            task.requires_approval = True
-            db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
-                "approval_id": existing.id, "project_id": project.id,
-                "permission_mode": task.permission_mode, "scope_hash": scope_hash,
-                "expires_at": existing.expires_at.isoformat(),
-                "resubmission": True, "previous_status": previous_status,
-            }))
-            db.commit()
-            db.refresh(existing)
-            return _payload(db, existing)
-
-        approval = ExecutionApproval(
-            task_id=task.id, project_id=project.id, workspace_path=workspace,
-            scope_hash=scope_hash, status="pending",
-            expires_at=now + timedelta(hours=DEFAULT_TTL_HOURS),
-        )
-        task.requires_approval = True
-        db.add(approval)
-        db.flush()
-        db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
-            "approval_id": approval.id, "project_id": project.id,
-            "permission_mode": task.permission_mode, "scope_hash": approval.scope_hash,
-            "expires_at": approval.expires_at.isoformat(),
-        }))
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            raise HTTPException(status_code=409, detail="该任务已存在审批申请")
-        db.refresh(approval)
-        return _payload(db, approval)
-
-
 @router.get("")
 def list_execution_approvals(status: str | None = None) -> dict:
+    if status and status not in {"pending", "approved", "rejected", "revoked", "expired"}:
+        raise HTTPException(status_code=400, detail="无效的审批状态")
     with SessionLocal() as db:
-        if db.bind is not None and db.bind.dialect.name == "sqlite":
-            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        query = select(ExecutionApproval).order_by(ExecutionApproval.requested_at.desc()).with_for_update()
+        records = list(db.scalars(
+            select(ExecutionApproval).order_by(ExecutionApproval.requested_at.desc())
+        ))
+        payloads = [_payload(db, record) for record in records]
         if status:
-            if status not in {"pending", "approved", "rejected", "revoked", "expired"}:
-                raise HTTPException(status_code=400, detail="无效的审批状态")
-            query = query.where(ExecutionApproval.status == status)
-        records = list(db.scalars(query))
-        now = utcnow()
-        for record in records:
-            task = db.get(Task, record.task_id)
-            no_longer_eligible = (
-                record.status == "pending" and (task is None or task.status != "queued")
-            ) or (
-                record.status == "approved" and (task is None or task.status not in {"queued", "running"})
-            )
-            if no_longer_eligible:
-                record.status = "revoked"
-                record.decided_at = now
-                record.decision_source = "task_state"
-                record.decision_note = "任务状态已变化，审批不再适用于该任务。"
-                db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_revoked", payload={
-                    "approval_id": record.id, "reason": "task_no_longer_eligible",
-                }))
-                continue
-            expires = record.expires_at
-            if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            if (
-                record.status in {"pending", "approved"}
-                and expires <= now
-                and (task is None or task.status == "queued")
-            ):
-                record.status, record.decided_at = "expired", now
-                db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_expired", payload={"approval_id": record.id}))
-        db.commit()
-        if status:
-            records = [record for record in records if record.status == status]
-        return {"approvals": [_payload(db, record) for record in records]}
+            payloads = [item for item in payloads if item["status"] == status]
+        return {"approvals": payloads}
 
 
 @router.get("/{approval_id}")

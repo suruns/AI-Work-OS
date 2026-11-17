@@ -490,7 +490,7 @@ def create_conversation(body: ConversationCreate) -> dict:
             if project is None:
                 raise HTTPException(status_code=404, detail="项目不存在。")
             if project.status != "active":
-                raise HTTPException(status_code=409, detail="archived projects cannot receive conversations")
+                raise HTTPException(status_code=409, detail="已归档的项目不能接收新对话。")
         conversation = Conversation(
             project_id=body.project_id,
             title=(body.title or "New conversation").strip(),
@@ -1295,7 +1295,7 @@ def download_workspace_file(task_id: str, path: str = Query(min_length=1, max_le
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="工作区变更报告尚不可用。") from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail="Could not read workspace change report.") from exc
+        raise HTTPException(status_code=500, detail="无法读取工作区变更报告。") from exc
     if not report.get("available"):
         raise HTTPException(status_code=409, detail=report.get("reason", "工作区文件下载暂不可用。"))
     if path not in report.get("changed_during_task", []):

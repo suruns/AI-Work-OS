@@ -38,7 +38,7 @@ API：
 - `POST /execution-approvals/{approval_id}/reject`
 - `POST /execution-approvals/{approval_id}/revoke`
 
-审批接口会同时校验请求来源 IP、Host 与 Origin，只允许 `localhost`、`127.0.0.1` 或 `::1`，以降低 DNS rebinding 和跨站网页请求本机审批接口的风险。当前项目没有用户身份认证，因此 `decision_source=local_control_plane` 只表示通过本机控制台作出决定，**不代表已建立可审计的真实用户身份或多用户 RBAC**。不要把服务暴露到公网或不可信局域网。
+审批接口会同时校验请求来源 IP、Host 与 Origin，只允许 `localhost`、`127.0.0.1` 或 `::1`，并要求 Origin 与请求协议、主机、端口完全一致，以降低 DNS rebinding 和跨端口 CSRF 风险。Dashboard 会提示用户在批准前检查项目/本地 Claude settings，因为其中可能配置 hooks 等命令；审批绑定相关文件内容摘要，变更后旧审批失效。当前项目没有用户身份认证，因此 `decision_source=local_control_plane` 只表示通过本机控制台作出决定，**不代表已建立可审计的真实用户身份或多用户 RBAC**。不要把服务暴露到公网或不可信局域网。
 
 ## Worker 安全门禁
 

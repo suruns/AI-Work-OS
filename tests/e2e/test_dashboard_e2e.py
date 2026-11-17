@@ -293,6 +293,8 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     assert "网络策略：" in approval_copy
     assert "权限配置来源：" in approval_copy
     assert "最大自动修复次数：" in approval_copy
+    assert "审批前请检查 Claude 设置" in approval_copy
+    assert "hooks 等命令配置" in approval_copy
     page.once("dialog", lambda dialog: dialog.accept())
     with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{approved['id']}/approve")) as approve_response:
         approved_card.get_by_role("button", name="批准并允许执行").click()

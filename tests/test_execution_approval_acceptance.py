@@ -33,3 +33,16 @@ def test_controlled_execution_acceptance_script_is_valid_python():
     root = Path(__file__).resolve().parents[1]
     script = root / "scripts" / "acceptance" / "controlled_execution.py"
     compile(script.read_text(encoding="utf-8"), str(script), "exec")
+
+
+def test_phase_11_5_acceptance_shell_script_is_valid_and_enables_real_checks():
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "acceptance" / "phase-11-5.sh"
+    result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    source = script.read_text(encoding="utf-8")
+    assert "AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE=1" in source
+    assert "AI_WORK_OS_RUN_BUBBLEWRAP_MCP_ACCEPTANCE=1" in source
+    assert "AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE=1" in source
+    assert 'git diff --check origin/main...HEAD' in source
+    assert 'for attempt in 1 2 3' in source

@@ -127,6 +127,7 @@ def _tools() -> list[dict[str, Any]]:
                 "title": {"type": "string", "minLength": 1, "maxLength": 240},
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
                 "acceptance_criteria": {"type": "string", "maxLength": 10000},
+                "verification_commands": {"type": "array", "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
             }, "required": ["title", "prompt"], "additionalProperties": False},
         },
         {

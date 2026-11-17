@@ -151,6 +151,12 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     assert init["result"]["capabilities"]["tools"] == {}
     listed = mcp._reply({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {tool["name"] for tool in listed["result"]["tools"]}
+    request_schema = next(
+        tool["inputSchema"] for tool in listed["result"]["tools"]
+        if tool["name"] == "request_execution"
+    )
+    assert "verification_commands" in request_schema["properties"]
+    assert request_schema["properties"]["verification_commands"]["maxItems"] == 5
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
         "get_workflow", "create_task", "create_workflow", "request_execution",

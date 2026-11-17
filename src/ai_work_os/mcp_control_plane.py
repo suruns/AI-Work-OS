@@ -117,6 +117,7 @@ def _tools() -> list[dict[str, Any]]:
                 "title": {"type": "string", "minLength": 1, "maxLength": 240},
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
                 "acceptance_criteria": {"type": "string", "maxLength": 10000},
+                "verification_commands": {"type": "array", "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
             }, "required": ["title", "prompt"], "additionalProperties": False},
         },
         {
@@ -358,6 +359,12 @@ def call_tool(
                     raise ToolError("Archived projects cannot receive new work.")
                 title, prompt = args.get("title"), args.get("prompt")
                 criteria = args.get("acceptance_criteria")
+                commands = args.get("verification_commands", [])
+                if not isinstance(commands, list) or len(commands) > 5 or any(
+                    not isinstance(command, str) or not command.strip() or len(command) > 2000
+                    for command in commands
+                ):
+                    raise ToolError("verification_commands must contain at most five non-empty commands of at most 2000 characters")
                 if not isinstance(title, str) or not title.strip() or len(title) > 240:
                     raise ToolError("title must be a non-empty string of at most 240 characters")
                 if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100000:
@@ -368,9 +375,9 @@ def call_tool(
                     project_id=project.id, title=title.strip(), prompt=prompt,
                     workspace_path=project.workspace_path, permission_mode="configured",
                     requires_approval=True, priority=0, max_attempts=1,
-                    acceptance_criteria=criteria, verification_commands=[],
+                    acceptance_criteria=criteria, verification_commands=commands,
                     auto_repair=False, max_repair_attempts=0,
-                    verification_status="not_configured",
+                    verification_status="pending" if commands else "not_configured",
                 )
                 db.add(task)
                 db.flush()
@@ -388,7 +395,7 @@ def call_tool(
                 }))
                 db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
                     "approval_id": approval.id, "project_id": project.id,
-                    "permission_mode": "configured", "expires_at": approval.expires_at.isoformat(),
+                    "permission_mode": "configured", "scope_hash": approval.scope_hash, "expires_at": approval.expires_at.isoformat(),
                 }))
                 value = {**_task_summary(task), "approval_id": approval.id, "approval_status": "pending"}
             else:

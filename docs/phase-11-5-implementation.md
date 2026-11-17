@@ -12,7 +12,7 @@ Master Agent 继续使用 `get_project_overview`、`list_tasks`、`create_task` 
 
 ### 受控写入申请
 
-用户明确要求修改项目时，Master Agent 可以调用 MCP 工具 `request_execution`。该工具会：
+用户明确要求修改项目时，Master Agent 可以调用 MCP 工具 `request_execution`。该工具可接收验收标准和最多五条明确的验证命令，并会：
 
 1. 在当前对话绑定的项目中创建 `configured` 任务；
 2. 将任务标记为 `requires_approval=true`；

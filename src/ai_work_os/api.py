@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
 from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
@@ -706,11 +706,17 @@ def list_agent_turn_events(
 
 @app.post("/tasks", response_model=TaskRead, status_code=201)
 def create_task(body: TaskCreate) -> Task:
+    if body.permission_mode != "plan" and body.project_id is None:
+        raise HTTPException(status_code=422, detail="受控写入任务必须绑定项目，并在本机控制台审批后才能执行")
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
     with SessionLocal() as db:
         _validate_project_workspace(db, body.project_id, workspace)
+        if body.permission_mode != "plan":
+            project = db.get(Project, body.project_id)
+            if project is None or Path(project.workspace_path).expanduser().resolve() != workspace:
+                raise HTTPException(status_code=422, detail="受控写入任务当前必须使用项目根目录作为工作区")
         task = Task(
             project_id=body.project_id,
             title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
@@ -1336,6 +1342,15 @@ def cancel_task(task_id: str) -> Task:
                 )
             )
             if queued_result.rowcount == 1:
+                approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task_id))
+                if approval is not None and approval.status in {"pending", "approved"}:
+                    approval.status = "revoked"
+                    approval.decided_at = timestamp
+                    approval.decision_source = "task_state"
+                    approval.decision_note = "任务在开始执行前已取消。"
+                    db.add(TaskEvent(task_id=task_id, event_type="execution.approval_revoked", payload={
+                        "approval_id": approval.id, "reason": "task_cancelled_before_start",
+                    }))
                 db.add(TaskEvent(
                     task_id=task_id, event_type="task.cancelled",
                     payload={
@@ -1418,6 +1433,8 @@ def _validate_dag(items: list) -> dict[str, list[str]]:
 
 @app.post("/workflows", status_code=201)
 def create_workflow(body: WorkflowCreate) -> dict:
+    if body.project_id is None and any(item.permission_mode != "plan" for item in body.tasks):
+        raise HTTPException(status_code=422, detail="受控写入工作流必须绑定项目，并逐项完成本机审批")
     graph = _validate_dag(body.tasks)
     if any(item.project_id not in (None, body.project_id) for item in body.tasks):
         raise HTTPException(status_code=422, detail="workflow task project_id must match the workflow project_id")
@@ -1431,6 +1448,10 @@ def create_workflow(body: WorkflowCreate) -> dict:
     with SessionLocal() as db:
         for item in body.tasks:
             _validate_project_workspace(db, body.project_id, Path(workspaces[item.key]))
+            if item.permission_mode != "plan":
+                project = db.get(Project, body.project_id) if body.project_id else None
+                if project is None or Path(project.workspace_path).expanduser().resolve() != Path(workspaces[item.key]):
+                    raise HTTPException(status_code=422, detail="受控写入工作流任务当前必须使用项目根目录作为工作区")
         workflow = Workflow(project_id=body.project_id, title=body.title.strip(), status="queued")
         db.add(workflow)
         db.flush()

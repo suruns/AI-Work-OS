@@ -898,18 +898,11 @@ async def run_repair_attempt(
 
 
 async def _spawn_task_process(task_id: str, worker_id: str, invocation):
-    """Atomically fence cancellation, lease ownership, and approval immediately before spawn.
-
-    Keep the database write reservation until the child exists. A concurrent cancel
-    request therefore either wins before spawn, or is recorded immediately after
-    spawn and handled by the normal process-group cancellation loop.
-    """
+    """Fence cancellation, lease ownership, and approval immediately before spawn."""
     with SessionLocal() as db:
         if db.bind is not None and db.bind.dialect.name == "sqlite":
             db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        task = db.scalar(
-            select(Task).where(Task.id == task_id).with_for_update()
-        )
+        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
         if task is None or task.status != "running" or task.worker_id != worker_id:
             db.rollback()
             return None
@@ -951,8 +944,9 @@ async def _spawn_task_process(task_id: str, worker_id: str, invocation):
             db.commit()
             return None
 
-        # Hold the row/write lock across process creation so a cancellation cannot
-        # slip between the final state check and the actual child-process spawn.
+        # Keep the write reservation until the child exists. A concurrent cancel
+        # either wins before spawn or is recorded just after spawn and handled by
+        # the regular process-group cancellation loop.
         proc = await asyncio.create_subprocess_exec(
             *invocation.command,
             cwd=invocation.cwd,

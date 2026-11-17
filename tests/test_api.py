@@ -6,6 +6,7 @@ import subprocess
 import signal
 import sys
 import threading
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, timezone
 from fastapi.testclient import TestClient
@@ -363,7 +364,7 @@ def test_logged_command_redacts_secrets_and_preserves_effective_permission_args(
         assert mcp_path not in serialized
 
 
-def test_permission_modes_are_persisted_and_applied():
+def test_permission_modes_are_persisted_and_applied(tmp_path):
     from ai_work_os.worker import build_command
 
     plan = client.post("/tasks", json={
@@ -377,10 +378,17 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan_command[-4:] == ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]
     assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
+    project = client.post("/projects", json={
+        "name": "Configured mode project",
+        "slug": f"configured-mode-{uuid4().hex}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project.status_code == 201
     configured = client.post("/tasks", json={
+        "project_id": project.json()["id"],
         "title": "Local configured mode",
         "prompt": "Use configured CLI permissions",
-        "workspace_path": ".",
+        "workspace_path": str(tmp_path),
         "permission_mode": "configured",
     })
     assert configured.status_code == 201
@@ -3253,3 +3261,32 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert 'before_id="+messages[0].id' in html
     assert 'id="load-older-messages"' in html
     assert 'after_id="+cursor' in html
+
+
+def test_configured_write_tasks_require_project_root_binding(tmp_path):
+    unbound = client.post("/tasks", json={
+        "title": "Unbound write task", "prompt": "Write a file",
+        "workspace_path": str(tmp_path), "permission_mode": "configured",
+    })
+    assert unbound.status_code == 422
+    project = client.post("/projects", json={
+        "name": "Write scope project", "slug": f"write-scope-{uuid4().hex}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project.status_code == 201
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    out_of_scope = client.post("/tasks", json={
+        "project_id": project.json()["id"], "title": "Nested write task",
+        "prompt": "Write a file", "workspace_path": str(nested),
+        "permission_mode": "configured",
+    })
+    assert out_of_scope.status_code == 422
+    unbound_workflow = client.post("/workflows", json={
+        "title": "Unbound write workflow",
+        "tasks": [{
+            "key": "write", "title": "Write", "prompt": "Write a file",
+            "workspace_path": str(tmp_path), "permission_mode": "configured",
+        }],
+    })
+    assert unbound_workflow.status_code == 422

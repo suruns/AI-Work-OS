@@ -214,7 +214,6 @@ def test_cancelling_queued_task_invalidates_pending_approval(tmp_path):
         assert record.decision_source == "task_state"
 
 
-
 @pytest.mark.parametrize("state_change, expected_status", [
     ("revoke", "failed"),
     ("cancel", "cancelled"),
@@ -266,8 +265,7 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
         monkeypatch.setattr(worker, "claude_setting_sources", lambda: ["project", "local"])
 
         def prepare_config(*args, **kwargs):
-            # Simulate a decision/cancellation arriving after the early validation
-            # and during worker setup, immediately before the final spawn fence.
+            # Simulate a state change after early validation but before process spawn.
             with factory() as db:
                 if state_change == "revoke":
                     db.get(ExecutionApproval, approval_id).status = "revoked"

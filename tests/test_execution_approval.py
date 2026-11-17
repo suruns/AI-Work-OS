@@ -1,4 +1,6 @@
 from uuid import uuid4
+from pathlib import Path
+import subprocess
 import asyncio
 
 from sqlalchemy import create_engine, select
@@ -183,3 +185,13 @@ def test_archived_project_invalidates_pending_write_execution(tmp_path):
         db.commit()
         record = db.get(Task, task["id"])
         assert approval_is_valid(db, record) is False
+
+
+def test_local_start_script_waits_for_api_health_before_workers():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "start-local.sh"
+    result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    source = script.read_text(encoding="utf-8")
+    assert source.index("uvicorn ai_work_os.api:app") < source.index('curl --silent')
+    assert source.index('curl --silent') < source.index("python -m ai_work_os.worker")
+    assert source.index("python -m ai_work_os.worker") < source.index("python -m ai_work_os.master_agent")

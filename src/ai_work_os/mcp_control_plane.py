@@ -388,7 +388,7 @@ def call_tool(
                 }))
                 db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
                     "approval_id": approval.id, "project_id": project.id,
-                    "permission_mode": "configured", "expires_at": approval.expires_at.isoformat(),
+                    "permission_mode": "configured", "scope_hash": approval.scope_hash, "expires_at": approval.expires_at.isoformat(),
                 }))
                 value = {**_task_summary(task), "approval_id": approval.id, "approval_status": "pending"}
             else:

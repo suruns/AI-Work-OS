@@ -118,7 +118,7 @@ def request_execution_approval(task_id: str) -> dict:
         db.flush()
         db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
             "approval_id": approval.id, "project_id": project.id,
-            "permission_mode": task.permission_mode, "expires_at": approval.expires_at.isoformat(),
+            "permission_mode": task.permission_mode, "scope_hash": approval.scope_hash, "expires_at": approval.expires_at.isoformat(),
         }))
         try:
             db.commit()

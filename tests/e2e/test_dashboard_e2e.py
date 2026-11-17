@@ -275,6 +275,7 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
 
     approved_task, approved = create_pending("批准测试任务")
     rejected_task, rejected = create_pending("拒绝测试任务")
+    revoked_task, revoked = create_pending("撤销测试任务")
     page.reload(wait_until="domcontentloaded")
     page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
 
@@ -291,5 +292,16 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     assert rejected_status.status == 200
     assert rejected_status.json()["status"] == "rejected"
 
+    revoke_pending_card = page.locator("#approval-list .approval-card").filter(has_text="撤销测试任务")
+    page.once("dialog", lambda dialog: dialog.accept())
+    revoke_pending_card.get_by_role("button", name="批准并允许执行").click()
+    revoke_approved_card = page.locator("#approval-list .approval-card").filter(has_text="撤销测试任务")
+    page.once("dialog", lambda dialog: dialog.accept())
+    revoke_approved_card.get_by_role("button", name="撤销审批").click()
+    revoked_status = page.request.get(base_url + f"/execution-approvals/{revoked['id']}")
+    assert revoked_status.status == 200
+    assert revoked_status.json()["status"] == "revoked"
+
     assert page.request.get(base_url + f"/tasks/{approved_task['id']}").json()["status"] == "queued"
     assert page.request.get(base_url + f"/tasks/{rejected_task['id']}").json()["status"] == "queued"
+    assert page.request.get(base_url + f"/tasks/{revoked_task['id']}").json()["status"] == "queued"

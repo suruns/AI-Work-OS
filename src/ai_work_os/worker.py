@@ -1511,6 +1511,34 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
         heartbeat_worker(worker_id, MAX_CONCURRENT_TASKS)
 
 
+def _record_worker_interruption(task_id: str, worker_id: str) -> None:
+    """Close the task lifecycle if cancellation interrupted setup before _execute_task could finalize it."""
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.status != "running" or task.worker_id != worker_id:
+            return
+        finished_at = now()
+        task.status = "failed"
+        task.finished_at = finished_at
+        task.exit_code = 130
+        task.error_summary = "Worker interrupted before task execution completed; inspect workspace and process state before retrying."
+        task.worker_id = None
+        task.lease_expires_at = None
+        if task.verification_status == "pending":
+            task.verification_status = "not_run"
+        db.add(TaskEvent(task_id=task_id, event_type="executor.interrupted", payload={
+            "worker_id": worker_id, "reason": "worker_interrupted",
+            "process_tree_status": "not_verified",
+        }))
+        db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
+            "status": "failed", "exit_code": 130, "error_summary": task.error_summary,
+            "verification_status": task.verification_status,
+            "terminal_reason": "worker_interrupted",
+            "attempt": task.attempt_count, "max_attempts": task.max_attempts,
+        }))
+        db.commit()
+
+
 async def execute_task(task_id: str, worker_id: str | None = None) -> None:
     if worker_id is None:
         with SessionLocal() as db:
@@ -1571,6 +1599,7 @@ async def execute_task(task_id: str, worker_id: str | None = None) -> None:
     except asyncio.CancelledError:
         execution.cancel()
         await asyncio.gather(execution, return_exceptions=True)
+        _record_worker_interruption(task_id, worker_id)
         return
     finally:
         heartbeat.cancel()

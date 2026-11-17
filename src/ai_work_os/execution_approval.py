@@ -168,7 +168,16 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
         task = db.get(Task, approval.task_id)
         if task is None or task.status != "queued" or not task.requires_approval:
             raise HTTPException(status_code=409, detail="任务已不处于可审批状态")
-        if approval.scope_hash != task_scope_hash(task) or approval.project_id != task.project_id:
+        project = db.get(Project, approval.project_id)
+        project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False)) if project else ""
+        task_workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
+        if (
+            approval.scope_hash != task_scope_hash(task)
+            or approval.project_id != task.project_id
+            or project is None
+            or project_workspace != task_workspace
+            or approval.workspace_path != project_workspace
+        ):
             approval.status, approval.decided_at = "revoked", now
             db.add(TaskEvent(task_id=task.id, event_type="execution.approval_scope_mismatch", payload={"approval_id": approval.id}))
             db.commit()

@@ -79,9 +79,7 @@ def test_approval_is_invalidated_when_project_workspace_changes(tmp_path):
     approval = client.post(f"/execution-approvals/request/{task['id']}").json()
     approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
     assert approved.status_code == 200
-    replacement = tmp_path / f"replacement-{uuid4().hex}"
-    replacement.mkdir()
-    updated = client.patch(f"/projects/{project['id']}", json={"workspace_path": str(replacement)})
+    updated = client.patch(f"/projects/{project['id']}", json={"workspace_path": str(tmp_path)})
     assert updated.status_code == 200
     with SessionLocal() as db:
         record = db.get(Task, task["id"])

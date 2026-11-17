@@ -377,7 +377,7 @@ def call_tool(
                     requires_approval=True, priority=0, max_attempts=1,
                     acceptance_criteria=criteria, verification_commands=commands,
                     auto_repair=False, max_repair_attempts=0,
-                    verification_status="not_configured",
+                    verification_status="pending" if commands else "not_configured",
                 )
                 db.add(task)
                 db.flush()

@@ -141,3 +141,33 @@ def test_worker_never_claims_unapproved_configured_task_or_starts_after_revocati
             assert invalid[0].payload["process_started"] is False
     finally:
         engine.dispose()
+
+
+def test_expired_approval_is_not_listed_as_pending_and_cannot_be_approved(tmp_path):
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    with SessionLocal() as db:
+        record = db.get(ExecutionApproval, approval["id"])
+        record.expires_at = utcnow() - __import__("datetime").timedelta(seconds=1)
+        db.commit()
+    pending = client.get("/execution-approvals?status=pending")
+    assert pending.status_code == 200
+    assert all(item["id"] != approval["id"] for item in pending.json()["approvals"])
+    rejected = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert rejected.status_code == 409
+    with SessionLocal() as db:
+        record = db.get(ExecutionApproval, approval["id"])
+        assert record.status == "expired"
+
+
+def test_approved_queued_task_can_have_approval_revoked(tmp_path):
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200
+    revoked = client.post(f"/execution-approvals/{approval['id']}/revoke", json={"note": "撤回本次授权"})
+    assert revoked.status_code == 200
+    assert revoked.json()["status"] == "revoked"
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is False

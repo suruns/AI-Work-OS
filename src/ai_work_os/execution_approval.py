@@ -54,7 +54,7 @@ def approval_is_valid(db, task: Task) -> bool:
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
     project = db.get(Project, task.project_id) if task.project_id else None
-    if project is None:
+    if project is None or project.status != "active":
         return False
     task_workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
     project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False))
@@ -78,7 +78,7 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "expires_at": approval.expires_at, "decision_source": approval.decision_source,
         "decision_note": approval.decision_note,
         "scope_valid": bool(
-            task and project
+            task and project and project.status == "active"
             and approval.scope_hash == task_scope_hash(task)
             and approval.project_id == task.project_id
             and str(Path(task.workspace_path).expanduser().resolve(strict=False))
@@ -188,6 +188,7 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
             approval.scope_hash != task_scope_hash(task)
             or approval.project_id != task.project_id
             or project is None
+            or project.status != "active"
             or project_workspace != task_workspace
             or approval.workspace_path != project_workspace
         ):

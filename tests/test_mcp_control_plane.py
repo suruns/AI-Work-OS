@@ -100,7 +100,7 @@ def test_cross_project_task_and_workflow_ids_are_not_disclosed(monkeypatch, tmp_
             try:
                 mcp.call_tool(name, args)
             except mcp.ToolError as exc:
-                assert "not found" in str(exc)
+                assert "不存在" in str(exc)
             else:
                 raise AssertionError("cross-project object was exposed")
         overview = mcp.call_tool("get_project_overview", {})

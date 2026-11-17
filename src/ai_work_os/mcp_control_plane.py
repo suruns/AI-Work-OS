@@ -42,10 +42,10 @@ class ToolError(ValueError):
 def _project(db, project_id: str | None = None) -> Project:
     bound_project_id = project_id if project_id is not None else PROJECT_ID
     if not bound_project_id:
-        raise ToolError("This conversation is not attached to a project.")
+        raise ToolError("当前对话尚未绑定项目。")
     project = db.get(Project, bound_project_id)
     if project is None:
-        raise ToolError("The conversation project no longer exists.")
+        raise ToolError("当前对话绑定的项目不存在。")
     return project
 
 
@@ -149,16 +149,16 @@ def _tools() -> list[dict[str, Any]]:
 
 def _create_task(db, project: Project, args: dict) -> dict:
     if project.status != "active":
-        raise ToolError("Archived projects cannot receive new work.")
+        raise ToolError("已归档的项目不能接收新任务。")
     title = args.get("title")
     prompt = args.get("prompt")
     criteria = args.get("acceptance_criteria")
     if not isinstance(title, str) or not title.strip() or len(title) > 240:
-        raise ToolError("title must be a non-empty string of at most 240 characters")
+        raise ToolError("title 必须是非空字符串，且长度不能超过 240 个字符。")
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100_000:
-        raise ToolError("prompt must be a non-empty string of at most 100000 characters")
+        raise ToolError("prompt 必须是非空字符串，且长度不能超过 100000 个字符。")
     if criteria is not None and (not isinstance(criteria, str) or len(criteria) > 10_000):
-        raise ToolError("acceptance_criteria must be a string of at most 10000 characters")
+        raise ToolError("acceptance_criteria 必须是字符串，且长度不能超过 10000 个字符。")
     workspace = project.workspace_path
     task = Task(
         project_id=project.id, title=title.strip(), prompt=prompt,
@@ -180,19 +180,19 @@ def _create_task(db, project: Project, args: dict) -> dict:
 
 def _create_workflow(db, project: Project, args: dict) -> dict:
     if project.status != "active":
-        raise ToolError("Archived projects cannot receive new work.")
+        raise ToolError("已归档的项目不能接收新任务。")
     title, specs = args.get("title"), args.get("tasks")
     if not isinstance(title, str) or not title.strip() or len(title) > 240:
-        raise ToolError("title must be a non-empty string of at most 240 characters")
+        raise ToolError("title 必须是非空字符串，且长度不能超过 240 个字符。")
     if not isinstance(specs, list) or not 1 <= len(specs) <= 30:
-        raise ToolError("tasks must contain between 1 and 30 entries")
+        raise ToolError("tasks 必须包含 1 到 30 个任务。")
     keys: dict[str, dict] = {}
     for spec in specs:
         if not isinstance(spec, dict):
-            raise ToolError("each task must be an object")
+            raise ToolError("每个 task 都必须是对象。")
         key = spec.get("key")
         if not isinstance(key, str) or not key.strip() or len(key) > 80 or key in keys:
-            raise ToolError("task keys must be unique non-empty strings of at most 80 characters")
+            raise ToolError("task 的 key 必须是唯一的非空字符串，且长度不能超过 80 个字符。")
         keys[key] = spec
     graph: dict[str, list[str]] = {}
     for key, spec in keys.items():
@@ -200,21 +200,21 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
         if not isinstance(parents, list) or len(parents) > 30 or any(
             not isinstance(parent, str) or parent not in keys or parent == key for parent in parents
         ):
-            raise ToolError(f"task {key!r} has invalid dependencies")
+            raise ToolError(f"任务 {key!r} 的依赖配置无效。")
         if len(set(parents)) != len(parents):
-            raise ToolError(f"task {key!r} has duplicate dependencies")
+            raise ToolError(f"任务 {key!r} 存在重复依赖。")
         graph[key] = parents
         for field, maximum in (("title", 240), ("prompt", 100000), ("acceptance_criteria", 10000)):
             value = spec.get(field)
             if field in {"title", "prompt"} and (not isinstance(value, str) or not value.strip()):
-                raise ToolError(f"task {key!r} requires {field}")
+                raise ToolError(f"任务 {key!r} 缺少必需字段 {field}。")
             if value is not None and (not isinstance(value, str) or len(value) > maximum):
-                raise ToolError(f"task {key!r} has invalid {field}")
+                raise ToolError(f"任务 {key!r} 的字段 {field} 无效。")
     visiting: set[str] = set()
     visited: set[str] = set()
     def visit(key: str) -> None:
         if key in visiting:
-            raise ToolError("workflow dependencies must be acyclic")
+            raise ToolError("工作流依赖关系不能形成环。")
         if key in visited:
             return
         visiting.add(key)
@@ -271,21 +271,21 @@ def call_tool(
     project_id: str | None = None, turn_id: str | None = None,
 ) -> Any:
     if not isinstance(args, dict):
-        raise ToolError("tool arguments must be an object")
+        raise ToolError("工具参数必须是 JSON 对象。")
     if SessionLocal is None:
-        raise ToolError("Sandboxed MCP clients cannot access the database directly.")
+        raise ToolError("受沙箱限制的 MCP 客户端不能直接访问数据库。")
     invocation_turn_id = turn_id or TURN_ID
     bound_project_id = project_id if project_id is not None else PROJECT_ID
     if name in {"create_task", "create_workflow", "request_execution"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
-            raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
+            raise ToolError("创建类工具调用必须提供字符串或数字类型的 JSON-RPC request id。")
         if isinstance(request_id, float) and not math.isfinite(request_id):
-            raise ToolError("JSON-RPC request id must be finite")
+            raise ToolError("JSON-RPC request id 必须是有限数值。")
         request_key = ("s:" if isinstance(request_id, str) else "n:") + str(request_id)
         if not request_key or len(request_key) > 128:
-            raise ToolError("JSON-RPC request id must contain 1 to 128 characters")
+            raise ToolError("JSON-RPC request id 长度必须为 1 到 128 个字符。")
         if not invocation_turn_id:
-            raise ToolError("idempotent create calls require a Master Agent turn scope")
+            raise ToolError("幂等创建调用必须绑定到 Master Agent 的对话轮次。")
         arguments_hash = hashlib.sha256(
             json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         ).hexdigest()
@@ -305,7 +305,7 @@ def call_tool(
                     or previous.tool_name != name
                     or previous.arguments_hash != arguments_hash
                 ):
-                    raise ToolError("JSON-RPC request id was already used with different tool arguments or project scope")
+                    raise ToolError("该 JSON-RPC request id 已用于不同的工具参数或项目范围。")
                 return previous.result
 
         project = _project(db, project_id)
@@ -321,7 +321,7 @@ def call_tool(
         if name == "list_tasks":
             limit = args.get("limit", 20)
             if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
-                raise ToolError(f"limit must be between 1 and {MAX_LIMIT}")
+                raise ToolError(f"limit 必须介于 1 和 {MAX_LIMIT} 之间。")
             query = select(Task).where(Task.project_id == project.id).order_by(Task.created_at.desc(), Task.id).limit(limit)
             if args.get("status") is not None:
                 query = query.where(Task.status == args["status"])
@@ -329,13 +329,13 @@ def call_tool(
         if name == "get_task":
             task = db.get(Task, str(args.get("task_id", "")))
             if task is None or task.project_id != project.id:
-                raise ToolError("task not found in the current project")
+                raise ToolError("当前项目中不存在该任务。")
             return {**_task_summary(task), "prompt": task.prompt,
                     "acceptance_criteria": task.acceptance_criteria}
         if name == "list_workflows":
             limit = args.get("limit", 20)
             if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
-                raise ToolError(f"limit must be between 1 and {MAX_LIMIT}")
+                raise ToolError(f"limit 必须介于 1 和 {MAX_LIMIT} 之间。")
             query = select(Workflow).where(Workflow.project_id == project.id).order_by(Workflow.created_at.desc(), Workflow.id).limit(limit)
             if args.get("status") is not None:
                 query = query.where(Workflow.status == args["status"])
@@ -343,7 +343,7 @@ def call_tool(
         if name == "get_workflow":
             workflow = db.get(Workflow, str(args.get("workflow_id", "")))
             if workflow is None or workflow.project_id != project.id:
-                raise ToolError("workflow not found in the current project")
+                raise ToolError("当前项目中不存在该工作流。")
             tasks = list(db.scalars(select(Task).where(
                 Task.workflow_id == workflow.id, Task.project_id == project.id
             ).order_by(Task.created_at, Task.id)))
@@ -356,7 +356,7 @@ def call_tool(
         if name in {"create_task", "create_workflow", "request_execution"}:
             if name == "request_execution":
                 if project.status != "active":
-                    raise ToolError("Archived projects cannot receive new work.")
+                    raise ToolError("已归档的项目不能接收新任务。")
                 title, prompt = args.get("title"), args.get("prompt")
                 criteria = args.get("acceptance_criteria")
                 commands = args.get("verification_commands", [])
@@ -364,13 +364,13 @@ def call_tool(
                     not isinstance(command, str) or not command.strip() or len(command) > 2000
                     for command in commands
                 ):
-                    raise ToolError("verification_commands must contain at most five non-empty commands of at most 2000 characters")
+                    raise ToolError("verification_commands 最多包含 5 条命令；每条必须非空且不超过 2000 个字符。")
                 if not isinstance(title, str) or not title.strip() or len(title) > 240:
-                    raise ToolError("title must be a non-empty string of at most 240 characters")
+                    raise ToolError("title 必须是非空字符串，且长度不能超过 240 个字符。")
                 if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100000:
-                    raise ToolError("prompt must be a non-empty string of at most 100000 characters")
+                    raise ToolError("prompt 必须是非空字符串，且长度不能超过 100000 个字符。")
                 if criteria is not None and (not isinstance(criteria, str) or len(criteria) > 10000):
-                    raise ToolError("acceptance_criteria must be a string of at most 10000 characters")
+                    raise ToolError("acceptance_criteria 必须是字符串，且长度不能超过 10000 个字符。")
                 task = Task(
                     project_id=project.id, title=title.strip(), prompt=prompt,
                     workspace_path=project.workspace_path, permission_mode="configured",
@@ -417,10 +417,10 @@ def call_tool(
                     MCPToolInvocation.request_id == request_key,
                 ))
                 if previous is None or previous.tool_name != name or previous.arguments_hash != arguments_hash:
-                    raise ToolError("tool call idempotency conflict")
+                    raise ToolError("工具调用幂等性冲突：request id 已被不同参数或项目范围使用。")
                 return previous.result
             return value
-    raise ToolError(f"unknown tool: {name}")
+    raise ToolError(f"未知工具：{name}")
 
 
 def _reply(message: dict) -> dict | None:
@@ -444,7 +444,7 @@ def _reply(message: dict) -> dict | None:
         args = params.get("arguments") or {}
         try:
             if name in {"create_task", "create_workflow", "request_execution"} and request_id is None:
-                raise ToolError("mutating MCP tool calls require a JSON-RPC request id")
+                raise ToolError("会修改数据的 MCP 工具调用必须提供 JSON-RPC request id。")
             value = (
                 _broker_call(name, args, request_id)
                 if BROKER_SOCKET else call_tool(name, args, request_id=request_id)
@@ -470,7 +470,7 @@ def _broker_call(name: str, args: dict, request_id: str | int | float | None) ->
         "name": name, "arguments": args, "request_id": request_id,
     }, ensure_ascii=False).encode("utf-8") + b"\n"
     if len(request) > MAX_MESSAGE_BYTES:
-        raise ToolError("MCP broker request exceeds the message size limit")
+        raise ToolError("MCP broker 请求超过消息大小限制。")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(30)
@@ -483,14 +483,14 @@ def _broker_call(name: str, args: dict, request_id: str | int | float | None) ->
                     break
                 chunks.extend(chunk)
                 if len(chunks) > MAX_MESSAGE_BYTES:
-                    raise ToolError("MCP broker response exceeds the message size limit")
+                    raise ToolError("MCP broker 响应超过消息大小限制。")
         response = json.loads(bytes(chunks).split(b"\n", 1)[0])
         if not isinstance(response, dict):
-            raise ToolError("MCP broker returned an invalid response")
+            raise ToolError("MCP broker 返回了无效响应。")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ToolError(f"MCP broker unavailable: {type(exc).__name__}") from exc
+        raise ToolError(f"MCP broker 不可用：{type(exc).__name__}") from exc
     if not response.get("ok"):
-        raise ToolError(str(response.get("error") or "MCP broker rejected the request"))
+        raise ToolError(str(response.get("error") or "MCP broker 拒绝了请求。"))
     return response.get("value")
 
 

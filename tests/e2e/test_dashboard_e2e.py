@@ -248,3 +248,47 @@ def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashb
     timeline.locator('[data-workflow-event-task="' + tasks["Trace verify"] + '"]').first.click()
     page.locator("#detail").get_by_text("Trace verify").wait_for()
     page.locator("#detail .event").filter(has_text="verification command failed").first.wait_for()
+
+
+def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
+    page: Page = dashboard["page"]
+    base_url = dashboard["base_url"]
+    workspace = dashboard["workspace"]
+    project_response = page.request.post(base_url + "/projects", data={
+        "name": "审批界面项目", "slug": "approval-dashboard-project",
+        "workspace_path": str(workspace),
+    })
+    assert project_response.status == 201
+    project = project_response.json()
+
+    def create_pending(title):
+        task_response = page.request.post(base_url + "/tasks", data={
+            "project_id": project["id"], "title": title,
+            "prompt": "在项目工作区中创建一个小型变更",
+            "workspace_path": str(workspace), "permission_mode": "configured",
+        })
+        assert task_response.status == 201
+        task = task_response.json()
+        approval_response = page.request.post(base_url + f"/execution-approvals/request/{task['id']}")
+        assert approval_response.status == 200
+        return task, approval_response.json()
+
+    approved_task, approved = create_pending("批准测试任务")
+    rejected_task, rejected = create_pending("拒绝测试任务")
+    page.reload(wait_until="domcontentloaded")
+    page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
+
+    approved_card = page.locator("#approval-list .approval-card").filter(has_text="批准测试任务")
+    approved_card.get_by_role("button", name="批准并允许执行").click()
+    approved_status = page.request.get(base_url + f"/execution-approvals/{approved['id']}")
+    assert approved_status.status == 200
+    assert approved_status.json()["status"] == "approved"
+
+    rejected_card = page.locator("#approval-list .approval-card").filter(has_text="拒绝测试任务")
+    rejected_card.get_by_role("button", name="拒绝").click()
+    rejected_status = page.request.get(base_url + f"/execution-approvals/{rejected['id']}")
+    assert rejected_status.status == 200
+    assert rejected_status.json()["status"] == "rejected"
+
+    assert page.request.get(base_url + f"/tasks/{approved_task['id']}").json()["status"] == "queued"
+    assert page.request.get(base_url + f"/tasks/{rejected_task['id']}").json()["status"] == "queued"

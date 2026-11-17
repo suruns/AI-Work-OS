@@ -60,6 +60,17 @@ router = APIRouter(
 DEFAULT_TTL_HOURS = max(1, min(168, int(os.getenv("AI_WORK_OS_APPROVAL_TTL_HOURS", "24"))))
 
 
+def runtime_execution_policy() -> dict:
+    """Return the effective process-wide policy that changes execution risk."""
+    return {
+        "claude_model": os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None,
+        "claude_setting_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local").strip(),
+        "sandbox_mode": os.getenv("AI_WORK_OS_SANDBOX_MODE", "off").strip().lower(),
+        "sandbox_network": os.getenv("AI_WORK_OS_SANDBOX_NETWORK", "none").strip().lower(),
+        "sandbox_runtime_paths": os.getenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", ""),
+    }
+
+
 def task_scope_hash(task: Task) -> str:
     workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
     payload = {
@@ -69,6 +80,7 @@ def task_scope_hash(task: Task) -> str:
         "verification_commands": list(task.verification_commands or []),
         "auto_repair": bool(task.auto_repair), "max_repair_attempts": int(task.max_repair_attempts or 0),
         "max_attempts": int(task.max_attempts or 1),
+        "runtime_execution_policy": runtime_execution_policy(),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -112,6 +124,7 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "requested_at": approval.requested_at, "decided_at": approval.decided_at,
         "expires_at": approval.expires_at, "decision_source": approval.decision_source,
         "decision_note": approval.decision_note,
+        "runtime_policy": runtime_execution_policy(),
         "scope_valid": bool(
             task and project and project.status == "active"
             and approval.scope_hash == task_scope_hash(task)
@@ -127,33 +140,85 @@ def _payload(db, approval: ExecutionApproval) -> dict:
 @router.post("/request/{task_id}")
 def request_execution_approval(task_id: str) -> dict:
     with SessionLocal() as db:
-        task = db.get(Task, task_id)
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
         if task is None:
             raise HTTPException(status_code=404, detail="任务不存在")
         if task.status != "queued" or task.permission_mode != "configured" or not task.project_id:
             raise HTTPException(status_code=409, detail="只有绑定项目且排队中的 configured 任务可以申请写执行审批")
-        existing = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id))
-        if existing:
-            if existing.status in {"pending", "approved"}:
-                return _payload(db, existing)
-            raise HTTPException(status_code=409, detail="该任务已有终态审批记录，请创建新的执行申请")
         project = db.get(Project, task.project_id)
         if project is None or project.status != "active":
             raise HTTPException(status_code=409, detail="项目不存在或已归档")
-        if str(Path(task.workspace_path).expanduser().resolve(strict=False)) != str(Path(project.workspace_path).expanduser().resolve(strict=False)):
+        workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
+        project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False))
+        if workspace != project_workspace:
             raise HTTPException(status_code=409, detail="任务工作区与项目工作区不一致")
+
+        scope_hash = task_scope_hash(task)
+        now = utcnow()
+        existing = db.scalar(
+            select(ExecutionApproval)
+            .where(ExecutionApproval.task_id == task.id)
+            .with_for_update()
+        )
+        if existing is not None:
+            expires = existing.expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if (
+                existing.scope_hash == scope_hash
+                and existing.workspace_path == workspace
+                and existing.status == "pending"
+                and expires > now
+            ):
+                return _payload(db, existing)
+            if (
+                existing.status == "approved"
+                and existing.scope_hash == scope_hash
+                and approval_is_valid(db, task)
+            ):
+                return _payload(db, existing)
+
+            previous_status = existing.status
+            if previous_status in {"pending", "approved"} and expires <= now:
+                existing.status = "expired"
+                existing.decided_at = now
+                db.add(TaskEvent(task_id=task.id, event_type="execution.approval_expired", payload={
+                    "approval_id": existing.id, "reason": "expired_before_resubmission",
+                }))
+            existing.status = "pending"
+            existing.project_id = project.id
+            existing.workspace_path = workspace
+            existing.scope_hash = scope_hash
+            existing.requested_at = now
+            existing.decided_at = None
+            existing.expires_at = now + timedelta(hours=DEFAULT_TTL_HOURS)
+            existing.decision_source = None
+            existing.decision_note = None
+            task.requires_approval = True
+            db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
+                "approval_id": existing.id, "project_id": project.id,
+                "permission_mode": task.permission_mode, "scope_hash": scope_hash,
+                "expires_at": existing.expires_at.isoformat(),
+                "resubmission": True, "previous_status": previous_status,
+            }))
+            db.commit()
+            db.refresh(existing)
+            return _payload(db, existing)
+
         approval = ExecutionApproval(
-            task_id=task.id, project_id=project.id,
-            workspace_path=str(Path(task.workspace_path).expanduser().resolve(strict=False)),
-            scope_hash=task_scope_hash(task), status="pending",
-            expires_at=utcnow() + timedelta(hours=DEFAULT_TTL_HOURS),
+            task_id=task.id, project_id=project.id, workspace_path=workspace,
+            scope_hash=scope_hash, status="pending",
+            expires_at=now + timedelta(hours=DEFAULT_TTL_HOURS),
         )
         task.requires_approval = True
         db.add(approval)
         db.flush()
         db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
             "approval_id": approval.id, "project_id": project.id,
-            "permission_mode": task.permission_mode, "scope_hash": approval.scope_hash, "expires_at": approval.expires_at.isoformat(),
+            "permission_mode": task.permission_mode, "scope_hash": approval.scope_hash,
+            "expires_at": approval.expires_at.isoformat(),
         }))
         try:
             db.commit()

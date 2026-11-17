@@ -18,13 +18,15 @@ from sqlalchemy import func, select
 BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, utcnow
+    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
+    from .execution_approval import task_scope_hash
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
 else:
     # Sandboxed MCP clients must never initialize or open the host database.
     SessionLocal = None
-    Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = utcnow = None
+    Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = ExecutionApproval = utcnow = None
+    task_scope_hash = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
 TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
@@ -110,6 +112,15 @@ def _tools() -> list[dict[str, Any]]:
         {
             "name": "create_task",
             "description": "Queue a plan-mode task in the current project. It will not execute until claimed by a Worker.",
+            "inputSchema": {"type": "object", "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 240},
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
+                "acceptance_criteria": {"type": "string", "maxLength": 10000},
+            }, "required": ["title", "prompt"], "additionalProperties": False},
+        },
+        {
+            "name": "request_execution",
+            "description": "Create a configured-mode task and submit it for explicit user approval. This only requests execution; it does not approve or start the task. The user must approve it in the local control panel.",
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string", "minLength": 1, "maxLength": 240},
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
@@ -263,7 +274,7 @@ def call_tool(
         raise ToolError("Sandboxed MCP clients cannot access the database directly.")
     invocation_turn_id = turn_id or TURN_ID
     bound_project_id = project_id if project_id is not None else PROJECT_ID
-    if name in {"create_task", "create_workflow"} and request_id is not None:
+    if name in {"create_task", "create_workflow", "request_execution"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
             raise ToolError("create tool calls require a string or numeric JSON-RPC request id")
         if isinstance(request_id, float) and not math.isfinite(request_id):
@@ -340,12 +351,46 @@ def call_tool(
             return {**_workflow_summary(db, workflow), "tasks": [_task_summary(task) for task in tasks],
                     "dependencies": [{"upstream_task_id": edge.upstream_task_id,
                                       "downstream_task_id": edge.downstream_task_id} for edge in edges]}
-        if name in {"create_task", "create_workflow"}:
-            value = (
-                _create_task(db, project, args)
-                if name == "create_task"
-                else _create_workflow(db, project, args)
-            )
+        if name in {"create_task", "create_workflow", "request_execution"}:
+            if name == "request_execution":
+                if project.status != "active":
+                    raise ToolError("Archived projects cannot receive new work.")
+                title, prompt = args.get("title"), args.get("prompt")
+                criteria = args.get("acceptance_criteria")
+                if not isinstance(title, str) or not title.strip() or len(title) > 240:
+                    raise ToolError("title must be a non-empty string of at most 240 characters")
+                if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100000:
+                    raise ToolError("prompt must be a non-empty string of at most 100000 characters")
+                if criteria is not None and (not isinstance(criteria, str) or len(criteria) > 10000):
+                    raise ToolError("acceptance_criteria must be a string of at most 10000 characters")
+                task = Task(
+                    project_id=project.id, title=title.strip(), prompt=prompt,
+                    workspace_path=project.workspace_path, permission_mode="configured",
+                    requires_approval=True, priority=0, max_attempts=1,
+                    acceptance_criteria=criteria, verification_commands=[],
+                    auto_repair=False, max_repair_attempts=0,
+                    verification_status="not_configured",
+                )
+                db.add(task)
+                db.flush()
+                approval = ExecutionApproval(
+                    task_id=task.id, project_id=project.id,
+                    workspace_path=project.workspace_path,
+                    scope_hash=task_scope_hash(task), status="pending",
+                    expires_at=utcnow() + __import__("datetime").timedelta(hours=24),
+                )
+                db.add(approval)
+                db.add(TaskEvent(task_id=task.id, event_type="task.queued", payload={
+                    "status": "queued", "project_id": project.id, "created_via": "master_agent_mcp",
+                    "requires_approval": True,
+                }))
+                db.add(TaskEvent(task_id=task.id, event_type="execution.approval_requested", payload={
+                    "approval_id": approval.id, "project_id": project.id,
+                    "permission_mode": "configured", "expires_at": approval.expires_at.isoformat(),
+                }))
+                value = {**_task_summary(task), "approval_id": approval.id, "approval_status": "pending"}
+            else:
+                value = _create_task(db, project, args) if name == "create_task" else _create_workflow(db, project, args)
             if request_key is None:
                 db.commit()
                 return value
@@ -389,7 +434,7 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            if name in {"create_task", "create_workflow"} and request_id is None:
+            if name in {"create_task", "create_workflow", "request_execution"} and request_id is None:
                 raise ToolError("mutating MCP tool calls require a JSON-RPC request id")
             value = (
                 _broker_call(name, args, request_id)

@@ -619,7 +619,9 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             ),
         )
         for candidate in candidates:
-            if candidate.requires_approval and not approval_is_valid(db, candidate):
+            if candidate.permission_mode != "plan" and (
+                not candidate.requires_approval or not approval_is_valid(db, candidate)
+            ):
                 continue
             if candidate.workflow_id is not None:
                 parent_ids = list(db.scalars(select(WorkflowTaskDependency.upstream_task_id).where(
@@ -908,7 +910,9 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         workspace = Path(task.workspace_path)
         prompt = task.prompt
         permission_mode = task.permission_mode
-        if task.requires_approval and not approval_is_valid(db, task):
+        if task.permission_mode != "plan" and (
+            not task.requires_approval or not approval_is_valid(db, task)
+        ):
             db.add(TaskEvent(task_id=task.id, event_type="execution.approval_invalid", payload={
                 "reason": "approval_missing_expired_or_scope_changed", "process_started": False,
             }))

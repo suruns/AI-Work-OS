@@ -713,6 +713,10 @@ def create_task(body: TaskCreate) -> Task:
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
     with SessionLocal() as db:
         _validate_project_workspace(db, body.project_id, workspace)
+        if body.permission_mode != "plan":
+            project = db.get(Project, body.project_id)
+            if project is None or Path(project.workspace_path).expanduser().resolve() != workspace:
+                raise HTTPException(status_code=422, detail="受控写入任务当前必须使用项目根目录作为工作区")
         task = Task(
             project_id=body.project_id,
             title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
@@ -1435,6 +1439,10 @@ def create_workflow(body: WorkflowCreate) -> dict:
     with SessionLocal() as db:
         for item in body.tasks:
             _validate_project_workspace(db, body.project_id, Path(workspaces[item.key]))
+            if item.permission_mode != "plan":
+                project = db.get(Project, body.project_id) if body.project_id else None
+                if project is None or Path(project.workspace_path).expanduser().resolve() != Path(workspaces[item.key]):
+                    raise HTTPException(status_code=422, detail="受控写入工作流任务当前必须使用项目根目录作为工作区")
         workflow = Workflow(project_id=body.project_id, title=body.title.strip(), status="queued")
         db.add(workflow)
         db.flush()

@@ -165,7 +165,7 @@ def _create_task(db, project: Project, args: dict) -> dict:
         workspace_path=workspace, permission_mode="plan", priority=0,
         max_attempts=1, acceptance_criteria=criteria,
         verification_commands=[], auto_repair=False, max_repair_attempts=0,
-        verification_status="pending" if commands else "not_configured",
+        verification_status="not_configured",
     )
     db.add(task)
     db.flush()

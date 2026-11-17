@@ -63,6 +63,8 @@ def test_workflow_click_does_not_select_a_task_or_request_undefined(dashboard):
     assert "工作流步骤" in workflow_copy
     assert "查看任务" in workflow_copy
     assert "排队中" in workflow_copy
+    assert "任务已排队" in workflow_copy
+    assert "task.queued" not in workflow_copy
     assert "Workflow steps" not in workflow_copy
     assert "queued" not in workflow_copy
     page.locator("#detail").get_by_text("Keep task selection").wait_for()

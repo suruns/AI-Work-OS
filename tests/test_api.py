@@ -48,7 +48,7 @@ def test_dashboard_is_served():
     assert response.status_code == 200
     assert "AI Work OS" in response.text
     assert "function renderTaskResult(events)" in response.text
-    assert "Agent 执行结果" in response.text
+    assert "智能体执行结果" in response.text
     assert "function renderArtifacts(data)" in response.text
     assert "function renderArtifactLibrary(data,append=false)" in response.text
     assert "产物库" in response.text
@@ -219,7 +219,7 @@ def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["exit_code"] == 127
-    assert "executable not found" in task["error_summary"]
+    assert "未找到 Claude Code 可执行文件" in task["error_summary"]
     attempt_log = tmp_path / "storage" / "tasks" / task_id / "stdout.attempt-001.jsonl"
     assert attempt_log.is_file()
     assert (attempt_log.parent / "stdout.jsonl").is_file()
@@ -247,7 +247,7 @@ def test_worker_restart_marks_orphaned_running_tasks_failed_without_retry(tmp_pa
     assert task["status"] == "failed"
     assert task["finished_at"] is not None
     assert task["exit_code"] == 125
-    assert "not retried automatically" in task["error_summary"]
+    assert "未自动重试" in task["error_summary"]
 
     events = client.get(f"/tasks/{task_id}/events").json()
     recovery = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
@@ -464,7 +464,7 @@ def test_worker_timeout_is_explicit_and_finishes_task(tmp_path, monkeypatch):
 
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
-    assert "timed out" in task["error_summary"]
+    assert "超时" in task["error_summary"]
     events = client.get(f"/tasks/{task_id}/events").json()
     timeout_events = [event for event in events if event["event_type"] == "executor.timed_out"]
     assert len(timeout_events) == 1
@@ -549,7 +549,7 @@ def test_worker_interruption_terminates_subprocess_and_records_failure(tmp_path,
 
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
-    assert "interrupted" in task["error_summary"].lower()
+    assert "中断" in task["error_summary"].lower()
     events = client.get(f"/tasks/{task_id}/events").json()
     assert any(event["event_type"] == "executor.interrupted" for event in events)
     assert events[-1]["payload"]["terminal_reason"] == "worker_interrupted"
@@ -903,7 +903,7 @@ def test_task_verification_failure_fails_task_without_retrying_agent(tmp_path, m
     assert task["status"] == "failed"
     assert task["exit_code"] == 0
     assert task["verification_status"] == "failed"
-    assert "Verification failed" in task["error_summary"]
+    assert "验证命令执行失败" in task["error_summary"]
     events = client.get(f"/tasks/{task_id}/events").json()
     finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
     assert finished["payload"]["terminal_reason"] == "verification_failed"
@@ -2156,7 +2156,7 @@ def test_task_diagnostics_classifies_verification_failure_and_replays_events(tmp
         task.status = "failed"
         task.verification_status = "failed"
         task.exit_code = 1
-        task.error_summary = "Verification failed for command: python -m pytest -q"
+        task.error_summary = "验证命令执行失败：python -m pytest -q"
         db.add_all([
             TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=2),
                       event_type="verification.finished",
@@ -2405,7 +2405,7 @@ def test_worker_rejects_zero_exit_without_terminal_output(tmp_path, monkeypatch)
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["exit_code"] == 0
-    assert "without a terminal result event" in task["error_summary"]
+    assert "终止结果事件" in task["error_summary"]
     assert task["attempt_count"] == 1
     events = client.get(f"/tasks/{task_id}/events").json()
     validated = [event for event in events if event["event_type"] == "executor.output_validated"]
@@ -2585,7 +2585,7 @@ def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeyp
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["attempt_count"] == 1
-    assert task["error_summary"] and "without a terminal result event" in task["error_summary"]
+    assert task["error_summary"] and "终止结果事件" in task["error_summary"]
     events = client.get(f"/tasks/{task_id}/events").json()
     validated = [event for event in events if event["event_type"] == "executor.output_validated"][-1]
     assert validated["payload"]["result_event_seen"] is False

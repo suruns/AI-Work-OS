@@ -167,7 +167,9 @@ def request_execution_approval(task_id: str) -> dict:
 @router.get("")
 def list_execution_approvals(status: str | None = None) -> dict:
     with SessionLocal() as db:
-        query = select(ExecutionApproval).order_by(ExecutionApproval.requested_at.desc())
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        query = select(ExecutionApproval).order_by(ExecutionApproval.requested_at.desc()).with_for_update()
         if status:
             if status not in {"pending", "approved", "rejected", "revoked", "expired"}:
                 raise HTTPException(status_code=400, detail="无效的审批状态")
@@ -219,7 +221,15 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
     with SessionLocal() as db:
         if db.bind is not None and db.bind.dialect.name == "sqlite":
             db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        approval = db.get(ExecutionApproval, approval_id)
+        approval_ref = db.get(ExecutionApproval, approval_id)
+        if approval_ref is None:
+            raise HTTPException(status_code=404, detail="审批记录不存在")
+        task = db.scalar(
+            select(Task).where(Task.id == approval_ref.task_id).with_for_update()
+        )
+        approval = db.scalar(
+            select(ExecutionApproval).where(ExecutionApproval.id == approval_id).with_for_update()
+        )
         if approval is None:
             raise HTTPException(status_code=404, detail="审批记录不存在")
         now = utcnow()
@@ -232,7 +242,6 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
             approval.status, approval.decided_at = "expired", now
             db.commit()
             raise HTTPException(status_code=409, detail="审批已过期")
-        task = db.get(Task, approval.task_id)
         if task is None or task.status != "queued" or not task.requires_approval:
             raise HTTPException(status_code=409, detail="任务已不处于可审批状态")
         project = db.get(Project, approval.project_id)
@@ -277,12 +286,19 @@ def revoke_execution(approval_id: str, body: dict | None = None) -> dict:
     with SessionLocal() as db:
         if db.bind is not None and db.bind.dialect.name == "sqlite":
             db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        approval = db.get(ExecutionApproval, approval_id)
+        approval_ref = db.get(ExecutionApproval, approval_id)
+        if approval_ref is None:
+            raise HTTPException(status_code=404, detail="审批记录不存在")
+        task = db.scalar(
+            select(Task).where(Task.id == approval_ref.task_id).with_for_update()
+        )
+        approval = db.scalar(
+            select(ExecutionApproval).where(ExecutionApproval.id == approval_id).with_for_update()
+        )
         if approval is None:
             raise HTTPException(status_code=404, detail="审批记录不存在")
         if approval.status != "approved":
             raise HTTPException(status_code=409, detail="只有已批准的审批可以撤销")
-        task = db.get(Task, approval.task_id)
         if task is not None and task.status == "running":
             raise HTTPException(status_code=409, detail="任务已开始执行；请使用任务取消接口停止执行")
         approval.status, approval.decided_at = "revoked", utcnow()

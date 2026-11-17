@@ -38,15 +38,15 @@ API：
 - `POST /execution-approvals/{approval_id}/reject`
 - `POST /execution-approvals/{approval_id}/revoke`
 
-审批接口只允许 loopback 本机访问。当前项目没有用户身份认证，因此 `decision_source=local_control_plane` 只表示通过本机控制台作出决定，**不代表已建立可审计的真实用户身份或多用户 RBAC**。不要把服务暴露到公网或不可信局域网。
+审批接口会同时校验请求来源 IP、Host 与 Origin，只允许 `localhost`、`127.0.0.1` 或 `::1`，以降低 DNS rebinding 和跨站网页请求本机审批接口的风险。当前项目没有用户身份认证，因此 `decision_source=local_control_plane` 只表示通过本机控制台作出决定，**不代表已建立可审计的真实用户身份或多用户 RBAC**。不要把服务暴露到公网或不可信局域网。
 
 ## Worker 安全门禁
 
 - `plan` 任务沿用原有只读路径。
 - 所有非 `plan`（当前为 `configured`）任务必须同时满足 `requires_approval=true` 和存在有效 `approved` 审批，才可被 claim。
-- claim 时在 SQLite 写事务中检查审批；启动 Claude 子进程前再次检查状态、过期时间、项目和工作区路径及执行范围摘要。
+- claim 时检查审批；首次执行和每一次自动修复启动 Claude 子进程前，都会再次检查任务状态、Worker 身份、租约、取消请求、审批状态与过期时间、项目和工作区路径及执行范围摘要。
 - 任务提示词、验收标准、验证命令、权限模式、修复配置或工作区范围发生变化都会使原摘要不匹配，Worker 拒绝启动。
-- 无效审批会记录 `execution.approval_invalid`，并在 `process_started=false` 的情况下结束任务。
+- 最终门禁会持有任务行锁（SQLite 使用 `BEGIN IMMEDIATE`）直到子进程创建完成，使取消请求要么先于进程启动生效，要么在进程创建后立即进入正常终止流程。无效审批会记录 `execution.approval_invalid`，并在 `process_started=false` 的情况下结束任务；数据库提交失败时会终止刚创建的子进程树。
 - 配置模式使用 Claude Code `acceptEdits`，仍禁止 Bash 与 MCP；不使用 `bypassPermissions` 或 `--dangerously-skip-permissions`。
 - 已经开始执行的任务不能通过撤销审批假装停止；必须调用任务取消接口并检查进程树终止记录。
 
@@ -54,7 +54,7 @@ API：
 
 新增 `execution_approvals` 表和 `tasks.requires_approval` 字段。审批记录是一次性的，带有过期时间；状态包括 `pending`、`approved`、`rejected`、`revoked`、`expired`。
 
-任务事件记录申请、批准、拒绝、撤销、过期、范围不匹配及执行门禁结果。事件仅保存审批 ID、状态和摘要等元数据，不复制完整提示词、密钥或原始工具参数。
+审批摘要绑定单个任务，覆盖项目 ID、规范化工作区路径、任务 ID、提示词摘要、权限模式、验收标准、验证命令、自动修复配置和最大尝试次数。任务事件记录申请、批准、拒绝、撤销、过期、范围不匹配及执行门禁结果。事件仅保存审批 ID、状态和摘要等元数据，不复制完整提示词、密钥或原始工具参数。
 
 ## 中文默认规范
 

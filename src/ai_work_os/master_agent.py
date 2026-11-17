@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import site
 import socket
 import sys
 import uuid
@@ -206,7 +207,9 @@ def build_master_command(
     return command
 
 
-def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> Path:
+def _write_mcp_config(
+    turn_dir: Path, project_id: str | None, *, broker_socket: bool = False,
+) -> Path:
     path = turn_dir / "mcp-config.isolated.json"
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -215,13 +218,20 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> P
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
             if project_id:
+                server_env = (
+                    {
+                        "AI_WORK_OS_MCP_BROKER_SOCKET": "/run/awos-mcp.sock",
+                        "AI_WORK_OS_MCP_TURN_ID": turn_dir.name,
+                    }
+                    if broker_socket else {
+                        "AI_WORK_OS_MCP_PROJECT_ID": project_id,
+                        "AI_WORK_OS_MCP_TURN_ID": turn_dir.name,
+                    }
+                )
                 config = {"mcpServers": {"awos": {
                     "type": "stdio", "command": sys.executable,
                     "args": ["-m", "ai_work_os.mcp_control_plane"],
-                    "env": {
-                        "AI_WORK_OS_MCP_PROJECT_ID": project_id,
-                        "AI_WORK_OS_MCP_TURN_ID": turn_id,
-                    },
+                    "env": server_env,
                 }}}
             else:
                 config = {"mcpServers": {}}
@@ -231,6 +241,91 @@ def _write_mcp_config(turn_dir: Path, project_id: str | None, turn_id: str) -> P
             os.close(fd)
     return path
 
+
+
+async def _handle_mcp_broker(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    project_id: str, turn_id: str,
+) -> None:
+    from .mcp_control_plane import ToolError, call_tool
+    try:
+        raw = await asyncio.wait_for(reader.readline(), timeout=30)
+        if not raw or len(raw) > 1_000_000:
+            raise ToolError("invalid MCP broker request size")
+        request = json.loads(raw)
+        name = request.get("name")
+        arguments = request.get("arguments", {})
+        request_id = request.get("request_id")
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            raise ToolError("invalid MCP broker request")
+        if name in {"create_task", "create_workflow"} and request_id is None:
+            raise ToolError("mutating MCP broker calls require a JSON-RPC request id")
+        value = await asyncio.to_thread(
+            call_tool, name, arguments, request_id,
+            project_id=project_id, turn_id=turn_id,
+        )
+        response = {"ok": True, "value": value}
+    except ToolError as exc:
+        response = {"ok": False, "error": str(exc)[:2000]}
+    except Exception as exc:
+        response = {"ok": False, "error": f"broker internal error: {type(exc).__name__}"}
+    try:
+        writer.write(json.dumps(response, ensure_ascii=False, default=str).encode("utf-8") + b"\n")
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def _start_mcp_broker(turn_dir: Path, project_id: str, workspace: Path):
+    socket_path = Path("/tmp") / f"awos-mcp-{turn_dir.name}.sock"
+    try:
+        socket_path.relative_to(workspace.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        socket_path = Path("/var/tmp") / f"awos-mcp-{turn_dir.name}.sock"
+    try:
+        socket_path.relative_to(workspace.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        raise ValueError("cannot place MCP broker socket outside the project workspace")
+    if len(str(socket_path).encode()) >= 104:
+        raise ValueError("MCP broker socket path is too long for Unix domain sockets")
+    if socket_path.is_symlink():
+        raise ValueError("MCP broker socket path must not be a symlink")
+    if socket_path.exists():
+        if not socket_path.is_socket():
+            raise ValueError("MCP broker socket path is occupied by a non-socket file")
+        socket_path.unlink()
+    server = await asyncio.start_unix_server(
+        lambda reader, writer: _handle_mcp_broker(reader, writer, project_id, turn_dir.name),
+        path=str(socket_path), limit=1_000_001,
+    )
+    try:
+        os.chmod(socket_path, 0o600)
+    except OSError:
+        server.close()
+        await server.wait_closed()
+        socket_path.unlink(missing_ok=True)
+        raise
+    return server, socket_path
+
+
+def _mcp_runtime_paths() -> tuple[Path, ...]:
+    """Read-only Python/runtime roots needed by the sandboxed stdio MCP client."""
+    paths = {
+        Path(sys.executable).resolve(strict=True),
+        Path(sys.prefix).resolve(strict=True),
+        Path(sys.base_prefix).resolve(strict=True),
+        Path(__file__).resolve(strict=True).parent.parent,
+    }
+    for value in [*site.getsitepackages(), site.getusersitepackages()]:
+        candidate = Path(value).expanduser()
+        if candidate.exists():
+            paths.add(candidate.resolve(strict=True))
+    return tuple(sorted(paths, key=lambda item: str(item)))
 
 def _safe_cli_event_payload(event_type: str, payload: dict) -> dict:
     """Persist CLI event metadata only; never retain file contents, prompts, or tool arguments."""
@@ -276,7 +371,6 @@ def _safe_cli_event_payload(event_type: str, payload: dict) -> dict:
             if tools:
                 safe["tool_activity"] = tools
     return safe
-
 
 
 def _persist_event(
@@ -493,6 +587,8 @@ def _finish_turn(
 
 async def execute_turn(turn_id: str, worker_id: str) -> None:
     proc: asyncio.subprocess.Process | None = None
+    broker_server: asyncio.AbstractServer | None = None
+    broker_socket_host: Path | None = None
     final_text: str | None = None
     exit_code: int | None = None
     error: str | None = None
@@ -518,11 +614,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         stdout_path = turn_dir / "stdout.jsonl"
         stderr_path = turn_dir / "stderr.log"
         stderr_bytes = 0
-        if project is not None and sandbox_mode() == "bubblewrap":
-            raise RuntimeError(
-                "Project-scoped MCP is not yet supported inside Bubblewrap; refusing to expose the host database or runtime"
-            )
-        mcp_config = _write_mcp_config(turn_dir, project.id if project else None, turn_id)
+        use_mcp_broker = bool(project is not None and sandbox_mode() == "bubblewrap")
+        if use_mcp_broker:
+            broker_server, broker_socket_host = await _start_mcp_broker(turn_dir, project.id, workspace)
+        mcp_config = _write_mcp_config(
+            turn_dir, project.id if project else None, broker_socket=use_mcp_broker,
+        )
         claude_config_dir = STORAGE / "master-agent" / "claude-config" / conversation.id
         claude_config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if claude_config_dir.is_symlink():
@@ -533,8 +630,10 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         subprocess_env["CLAUDE_CONFIG_DIR"] = str(claude_config_dir)
         invocation = build_sandbox_invocation(
             command, workspace, turn_dir, "plan", subprocess_env,
-            mcp_config_path=mcp_config, execution_kind="task",
+            mcp_config_path=mcp_config, execution_kind="master_agent",
             claude_config_dir=claude_config_dir,
+            mcp_broker_socket_path=broker_socket_host,
+            mcp_runtime_paths=_mcp_runtime_paths() if broker_socket_host else (),
         )
         _persist_event(turn_id, worker_id, "turn.executor_started", {
             "command": [
@@ -691,6 +790,15 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
         error = f"{type(exc).__name__}: {exc}"
         _persist_event(turn_id, worker_id, "turn.executor_failed", {"error": error})
         _finish_turn(turn_id, worker_id, "failed", error=error, exit_code=exit_code)
+    finally:
+        if broker_server is not None:
+            broker_server.close()
+            await broker_server.wait_closed()
+        if broker_socket_host is not None:
+            try:
+                broker_socket_host.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 async def run_master_agent() -> None:

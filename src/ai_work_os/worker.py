@@ -14,7 +14,7 @@ from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
 from .sandbox import build_sandbox_invocation, sandbox_mode
-from .execution_approval import approval_is_valid
+from .execution_approval import approval_is_valid, expire_approval_if_needed
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
     """Persist process liveness; active task ownership remains authoritative on Task rows."""
@@ -632,10 +632,11 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
                 available_at = available_at.replace(tzinfo=timezone.utc)
             if available_at is not None and available_at > started_at:
                 continue
-            if candidate.permission_mode != "plan" and (
-                not candidate.requires_approval or not approval_is_valid(db, candidate)
-            ):
-                continue
+            if candidate.permission_mode != "plan":
+                if expire_approval_if_needed(db, candidate, started_at):
+                    continue
+                if not candidate.requires_approval or not approval_is_valid(db, candidate):
+                    continue
             if candidate.workflow_id is not None:
                 parent_ids = list(db.scalars(select(WorkflowTaskDependency.upstream_task_id).where(
                     WorkflowTaskDependency.workflow_id == candidate.workflow_id,

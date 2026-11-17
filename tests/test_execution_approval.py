@@ -167,6 +167,8 @@ def test_expired_approval_is_not_listed_as_pending_and_cannot_be_approved(tmp_pa
     with SessionLocal() as db:
         record = db.get(ExecutionApproval, approval["id"])
         assert record.status == "expired"
+        events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
+        assert sum(event.event_type == "execution.approval_expired" for event in events) == 1
 
 
 def test_approved_queued_task_can_have_approval_revoked(tmp_path):

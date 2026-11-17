@@ -121,6 +121,31 @@ def task_scope_hash(task: Task) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+
+def expire_approval_if_needed(db, task: Task, at=None) -> bool:
+    """Persist the expiry transition and audit event while a queued task is examined."""
+    if task.status != "queued":
+        return False
+    approval = db.scalar(
+        select(ExecutionApproval)
+        .where(ExecutionApproval.task_id == task.id)
+        .with_for_update()
+    )
+    if approval is None or approval.status not in {"pending", "approved"}:
+        return False
+    expires = approval.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    timestamp = at or utcnow()
+    if expires > timestamp:
+        return False
+    approval.status = "expired"
+    approval.decided_at = timestamp
+    db.add(TaskEvent(task_id=task.id, event_type="execution.approval_expired", payload={
+        "approval_id": approval.id, "reason": "approval_ttl_elapsed",
+    }))
+    return True
+
 def approval_is_valid(db, task: Task) -> bool:
     if not task.requires_approval:
         return task.permission_mode == "plan"
@@ -336,6 +361,9 @@ def _decide(approval_id: str, decision: str, note: str | None = None) -> dict:
             expires = expires.replace(tzinfo=timezone.utc)
         if expires <= now:
             approval.status, approval.decided_at = "expired", now
+            db.add(TaskEvent(task_id=approval.task_id, event_type="execution.approval_expired", payload={
+                "approval_id": approval.id, "reason": "expired_at_decision",
+            }))
             db.commit()
             raise HTTPException(status_code=409, detail="审批已过期")
         if task is None or task.status != "queued" or not task.requires_approval:

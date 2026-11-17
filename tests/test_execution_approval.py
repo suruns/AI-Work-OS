@@ -631,3 +631,23 @@ def test_cancelled_task_invalidates_approved_scope(tmp_path):
     assert current["status"] == "revoked"
     assert current["scope_valid"] is False
     assert current["can_resubmit"] is False
+
+
+def test_claude_project_instructions_change_invalidates_approval_scope(tmp_path):
+    project, task = _configured_task(tmp_path)
+    instructions = Path(project["workspace_path"]) / "CLAUDE.md"
+    instructions.write_text("项目约定：只修改指定文件。", encoding="utf-8")
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is True
+
+    instructions.write_text("项目约定：允许修改所有文件。", encoding="utf-8")
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is False
+    detail = client.get(f"/execution-approvals/{approval['id']}").json()
+    assert detail["scope_valid"] is False
+    assert detail["can_resubmit"] is True

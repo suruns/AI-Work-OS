@@ -91,11 +91,25 @@ def claude_settings_fingerprints(workspace: Path) -> dict:
     """Bind approval to the settings files Claude will load for this task."""
     raw_sources = os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local")
     sources = [item.strip() for item in raw_sources.split(",") if item.strip()]
-    candidates = {}
+    candidates = {
+        "project_instructions": workspace / "CLAUDE.md",
+        "claude_directory_instructions": workspace / ".claude" / "CLAUDE.md",
+    }
     if "project" in sources:
         candidates["project"] = workspace / ".claude" / "settings.json"
     if "local" in sources:
         candidates["local"] = workspace / ".claude" / "settings.local.json"
+    for directory_name in ("rules", "agents", "commands"):
+        directory = workspace / ".claude" / directory_name
+        if directory.is_dir():
+            for instruction_file in sorted(directory.rglob("*.md")):
+                relative = instruction_file.relative_to(workspace).as_posix()
+                candidates[f"{directory_name}:{relative}"] = instruction_file
+    skills_directory = workspace / ".claude" / "skills"
+    if skills_directory.is_dir():
+        for skill_file in sorted(skills_directory.rglob("SKILL.md")):
+            relative = skill_file.relative_to(workspace).as_posix()
+            candidates[f"skills:{relative}"] = skill_file
     if "user" in sources:
         config_dir = Path(os.getenv("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
         candidates["user"] = config_dir / "settings.json"

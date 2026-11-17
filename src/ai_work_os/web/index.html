@@ -56,7 +56,7 @@
 <section class="panel"><h2>＋ 创建任务</h2><form id="create-form">
 <div class="field"><label for="title">任务标题</label><input id="title" name="title" required maxlength="240" placeholder="例如：审查 API 架构"></div>
 <div class="field"><label for="workspace">工作区绝对路径</label><input id="workspace" name="workspace_path" required placeholder="/home/me/projects/my-app"></div>
-<div class="field"><label for="permission_mode">执行权限</label><select id="permission_mode" name="permission_mode"><option value="plan">规划模式 · 只读（推荐）</option><option value="configured">使用项目级 Claude Code 设置</option></select><span class="muted small">规划模式要求 Claude Code 使用只读权限。受控执行模式使用项目级 CLI 权限，并且必须先经用户审批。默认排除用户级设置，避免全局模型配置覆盖。</span></div>
+<div class="field"><label for="permission_mode">执行权限</label><select id="permission_mode" name="permission_mode"><option value="plan">规划模式 · 只读（推荐）</option><option value="configured" disabled>受控写入（请在项目对话中申请审批）</option></select><span class="muted small">规划模式要求 Claude Code 使用只读权限。受控执行模式使用项目级 CLI 权限，并且必须先经用户审批。默认排除用户级设置，避免全局模型配置覆盖。</span></div>
 <div class="field"><label for="priority">优先级（0–100）</label><input id="priority" name="priority" type="number" min="0" max="100" value="0" required><span class="muted small">优先级越高越先执行；相同优先级按创建顺序处理。</span></div>
 <div class="field"><label for="max_attempts">最大尝试次数</label><select id="max_attempts" name="max_attempts"><option value="1">1 次 · 不重试（默认）</option><option value="2">2 次 · 重试 1 次</option><option value="3">3 次 · 最多重试 2 次</option></select><span class="muted small">重试可能重复 Agent 的副作用；仅在重复执行安全时启用。</span></div>
 <div class="field"><label for="prompt">任务说明</label><textarea id="prompt" name="prompt" required maxlength="100000" placeholder="描述任务目标与约束；不确定时先进行只读分析。"></textarea></div>

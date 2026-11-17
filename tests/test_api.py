@@ -6,6 +6,7 @@ import subprocess
 import signal
 import sys
 import threading
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, timezone
 from fastapi.testclient import TestClient

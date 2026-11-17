@@ -706,6 +706,8 @@ def list_agent_turn_events(
 
 @app.post("/tasks", response_model=TaskRead, status_code=201)
 def create_task(body: TaskCreate) -> Task:
+    if body.permission_mode != "plan" and body.project_id is None:
+        raise HTTPException(status_code=422, detail="受控写入任务必须绑定项目，并在本机控制台审批后才能执行")
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
@@ -1418,6 +1420,8 @@ def _validate_dag(items: list) -> dict[str, list[str]]:
 
 @app.post("/workflows", status_code=201)
 def create_workflow(body: WorkflowCreate) -> dict:
+    if body.project_id is None and any(item.permission_mode != "plan" for item in body.tasks):
+        raise HTTPException(status_code=422, detail="受控写入工作流必须绑定项目，并逐项完成本机审批")
     graph = _validate_dag(body.tasks)
     if any(item.project_id not in (None, body.project_id) for item in body.tasks):
         raise HTTPException(status_code=422, detail="workflow task project_id must match the workflow project_id")

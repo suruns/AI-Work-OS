@@ -3254,3 +3254,32 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert 'before_id="+messages[0].id' in html
     assert 'id="load-older-messages"' in html
     assert 'after_id="+cursor' in html
+
+
+def test_configured_write_tasks_require_project_root_binding(tmp_path):
+    unbound = client.post("/tasks", json={
+        "title": "Unbound write task", "prompt": "Write a file",
+        "workspace_path": str(tmp_path), "permission_mode": "configured",
+    })
+    assert unbound.status_code == 422
+    project = client.post("/projects", json={
+        "name": "Write scope project", "slug": f"write-scope-{uuid4().hex}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project.status_code == 201
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    out_of_scope = client.post("/tasks", json={
+        "project_id": project.json()["id"], "title": "Nested write task",
+        "prompt": "Write a file", "workspace_path": str(nested),
+        "permission_mode": "configured",
+    })
+    assert out_of_scope.status_code == 422
+    unbound_workflow = client.post("/workflows", json={
+        "title": "Unbound write workflow",
+        "tasks": [{
+            "key": "write", "title": "Write", "prompt": "Write a file",
+            "workspace_path": str(tmp_path), "permission_mode": "configured",
+        }],
+    })
+    assert unbound_workflow.status_code == 422

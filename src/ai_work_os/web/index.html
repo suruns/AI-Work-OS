@@ -38,7 +38,11 @@
   <div id="workers" class="workers-grid" style="margin-top:12px"><div class="empty">尚未发现 Worker。请启动： <code>python -m ai_work_os.worker</code>.</div></div>
 </section>
 <section class="panel" style="margin-bottom:16px">
-  <div class="task-head"><div><h2 style="margin:0">产物库</h2><div class="muted small">近期任务输出与工作区变更文件的只读清单</div></div><span id="artifact-library-count" class="muted small">Not loaded</span></div>
+  <div class="task-head"><div><section class="panel" id="approval-panel" style="margin-bottom:16px">
+  <div class="task-head"><div><h2 style="margin:0">写入执行审批</h2><div class="muted small">Master Agent 只能提交申请；只有你批准后 Worker 才能开始修改项目。</div></div><span id="approval-count" class="muted small">加载中…</span></div>
+  <div id="approval-list" class="approval-list" style="margin-top:12px"><div class="empty">正在加载待审批任务…</div></div>
+</section>
+<h2 style="margin:0">产物库</h2><div class="muted small">近期任务输出与工作区变更文件的只读清单</div></div><span id="artifact-library-count" class="muted small">Not loaded</span></div>
   <form id="artifact-library-form" class="actions" style="margin-top:12px">
     <input id="artifact-library-query" placeholder="搜索文件名、任务标题或工作区路径…" style="flex:1;min-width:220px">
     <select id="artifact-library-kind" style="width:auto"><option value="">全部类型</option><option value="execution_log">执行日志</option><option value="error_log">错误日志</option><option value="workspace_change_report">工作区报告</option><option value="verification_report">验证报告</option><option value="repair_execution_log">修复日志</option><option value="repair_error_log">修复错误</option><option value="workspace_file">工作区文件</option></select>

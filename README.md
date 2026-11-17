@@ -1,5 +1,22 @@
 # AI Work OS
 
+> **默认语言：简体中文（zh-CN）**。Chat、Dashboard、Master Agent、Worker 面向用户的计划与报告默认使用中文；代码、API 字段、命令和原始错误保留英文标识。
+
+AI Work OS 是面向 CLI 编程 Agent 的项目级工作控制台，提供持久化对话、任务与工作流编排、执行追踪、产物管理和受控执行审批。
+
+## 中文快速启动与部署顺序
+
+在 Linux 本机可信环境运行。首次使用新的 SQLite 数据库时，必须串行启动服务，避免多个进程同时建表：
+
+1. 先启动 API：`uvicorn ai_work_os.api:app --host 127.0.0.1 --port 8000`
+2. 等待健康检查成功：`curl --fail http://127.0.0.1:8000/health`
+3. 再启动 Worker：`python -m ai_work_os.worker`
+4. 最后启动 Master Agent：`python -m ai_work_os.master_agent`
+
+浏览器打开 `http://127.0.0.1:8000/` 进入聊天界面，`http://127.0.0.1:8000/dashboard` 查看任务、产物和写入审批。
+
+> **安全提醒：** Master Agent 的普通任务创建仍是只读 plan 模式。写入任务必须通过 `request_execution` 提交申请，并由用户在本机 Dashboard 明确批准。当前审批控制面仅适用于可信本机部署，不支持远程身份认证或多用户 RBAC。详见 [Phase 11.5 中文实施说明](docs/phase-11-5-implementation.md)。
+
 A control plane around existing coding agents. The first vertical slice targets Claude Code CLI and focuses on durable task records, execution events, logs, and a small HTTP API.
 
 ## Status

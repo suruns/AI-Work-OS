@@ -197,3 +197,16 @@ def test_local_start_script_waits_for_api_health_before_workers():
     assert source.index("uvicorn ai_work_os.api:app") < source.index('curl --silent')
     assert source.index('curl --silent') < source.index("python -m ai_work_os.worker")
     assert source.index("python -m ai_work_os.worker") < source.index("python -m ai_work_os.master_agent")
+
+
+def test_cancelling_queued_task_invalidates_pending_approval(tmp_path):
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    cancelled = client.post(f"/tasks/{task['id']}/cancel")
+    assert cancelled.status_code == 200
+    pending = client.get("/execution-approvals?status=pending")
+    assert all(item["id"] != approval["id"] for item in pending.json()["approvals"])
+    with SessionLocal() as db:
+        record = db.get(ExecutionApproval, approval["id"])
+        assert record.status == "revoked"
+        assert record.decision_source == "task_state"

@@ -145,6 +145,21 @@ def list_execution_approvals(status: str | None = None) -> dict:
         records = list(db.scalars(query))
         now = utcnow()
         for record in records:
+            task = db.get(Task, record.task_id)
+            no_longer_eligible = (
+                record.status == "pending" and (task is None or task.status != "queued")
+            ) or (
+                record.status == "approved" and (task is None or task.status not in {"queued", "running"})
+            )
+            if no_longer_eligible:
+                record.status = "revoked"
+                record.decided_at = now
+                record.decision_source = "task_state"
+                record.decision_note = "任务状态已变化，审批不再适用于该任务。"
+                db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_revoked", payload={
+                    "approval_id": record.id, "reason": "task_no_longer_eligible",
+                }))
+                continue
             expires = record.expires_at
             if expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)

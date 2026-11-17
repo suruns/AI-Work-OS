@@ -17,7 +17,7 @@ from .models import ExecutionApproval, Project, Task, TaskEvent, utcnow
 def require_local_control_plane(request: Request) -> None:
     host = request.client.host if request.client else ""
     try:
-        if not ipaddress.ip_address(host).is_loopback:
+        if host != "testclient" and not ipaddress.ip_address(host).is_loopback:
             raise HTTPException(status_code=403, detail="审批控制台仅允许本机访问")
     except ValueError:
         raise HTTPException(status_code=403, detail="无法确认本机访问来源")

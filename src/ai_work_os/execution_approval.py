@@ -147,6 +147,8 @@ def list_execution_approvals(status: str | None = None) -> dict:
                 record.status, record.decided_at = "expired", now
                 db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_expired", payload={"approval_id": record.id}))
         db.commit()
+        if status == "pending":
+            records = [record for record in records if record.status == "pending"]
         return {"approvals": [_payload(db, record) for record in records]}
 
 

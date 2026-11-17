@@ -572,18 +572,43 @@ def test_local_approval_guard_rejects_malformed_origin_port():
     assert exc.value.status_code == 403
 
 
-def test_worker_persists_expired_approval_audit_without_claiming_task(tmp_path):
-    _, task = _configured_task(tmp_path)
-    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
-    with SessionLocal() as db:
-        record = db.get(ExecutionApproval, approval["id"])
-        record.expires_at = utcnow() - __import__("datetime").timedelta(seconds=1)
-        db.commit()
+def test_worker_persists_expired_approval_audit_without_claiming_task(tmp_path, monkeypatch):
+    workspace = tmp_path / "expired-approval-workspace"
+    workspace.mkdir()
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(name="过期审批", slug="expired-approval", workspace_path=str(workspace), status="active")
+            db.add(project)
+            db.flush()
+            task = Task(
+                project_id=project.id, title="过期后不执行", prompt="创建文件",
+                workspace_path=str(workspace), permission_mode="configured",
+                requires_approval=True, status="queued",
+            )
+            db.add(task)
+            db.flush()
+            approval = ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(workspace),
+                scope_hash=__import__(
+                    "ai_work_os.execution_approval", fromlist=["task_scope_hash"]
+                ).task_scope_hash(task),
+                status="pending", expires_at=utcnow() - __import__("datetime").timedelta(seconds=1),
+            )
+            db.add(approval)
+            db.commit()
+            task_id, approval_id = task.id, approval.id
 
-    claimed = worker.claim_task()
-    assert claimed != task["id"]
-    with SessionLocal() as db:
-        record = db.get(ExecutionApproval, approval["id"])
-        assert record.status == "expired"
-        events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
-        assert sum(event.event_type == "execution.approval_expired" for event in events) == 1
+        assert worker.claim_task() is None
+        with factory() as db:
+            record = db.get(ExecutionApproval, approval_id)
+            assert record.status == "expired"
+            task_record = db.get(Task, task_id)
+            assert task_record.status == "queued"
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
+            assert sum(event.event_type == "execution.approval_expired" for event in events) == 1
+    finally:
+        engine.dispose()

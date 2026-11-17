@@ -92,7 +92,7 @@
 
 ```bash
 AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE=1 \
-AI_WORK_OS_CLAUDE_MODEL=deepseek-flash \
+AI_WORK_OS_CLAUDE_MODEL=你的网关模型名 \
 AI_WORK_OS_SANDBOX_MODE=bubblewrap \
 AI_WORK_OS_SANDBOX_NETWORK=host \
 pytest -q tests/test_execution_approval_acceptance.py

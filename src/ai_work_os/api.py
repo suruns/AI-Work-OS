@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
 from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
@@ -1342,6 +1342,15 @@ def cancel_task(task_id: str) -> Task:
                 )
             )
             if queued_result.rowcount == 1:
+                approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task_id))
+                if approval is not None and approval.status in {"pending", "approved"}:
+                    approval.status = "revoked"
+                    approval.decided_at = timestamp
+                    approval.decision_source = "task_state"
+                    approval.decision_note = "任务在开始执行前已取消。"
+                    db.add(TaskEvent(task_id=task_id, event_type="execution.approval_revoked", payload={
+                        "approval_id": approval.id, "reason": "task_cancelled_before_start",
+                    }))
                 db.add(TaskEvent(
                     task_id=task_id, event_type="task.cancelled",
                     payload={

@@ -981,7 +981,7 @@ def test_bounded_repair_can_turn_failed_verification_into_success(tmp_path, monk
     task_id = created.json()["id"]
     calls = []
 
-    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands):
+    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands, worker_id=None):
         calls.append((repair_number, commands))
         return True, [{
             "index": 1, "command": commands[0], "exit_code": 0,
@@ -1017,7 +1017,7 @@ def test_bounded_repair_stops_at_configured_cap(tmp_path, monkeypatch):
     task_id = created.json()["id"]
     calls = []
 
-    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands):
+    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands, worker_id=None):
         calls.append(repair_number)
         return False, [{
             "index": 1, "command": commands[0], "exit_code": 1,

@@ -1,6 +1,7 @@
 from uuid import uuid4
 from pathlib import Path
 import subprocess
+import os
 import asyncio
 from types import SimpleNamespace
 import pytest

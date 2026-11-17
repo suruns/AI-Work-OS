@@ -17,7 +17,7 @@ from starlette.requests import Request
 from ai_work_os.api import app
 from ai_work_os.db import Base, SessionLocal
 from ai_work_os import worker
-from ai_work_os.execution_approval import approval_is_valid, require_local_control_plane
+from ai_work_os.execution_approval import approval_is_valid, require_local_control_plane, runtime_execution_policy
 from ai_work_os.models import ExecutionApproval, Project, Task, TaskEvent, utcnow
 
 client = TestClient(app)
@@ -767,3 +767,23 @@ def test_worker_verification_commands_are_spawned_through_approval_and_cancel_ga
         assert result == (False, [], "cancelled")
     finally:
         engine.dispose()
+
+
+def test_provider_environment_changes_invalidate_approval_without_exposing_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway-a.example/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-key-one")
+    _, task = _configured_task(tmp_path)
+    approval = client.post(f"/execution-approvals/request/{task['id']}").json()
+    approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
+    assert approved.status_code == 200
+    first_policy = runtime_execution_policy()
+    assert "secret-key-one" not in repr(first_policy)
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway-b.example/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-key-two")
+    second_policy = runtime_execution_policy()
+    assert first_policy["provider_environment_sha256"] != second_policy["provider_environment_sha256"]
+    assert "secret-key-two" not in repr(second_policy)
+    with SessionLocal() as db:
+        record = db.get(Task, task["id"])
+        assert approval_is_valid(db, record) is False

@@ -80,7 +80,24 @@ def runtime_execution_policy() -> dict:
     bwrap_bin = os.getenv("AI_WORK_OS_BWRAP_BIN", "bwrap").strip()
     claude_found = shutil.which(claude_bin)
     bwrap_found = shutil.which(bwrap_bin)
+    provider_environment = {
+        key: os.getenv(key)
+        for key in (
+            "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC",
+            "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE",
+            "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION",
+        )
+        if os.getenv(key) is not None
+    }
+    provider_config = hashlib.sha256(
+        json.dumps(provider_environment, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return {
+        "provider_environment_sha256": provider_config,
         "claude_bin": claude_bin,
         "claude_executable": str(Path(claude_found).resolve(strict=False)) if claude_found else None,
         "claude_model": os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None,

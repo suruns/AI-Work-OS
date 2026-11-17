@@ -518,8 +518,11 @@ def reconcile_workflows() -> None:
                     ), None)
                     if failed_parent is None:
                         continue
+                    parent_status_zh = {
+                        "failed": "失败", "cancelled": "已取消", "blocked": "已阻塞",
+                    }.get(failed_parent.status, failed_parent.status)
                     root_reason = failed_parent.blocked_reason or (
-                        f"Blocked because prerequisite task {failed_parent.id} ended as {failed_parent.status}."
+                        f"前置任务 {failed_parent.id} 已以“{parent_status_zh}”状态结束，当前任务因此被阻塞。"
                     )
                     if failed_parent.status in {"failed", "cancelled"}:
                         ancestor_status = failed_parent.status

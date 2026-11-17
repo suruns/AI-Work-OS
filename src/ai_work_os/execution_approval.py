@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from datetime import timedelta, timezone
 from pathlib import Path
 
@@ -75,12 +76,18 @@ DEFAULT_TTL_HOURS = max(1, min(168, int(os.getenv("AI_WORK_OS_APPROVAL_TTL_HOURS
 
 def runtime_execution_policy() -> dict:
     """Return the effective process-wide policy that changes execution risk."""
+    claude_bin = os.getenv("AI_WORK_OS_CLAUDE_BIN", "claude").strip()
+    bwrap_bin = os.getenv("AI_WORK_OS_BWRAP_BIN", "bwrap").strip()
+    claude_found = shutil.which(claude_bin)
+    bwrap_found = shutil.which(bwrap_bin)
     return {
-        "claude_bin": os.getenv("AI_WORK_OS_CLAUDE_BIN", "claude").strip(),
+        "claude_bin": claude_bin,
+        "claude_executable": str(Path(claude_found).resolve(strict=False)) if claude_found else None,
         "claude_model": os.getenv("AI_WORK_OS_CLAUDE_MODEL", "").strip() or None,
         "claude_setting_sources": os.getenv("AI_WORK_OS_CLAUDE_SETTING_SOURCES", "project,local").strip(),
         "claude_config_dir": os.getenv("CLAUDE_CONFIG_DIR", "").strip() or None,
-        "bwrap_bin": os.getenv("AI_WORK_OS_BWRAP_BIN", "bwrap").strip(),
+        "bwrap_bin": bwrap_bin,
+        "bwrap_executable": str(Path(bwrap_found).resolve(strict=False)) if bwrap_found else None,
         "sandbox_mode": os.getenv("AI_WORK_OS_SANDBOX_MODE", "off").strip().lower(),
         "sandbox_network": os.getenv("AI_WORK_OS_SANDBOX_NETWORK", "none").strip().lower(),
         "sandbox_runtime_paths": os.getenv("AI_WORK_OS_SANDBOX_RUNTIME_PATHS", ""),

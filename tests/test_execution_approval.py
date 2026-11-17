@@ -453,6 +453,8 @@ def test_runtime_policy_change_invalidates_and_allows_resubmission(monkeypatch, 
     assert requested.status_code == 200, requested.text
     approval = requested.json()
     assert approval["runtime_policy"]["sandbox_mode"] == "off"
+    assert "claude_executable" in approval["runtime_policy"]
+    assert "bwrap_executable" in approval["runtime_policy"]
 
     approved = client.post(f"/execution-approvals/{approval['id']}/approve", json={})
     assert approved.status_code == 200, approved.text

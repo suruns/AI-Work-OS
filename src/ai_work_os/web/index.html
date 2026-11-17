@@ -157,7 +157,7 @@ async function loadApprovals(){
    const policy=a.runtime_policy||{};
    const sandboxLabel=policy.sandbox_mode==="bubblewrap"?"Bubblewrap 沙箱":(policy.sandbox_mode||"off")==="off"?"未启用 OS 沙箱":String(policy.sandbox_mode);
    const networkLabel=policy.sandbox_mode==="bubblewrap"?(policy.sandbox_network==="host"?"主机网络（允许出站访问）":policy.sandbox_network==="none"?"无网络":String(policy.sandbox_network||"未配置")):"网络访问不受 Bubblewrap 限制";
-   const runtime='<div class="meta">执行隔离：'+esc(sandboxLabel)+'<br>网络策略：'+esc(networkLabel)+'<br>模型：'+esc(policy.claude_model||"CLI 默认模型")+'<br>权限配置来源：'+esc(policy.claude_setting_sources||"project,local")+(policy.sandbox_runtime_paths?'<br>额外运行时路径：'+esc(policy.sandbox_runtime_paths):"")+'</div>';
+   const runtime='<div class="meta">执行隔离：'+esc(sandboxLabel)+'<br>网络策略：'+esc(networkLabel)+'<br>Claude CLI：'+esc(policy.claude_executable||policy.claude_bin||"未找到")+'<br>Bubblewrap：'+esc(policy.bwrap_executable||policy.bwrap_bin||"未配置")+'<br>模型：'+esc(policy.claude_model||"CLI 默认模型")+'<br>权限配置来源：'+esc(policy.claude_setting_sources||"project,local")+(policy.sandbox_runtime_paths?'<br>额外运行时路径：'+esc(policy.sandbox_runtime_paths):"")+'</div>';
    const settingSources=(policy.claude_setting_sources||"project,local").split(",");
    const settingsFiles=[];
    if(settingSources.includes("project"))settingsFiles.push("工作区/.claude/settings.json");

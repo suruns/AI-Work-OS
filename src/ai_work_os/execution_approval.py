@@ -163,7 +163,11 @@ def list_execution_approvals(status: str | None = None) -> dict:
             expires = record.expires_at
             if expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
-            if record.status in {"pending", "approved"} and expires <= now:
+            if (
+                record.status in {"pending", "approved"}
+                and expires <= now
+                and (task is None or task.status == "queued")
+            ):
                 record.status, record.decided_at = "expired", now
                 db.add(TaskEvent(task_id=record.task_id, event_type="execution.approval_expired", payload={"approval_id": record.id}))
         db.commit()

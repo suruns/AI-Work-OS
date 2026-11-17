@@ -286,13 +286,17 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     assert "权限配置来源：" in approval_copy
     assert "最大自动修复次数：" in approval_copy
     page.once("dialog", lambda dialog: dialog.accept())
-    approved_card.get_by_role("button", name="批准并允许执行").click()
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{approved['id']}/approve")) as approve_response:
+        approved_card.get_by_role("button", name="批准并允许执行").click()
+    assert approve_response.value.status == 200, approve_response.value.text()
     approved_status = page.request.get(base_url + f"/execution-approvals/{approved['id']}")
     assert approved_status.status == 200
     assert approved_status.json()["status"] == "approved"
 
     rejected_card = page.locator("#approval-list .approval-card").filter(has_text="拒绝测试任务")
-    rejected_card.get_by_role("button", name="拒绝").click()
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{rejected['id']}/reject")) as reject_response:
+        rejected_card.get_by_role("button", name="拒绝").click()
+    assert reject_response.value.status == 200, reject_response.value.text()
     rejected_status = page.request.get(base_url + f"/execution-approvals/{rejected['id']}")
     assert rejected_status.status == 200
     assert rejected_status.json()["status"] == "rejected"

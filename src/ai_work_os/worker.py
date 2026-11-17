@@ -884,13 +884,23 @@ async def run_repair_attempt(
                 task_id, argv, workspace, task_dir, permission_mode, None,
                 execution_kind="verification",
             )
-            check = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd, env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            if worker_id is not None:
+                check = await _spawn_task_process(task_id, worker_id, invocation)
+                if check is None:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        if current is None or current.status == "cancelled" or bool(current.cancel_requested):
+                            return False, results, "cancelled"
+                    return False, results, "approval_invalid_or_lease_lost"
+            else:
+                # Test-only compatibility path; production repair verification is fenced.
+                check = await asyncio.create_subprocess_exec(
+                    *invocation.command,
+                    cwd=invocation.cwd, env=invocation.env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name == "posix"),
+                )
             communicate_task = asyncio.create_task(check.communicate())
             timed_out = False
             cancelled = False
@@ -1285,12 +1295,21 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     task_id, argv, workspace, task_dir, permission_mode, None,
                     execution_kind="verification",
                 )
-                proc = await asyncio.create_subprocess_exec(
-                    *invocation.command, cwd=invocation.cwd, env=invocation.env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=(os.name == "posix"),
-                )
+                proc = await _spawn_task_process(task_id, worker_id, invocation)
+                if proc is None:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        was_cancelled = (
+                            current is None or current.status == "cancelled"
+                            or bool(current.cancel_requested)
+                        )
+                    if was_cancelled:
+                        verification_cancelled = True
+                        terminal_reason = "cancelled"
+                    else:
+                        terminal_reason = "approval_invalid_or_lease_lost"
+                        error_summary = "验证进程启动前审批或 Worker 租约失效；未启动验证命令。"
+                    break
                 communicate_task = asyncio.create_task(proc.communicate())
                 timed_out = False
                 cancelled = False

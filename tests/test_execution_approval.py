@@ -711,3 +711,58 @@ def test_repair_runner_does_not_fall_back_to_unfenced_spawn_after_cancellation(m
         assert error == "cancelled"
     finally:
         engine.dispose()
+
+
+def test_worker_verification_commands_are_spawned_through_approval_and_cancel_gate(monkeypatch, tmp_path):
+    workspace = tmp_path / "verification-gate-workspace"
+    workspace.mkdir()
+    task_dir = tmp_path / "verification-gate-artifacts"
+    task_dir.mkdir()
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(
+                name="验证门禁", slug=f"verification-gate-{uuid4().hex}",
+                workspace_path=str(workspace), status="active",
+            )
+            db.add(project)
+            db.flush()
+            task = Task(
+                project_id=project.id, title="取消验证", prompt="运行验证",
+                workspace_path=str(workspace), permission_mode="configured",
+                requires_approval=True, status="running", worker_id="verify-worker",
+                cancel_requested=True,
+                lease_expires_at=utcnow() + __import__("datetime").timedelta(minutes=2),
+            )
+            db.add(task)
+            db.flush()
+            approval = ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(workspace),
+                scope_hash=__import__(
+                    "ai_work_os.execution_approval", fromlist=["task_scope_hash"]
+                ).task_scope_hash(task),
+                status="approved",
+                expires_at=utcnow() + __import__("datetime").timedelta(hours=1),
+            )
+            db.add(approval)
+            db.commit()
+            task_id = task.id
+
+        monkeypatch.setattr(worker, "build_task_sandbox_invocation", lambda *a, **k: SimpleNamespace(
+            command=("true",), cwd=str(workspace), env={}
+        ))
+
+        async def forbidden_spawn(*args, **kwargs):
+            raise AssertionError("cancelled task must not spawn verification commands")
+
+        monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", forbidden_spawn)
+        result = asyncio.run(worker.run_repair_attempt(
+            task_id, workspace, "configured", "修复后验证", task_dir, 1, 1, ["true"],
+            worker_id="verify-worker",
+        ))
+        assert result == (False, [], "cancelled")
+    finally:
+        engine.dispose()

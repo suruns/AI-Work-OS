@@ -396,6 +396,7 @@ def test_repair_runner_rechecks_approval_before_repair_process_spawn(monkeypatch
         monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", forbidden_spawn)
         passed, results, error = asyncio.run(worker.run_repair_attempt(
             task_id, workspace, "configured", "修复验证", task_dir, 1, 1, [],
+            worker_id="repair-worker",
         ))
         assert passed is False
         assert results == []
@@ -661,3 +662,52 @@ def test_claude_project_instructions_change_invalidates_approval_scope(tmp_path)
     detail = client.get(f"/execution-approvals/{approval['id']}").json()
     assert detail["scope_valid"] is False
     assert detail["can_resubmit"] is True
+
+
+def test_repair_runner_does_not_fall_back_to_unfenced_spawn_after_cancellation(monkeypatch, tmp_path):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", factory)
+    workspace = tmp_path / "cancelled-repair-workspace"
+    workspace.mkdir()
+    task_dir = tmp_path / "cancelled-repair-artifacts"
+    task_dir.mkdir()
+    try:
+        with factory() as db:
+            project = Project(
+                name="取消修复测试", slug=f"cancel-repair-{uuid4().hex}",
+                workspace_path=str(workspace), status="active",
+            )
+            db.add(project)
+            db.flush()
+            task = Task(
+                project_id=project.id, title="取消后不修复", prompt="不要继续执行",
+                workspace_path=str(workspace), permission_mode="configured",
+                requires_approval=True, status="cancelled", worker_id=None,
+            )
+            db.add(task)
+            db.commit()
+            task_id = task.id
+
+        monkeypatch.setattr(worker, "claude_setting_sources", lambda: ["project", "local"])
+        monkeypatch.setattr(worker, "write_isolated_mcp_config", lambda *a, **k: task_dir / "mcp.json")
+        monkeypatch.setattr(worker, "build_command", lambda *a, **k: ["fake-claude"])
+        monkeypatch.setattr(
+            worker, "build_task_sandbox_invocation",
+            lambda *a, **k: SimpleNamespace(command=("fake-claude",), cwd=str(workspace), env={}),
+        )
+
+        async def forbidden_spawn(*args, **kwargs):
+            raise AssertionError("cancelled repair must never start a Claude process")
+
+        monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", forbidden_spawn)
+        passed, results, error = asyncio.run(worker.run_repair_attempt(
+            task_id, workspace, "configured", "取消后的修复", task_dir, 1, 1, [],
+            worker_id="original-worker",
+        ))
+        assert passed is False
+        assert results == []
+        assert error == "cancelled"
+    finally:
+        engine.dispose()

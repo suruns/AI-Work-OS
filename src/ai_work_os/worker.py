@@ -705,6 +705,7 @@ async def run_repair_attempt(
     repair_number: int,
     max_repair_attempts: int,
     verification_commands: list[str],
+    worker_id: str | None = None,
 ) -> tuple[bool, list[dict], str | None]:
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
@@ -747,24 +748,34 @@ async def run_repair_attempt(
             mcp_config_path=mcp_config_path, execution_kind="repair",
         )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            with SessionLocal() as db:
-                current_task = db.get(Task, task_id)
-                repair_worker_id = (
-                    current_task.worker_id
-                    if current_task is not None and current_task.status == "running"
-                    else None
-                )
-            if repair_worker_id is not None:
+            if worker_id is not None:
+                with SessionLocal() as db:
+                    current_task = db.get(Task, task_id)
+                    repair_worker_id = (
+                        worker_id
+                        if current_task is not None
+                        and current_task.status == "running"
+                        and current_task.worker_id == worker_id
+                        else None
+                    )
+                    was_cancelled = (
+                        current_task is None
+                        or current_task.status == "cancelled"
+                        or bool(current_task.cancel_requested)
+                    )
+                if repair_worker_id is None:
+                    return False, [], "cancelled" if was_cancelled else "approval_invalid_or_lease_lost"
                 proc = await _spawn_task_process(task_id, repair_worker_id, invocation)
                 if proc is None:
                     with SessionLocal() as db:
                         current = db.get(Task, task_id)
                         if current is None or current.status == "cancelled" or bool(current.cancel_requested):
                             return False, [], "cancelled"
-                        return False, [], "approval_invalid_or_lease_lost"
+                    return False, [], "approval_invalid_or_lease_lost"
             else:
-                # Direct invocation remains available to isolated unit tests; the
-                # production Worker always supplies its fenced worker identity.
+                # Test-only compatibility path. Production callers must pass the
+                # fenced worker identity so a missing/cancelled lease can never
+                # fall through to an unfenced Claude process spawn.
                 proc = await asyncio.create_subprocess_exec(
                     *invocation.command,
                     cwd=invocation.cwd,
@@ -1382,6 +1393,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             passed, repair_results, repair_error = await run_repair_attempt(
                 task_id, workspace, permission_mode, repair_prompt, task_dir,
                 repair_number, max_repair_attempts, verification_commands,
+                worker_id=worker_id,
             )
             verification_results = repair_results
             if passed:

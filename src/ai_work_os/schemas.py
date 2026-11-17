@@ -38,6 +38,7 @@ class TaskRead(BaseModel):
     workspace_path: str
     status: str
     permission_mode: str = "plan"
+    requires_approval: bool = False
     priority: int = 0
     max_attempts: int = 1
     attempt_count: int = 0

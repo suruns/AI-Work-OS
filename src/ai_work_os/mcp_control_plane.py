@@ -54,6 +54,7 @@ def _task_summary(task: Task) -> dict[str, Any]:
         "id": task.id, "title": task.title, "status": task.status,
         "priority": task.priority, "workflow_id": task.workflow_id,
         "permission_mode": task.permission_mode,
+        "requires_approval": bool(task.requires_approval),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "started_at": task.started_at.isoformat() if task.started_at else None,
         "finished_at": task.finished_at.isoformat() if task.finished_at else None,
@@ -380,6 +381,7 @@ def call_tool(
                     expires_at=utcnow() + __import__("datetime").timedelta(hours=24),
                 )
                 db.add(approval)
+                db.flush()
                 db.add(TaskEvent(task_id=task.id, event_type="task.queued", payload={
                     "status": "queued", "project_id": project.id, "created_via": "master_agent_mcp",
                     "requires_approval": True,

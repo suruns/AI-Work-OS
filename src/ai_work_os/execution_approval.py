@@ -6,14 +6,27 @@ import os
 from datetime import timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+import ipaddress
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .db import SessionLocal
 from .models import ExecutionApproval, Project, Task, TaskEvent, utcnow
 
-router = APIRouter(prefix="/execution-approvals", tags=["execution-approvals"])
+def require_local_control_plane(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    try:
+        if not ipaddress.ip_address(host).is_loopback:
+            raise HTTPException(status_code=403, detail="审批控制台仅允许本机访问")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="无法确认本机访问来源")
+
+
+router = APIRouter(
+    prefix="/execution-approvals", tags=["execution-approvals"],
+    dependencies=[Depends(require_local_control_plane)],
+)
 DEFAULT_TTL_HOURS = max(1, min(168, int(os.getenv("AI_WORK_OS_APPROVAL_TTL_HOURS", "24"))))
 
 
@@ -40,7 +53,18 @@ def approval_is_valid(db, task: Task) -> bool:
     expires = approval.expires_at
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
-    return expires > utcnow() and approval.scope_hash == task_scope_hash(task) and approval.project_id == task.project_id
+    project = db.get(Project, task.project_id) if task.project_id else None
+    if project is None:
+        return False
+    task_workspace = str(Path(task.workspace_path).expanduser().resolve(strict=False))
+    project_workspace = str(Path(project.workspace_path).expanduser().resolve(strict=False))
+    return (
+        expires > utcnow()
+        and approval.scope_hash == task_scope_hash(task)
+        and approval.project_id == task.project_id
+        and task_workspace == project_workspace
+        and approval.workspace_path == project_workspace
+    )
 
 
 def _payload(db, approval: ExecutionApproval) -> dict:
@@ -73,6 +97,8 @@ def request_execution_approval(task_id: str) -> dict:
         project = db.get(Project, task.project_id)
         if project is None or project.status != "active":
             raise HTTPException(status_code=409, detail="项目不存在或已归档")
+        if str(Path(task.workspace_path).expanduser().resolve(strict=False)) != str(Path(project.workspace_path).expanduser().resolve(strict=False)):
+            raise HTTPException(status_code=409, detail="任务工作区与项目工作区不一致")
         approval = ExecutionApproval(
             task_id=task.id, project_id=project.id,
             workspace_path=str(Path(task.workspace_path).expanduser().resolve(strict=False)),

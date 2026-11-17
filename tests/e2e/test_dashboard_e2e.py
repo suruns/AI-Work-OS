@@ -279,6 +279,7 @@ def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
     page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
 
     approved_card = page.locator("#approval-list .approval-card").filter(has_text="批准测试任务")
+    page.once("dialog", lambda dialog: dialog.accept())
     approved_card.get_by_role("button", name="批准并允许执行").click()
     approved_status = page.request.get(base_url + f"/execution-approvals/{approved['id']}")
     assert approved_status.status == 200

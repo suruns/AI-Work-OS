@@ -32,7 +32,7 @@ def test_configured_task_is_not_executable_without_approval(tmp_path):
     with SessionLocal() as db:
         record = db.get(Task, task["id"])
         assert record.permission_mode == "configured"
-        assert record.requires_approval is False
+        assert bool(record.requires_approval) is False
         assert approval_is_valid(db, record) is False
 
 

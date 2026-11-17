@@ -305,3 +305,81 @@ def test_worker_rechecks_approval_and_cancellation_immediately_before_spawn(
                 assert cancelled[0].payload["process_started"] is False
     finally:
         engine.dispose()
+
+
+def test_repair_runner_rechecks_approval_before_repair_process_spawn(monkeypatch, tmp_path):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", factory)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_dir = tmp_path / "task-artifacts"
+    task_dir.mkdir()
+
+    try:
+        with factory() as db:
+            project = Project(
+                name="修复审批测试", slug=f"repair-{uuid4().hex}",
+                workspace_path=str(workspace), status="active",
+            )
+            db.add(project)
+            db.flush()
+            task = Task(
+                project_id=project.id, title="修复门禁", prompt="修复验证失败",
+                workspace_path=str(workspace), permission_mode="configured",
+                requires_approval=True, status="running", worker_id="repair-worker",
+                attempt_count=1,
+                lease_expires_at=utcnow() + __import__("datetime").timedelta(minutes=2),
+            )
+            db.add(task)
+            db.flush()
+            approval = ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(workspace),
+                scope_hash=__import__(
+                    "ai_work_os.execution_approval", fromlist=["task_scope_hash"]
+                ).task_scope_hash(task),
+                status="approved",
+                expires_at=utcnow() + __import__("datetime").timedelta(hours=1),
+            )
+            db.add(approval)
+            db.commit()
+            task_id, approval_id = task.id, approval.id
+
+        monkeypatch.setattr(worker, "claude_setting_sources", lambda: ["project", "local"])
+
+        def prepare_config(*args, **kwargs):
+            with factory() as db:
+                db.get(ExecutionApproval, approval_id).status = "revoked"
+                db.commit()
+            return task_dir / "mcp.json"
+
+        monkeypatch.setattr(worker, "write_isolated_mcp_config", prepare_config)
+        monkeypatch.setattr(worker, "build_command", lambda *args, **kwargs: ["fake-claude"])
+        monkeypatch.setattr(
+            worker, "build_task_sandbox_invocation",
+            lambda *args, **kwargs: SimpleNamespace(
+                command=("fake-claude",), cwd=str(workspace), env={}
+            ),
+        )
+
+        async def forbidden_spawn(*args, **kwargs):
+            raise AssertionError("repair Claude process must not start after approval revocation")
+
+        monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", forbidden_spawn)
+        passed, results, error = asyncio.run(worker.run_repair_attempt(
+            task_id, workspace, "configured", "修复验证", task_dir, 1, 1, [],
+            worker_id="repair-worker",
+        ))
+        assert passed is False
+        assert results == []
+        assert error == "approval_invalid_or_lease_lost"
+
+        with factory() as db:
+            record = db.get(Task, task_id)
+            assert record.status == "failed"
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
+            assert any(event.event_type == "execution.approval_invalid" for event in events)
+            assert not any(event.event_type == "repair.started" for event in events)
+    finally:
+        engine.dispose()

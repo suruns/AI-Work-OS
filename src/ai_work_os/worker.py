@@ -682,6 +682,7 @@ async def run_repair_attempt(
     repair_number: int,
     max_repair_attempts: int,
     verification_commands: list[str],
+    worker_id: str | None = None,
 ) -> tuple[bool, list[dict], str | None]:
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
@@ -702,17 +703,6 @@ async def run_repair_attempt(
             })
             raise
         mcp_config_path = write_isolated_mcp_config(task_dir)
-        add_event(task_id, "repair.started", {
-            "repair_attempt": repair_number,
-            "max_repair_attempts": max_repair_attempts,
-            "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
-            "setting_sources": setting_sources,
-            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
-            "configured_model": CLAUDE_MODEL,
-            "mcp_policy": "deny_all",
-            "mcp_config_path": str(mcp_config_path),
-        })
-        repair_started = True
         add_event(task_id, "executor.settings_isolation_configured", {
             "policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
@@ -735,14 +725,36 @@ async def run_repair_attempt(
             mcp_config_path=mcp_config_path, execution_kind="repair",
         )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd,
-                env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            if worker_id is not None:
+                proc = await _spawn_task_process(task_id, worker_id, invocation)
+                if proc is None:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        if current is None or current.status == "cancelled" or bool(current.cancel_requested):
+                            return False, [], "cancelled"
+                        return False, [], "approval_invalid_or_lease_lost"
+            else:
+                # Direct invocation remains available to isolated unit tests; the
+                # production Worker always supplies its fenced worker identity.
+                proc = await asyncio.create_subprocess_exec(
+                    *invocation.command,
+                    cwd=invocation.cwd,
+                    env=invocation.env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name == "posix"),
+                )
+            add_event(task_id, "repair.started", {
+                "repair_attempt": repair_number,
+                "max_repair_attempts": max_repair_attempts,
+                "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+                "setting_sources": setting_sources,
+                "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+                "configured_model": CLAUDE_MODEL,
+                "mcp_policy": "deny_all",
+                "mcp_config_path": str(mcp_config_path),
+            })
+            repair_started = True
 
             async def drain(stream, target):
                 while chunk := await stream.read(4096):
@@ -1335,6 +1347,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             passed, repair_results, repair_error = await run_repair_attempt(
                 task_id, workspace, permission_mode, repair_prompt, task_dir,
                 repair_number, max_repair_attempts, verification_commands,
+                worker_id=worker_id,
             )
             verification_results = repair_results
             if passed:

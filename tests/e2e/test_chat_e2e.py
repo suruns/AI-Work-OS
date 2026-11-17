@@ -12,7 +12,7 @@ def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashbo
     page: Page = dashboard["page"]
     workspace: Path = dashboard["workspace"]
     page.goto(dashboard["base_url"], wait_until="domcontentloaded")
-    page.locator("#connection").filter(has_text="API connected").wait_for(timeout=10_000)
+    page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
 
     project_response = page.request.post(
         dashboard["base_url"] + "/projects",
@@ -28,7 +28,7 @@ def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashbo
 
     page.locator("#project-context").select_option(project["id"])
     page.locator("#new-conversation").click()
-    page.locator("#conversation-title").filter(has_text="New conversation").wait_for()
+    page.locator("#conversation-title").filter(has_text="新对话").wait_for()
     page.locator("#message-input").fill(
         "Please inspect this project and explain the first safe next step."
     )
@@ -38,7 +38,7 @@ def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashbo
         has_text="Please inspect this project"
     )
     user_message.wait_for(timeout=10_000)
-    user_message.locator(".turn-chip").filter(has_text="queued").wait_for(timeout=10_000)
+    user_message.locator(".turn-chip").filter(has_text="排队中").wait_for(timeout=10_000)
 
     conversation_id = page.evaluate("activeConversationId")
     assert conversation_id
@@ -62,19 +62,19 @@ def test_chat_first_project_conversation_persists_and_cancels_queued_turn(dashbo
         timeout=10_000,
     )
     page.reload(wait_until="domcontentloaded")
-    page.locator("#connection").filter(has_text="API connected").wait_for(timeout=10_000)
+    page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
     page.locator(".message.user").filter(
         has_text="Please inspect this project"
     ).wait_for()
     assert page.locator("#project-context").input_value() == project["id"]
-    assert page.locator(".turn-chip").filter(has_text="cancelled").count() == 1
-    assert page.locator("#event-list").get_by_text("turn.cancelled").count() == 1
+    assert page.locator(".turn-chip").filter(has_text="已取消").count() == 1
+    assert page.locator("#event-list").get_by_text("本轮已取消").count() == 1
 
 
 def test_chat_home_and_dashboard_routes_are_separate(dashboard):
     page: Page = dashboard["page"]
     page.goto(dashboard["base_url"], wait_until="domcontentloaded")
-    page.locator("#connection").filter(has_text="API connected").wait_for(timeout=10_000)
+    page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
     assert page.locator("#message-input").count() == 1
     page.goto(dashboard["base_url"] + "/dashboard", wait_until="domcontentloaded")
     page.locator("#create-form").wait_for()

@@ -111,6 +111,20 @@ def approval_is_valid(db, task: Task) -> bool:
 
 def _payload(db, approval: ExecutionApproval) -> dict:
     task, project = db.get(Task, approval.task_id), db.get(Project, approval.project_id)
+    task_workspace = (
+        str(Path(task.workspace_path).expanduser().resolve(strict=False))
+        if task is not None else None
+    )
+    project_workspace = (
+        str(Path(project.workspace_path).expanduser().resolve(strict=False))
+        if project is not None else None
+    )
+    can_resubmit = bool(
+        task is not None and task.status == "queued"
+        and task.permission_mode == "configured"
+        and project is not None and project.status == "active"
+        and task_workspace == project_workspace
+    )
     effective_status = approval.status
     expires = approval.expires_at
     if expires.tzinfo is None:
@@ -136,6 +150,7 @@ def _payload(db, approval: ExecutionApproval) -> dict:
         "expires_at": approval.expires_at, "decision_source": approval.decision_source,
         "decision_note": approval.decision_note,
         "runtime_policy": runtime_execution_policy(),
+        "can_resubmit": can_resubmit,
         "scope_valid": bool(
             task and project and project.status == "active"
             and approval.scope_hash == task_scope_hash(task)

@@ -141,7 +141,7 @@ async function loadApprovals(){
   const items=pending.concat(approved,terminal);
   $("approval-count").textContent=pending.length+" 项待审批 · "+approved.filter(a=>a.task_status==="queued").length+" 项已批准待执行";
   $("approval-list").innerHTML=items.length?items.map(a=>{
-   const needsResubmit=a.task_status==="queued"&&(["rejected","revoked","expired"].includes(a.status)||!a.scope_valid);
+   const needsResubmit=a.can_resubmit&&(["rejected","revoked","expired"].includes(a.status)||!a.scope_valid);
    const actions=needsResubmit
     ? '<button class="primary resubmit-execution" data-task-id="'+esc(a.task_id)+'">重新申请审批</button>'
     : (a.status==="pending"

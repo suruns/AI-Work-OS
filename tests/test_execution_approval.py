@@ -192,6 +192,8 @@ def test_archived_project_invalidates_pending_write_execution(tmp_path):
         db.commit()
         record = db.get(Task, task["id"])
         assert approval_is_valid(db, record) is False
+    archived_approval = client.get(f"/execution-approvals/{approval['id']}").json()
+    assert archived_approval["can_resubmit"] is False
 
 
 def test_local_start_script_waits_for_api_health_before_workers():

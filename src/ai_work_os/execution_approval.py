@@ -31,9 +31,12 @@ def require_local_control_plane(request: Request) -> None:
     allowed_hosts = {"localhost", "127.0.0.1", "::1"}
     host_header = request.headers.get("host", "")
     try:
-        request_host = urlsplit(f"//{host_header}").hostname
+        parsed_request_host = urlsplit(f"//{host_header}")
+        request_host = parsed_request_host.hostname
+        request_port = parsed_request_host.port
     except ValueError:
         request_host = None
+        request_port = None
     if request_host not in allowed_hosts:
         raise HTTPException(status_code=403, detail="审批控制台 Host 必须是 localhost 或回环地址")
 
@@ -45,12 +48,20 @@ def require_local_control_plane(request: Request) -> None:
         except ValueError:
             origin_host = None
             parsed_origin = None
+        request_scheme = request.url.scheme
+        expected_port = request_port or (443 if request_scheme == "https" else 80)
+        origin_port = (
+            parsed_origin.port or (443 if parsed_origin.scheme == "https" else 80)
+            if parsed_origin is not None else None
+        )
         if (
             parsed_origin is None
-            or parsed_origin.scheme not in {"http", "https"}
+            or parsed_origin.scheme != request_scheme
+            or origin_host != request_host
             or origin_host not in allowed_hosts
+            or origin_port != expected_port
         ):
-            raise HTTPException(status_code=403, detail="审批控制台 Origin 必须来自本机回环地址")
+            raise HTTPException(status_code=403, detail="审批控制台 Origin 必须与本机请求的协议、主机和端口完全一致")
 
 
 router = APIRouter(

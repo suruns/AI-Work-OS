@@ -1,42 +1,47 @@
-# Phase 11.2 — Durable conversations and Agent Turns
+# Phase 11.2 — Durable Conversations and Agent Turns
 
 ## Status
 
-Implementation in progress on `feat/phase-11-2-conversations`, stacked on Phase 11.1. This phase adds the persistence and API contract for the chat-first experience. It does not yet launch Claude Code, stream tokens, or dispatch tasks.
+Phase 11.2 was implemented and merged into `main` in PR #23. The durable conversation, transcript, AgentTurn, and event-log foundation is now in place. Phase 11.3 builds the Master Agent runtime on top of this foundation.
+
+## Purpose
+
+Phase 11.2 adds the persistence and API foundation for the chat-first Master Agent. It records conversations, transcript messages, queued agent turns, and append-only turn events. It does not itself launch Claude Code; execution is added in Phase 11.3.
 
 ## Data model
 
-- `Conversation`: optional project association, title, active/archived lifecycle, timestamps.
-- `ConversationMessage`: append-only user/assistant/tool message record, content, metadata, timestamp, and optional client-generated idempotency key.
-- `AgentTurn`: one orchestrated response attempt tied to exactly one user message; status, adapter, Claude CLI session ID, timestamps, optional assistant message, and error summary.
-- `AgentTurnEvent`: append-only structured lifecycle/stream event log for replay and diagnostics.
+- `Conversation`: optional Project association, title, active/archived lifecycle, and timestamps.
+- `ConversationMessage`: ordered transcript entry with role, content, metadata, and optional client-generated idempotency key.
+- `AgentTurn`: one queued Master Agent execution request for a user message. It stores adapter identity, Claude session ID, status, timestamps, assistant message reference, and error summary.
+- `AgentTurnEvent`: append-only structured event log for lifecycle transitions and later runtime output.
 
-## API behavior
+The transcript is the durable source of truth. A Claude CLI session ID is adapter metadata and is not a replacement for persisted messages.
 
-- Create/list/detail/update conversations.
-- Filter conversations by project and active/archived status.
-- Create a user message and queued AgentTurn in one database transaction.
-- A `client_message_id` is unique within a conversation. Repeated sends with the same key return the existing message and turn instead of enqueuing duplicate work.
-- First user message automatically supplies a short default conversation title.
-- Read transcript messages with an increasing integer cursor (`after_id`).
-- Read AgentTurn state and its ordered event log with an increasing cursor.
-- Archived conversations reject new messages. Archived projects cannot receive new conversations.
+## API
 
-## Reliability invariants
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/conversations` | Create a conversation, optionally linked to an active Project |
+| GET | `/conversations` | List conversations, filter by project and status |
+| GET | `/conversations/{id}` | Read conversation summary |
+| PATCH | `/conversations/{id}` | Rename or archive/unarchive |
+| GET | `/projects/{project_id}/conversations` | List project conversations |
+| POST | `/conversations/{id}/messages` | Persist a user message and queue its AgentTurn |
+| GET | `/conversations/{id}/messages?after_id=...` | Read transcript messages by cursor |
+| GET | `/conversations/{id}/turns` | List turns for a conversation |
+| GET | `/agent-turns/{id}` | Read one AgentTurn |
+| GET | `/agent-turns/{id}/events?after_id=...` | Read append-only turn events by cursor |
 
-- The user message, queued AgentTurn, and initial `turn.queued` event commit atomically.
-- A conversation message is never silently converted into a task; the AgentTurn is the explicit handoff point for the Master Agent runtime.
-- Conversation history is the durable source of truth. Claude CLI session IDs are adapter metadata, not the only source of continuity.
-- Event IDs are monotonic within the database and can be used by clients to replay events after reconnect.
-- Client retries are idempotent when the same `client_message_id` is supplied.
-- Existing Task/Workflow scheduling, Worker execution, artifacts, and sandbox policy are unchanged.
+## Reliability rules
 
-## Deliberately deferred
+1. Creating a user message, its queued AgentTurn, and the initial `turn.queued` event happens in one database transaction.
+2. `client_message_id` is unique within a conversation. A repeated key returns the original message and turn rather than creating duplicates.
+3. Idempotency lookup occurs before the archived-conversation check. Thus a retry of an already accepted message still returns its original result after the conversation is archived.
+4. An archived conversation rejects new messages with HTTP 409.
+5. An archived Project cannot receive new conversations.
+6. Project summaries include counts of conversations grouped by status.
+7. Both the API and standalone Worker import the models so `Base.metadata.create_all` registers the new tables in either process.
 
-- Claude Code process adapter, bidirectional stream-json, partial token streaming, MCP control-plane tools, and session resume.
-- AgentTurn claim/lease/recovery and cancellation lifecycle.
-- Assistant/tool message persistence from actual CLI events.
-- Browser chat UI and real-time transport (SSE/WebSocket).
-- Task/Workflow dispatch tools and project-aware planning.
+## Scope boundary
 
-These belong to Phase 11.3 and later, after the operator validates the CLI protocol on the installed Claude Code 2.1.306 host.
+Phase 11.2 does not launch Claude Code, stream tokens, implement MCP control-plane tools, dispatch Tasks or Workflows, or provide the chat UI. Those capabilities are implemented in subsequent Phase 11 slices.

@@ -11,11 +11,13 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
 app = FastAPI(title="AI Work OS API", version="0.2.0")
+app.include_router(execution_approval_router)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()

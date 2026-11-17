@@ -14,6 +14,7 @@ from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
 from .sandbox import build_sandbox_invocation, sandbox_mode
+from .execution_approval import approval_is_valid
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
     """Persist process liveness; active task ownership remains authoritative on Task rows."""
@@ -618,6 +619,8 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             ),
         )
         for candidate in candidates:
+            if candidate.requires_approval and not approval_is_valid(db, candidate):
+                continue
             if candidate.workflow_id is not None:
                 parent_ids = list(db.scalars(select(WorkflowTaskDependency.upstream_task_id).where(
                     WorkflowTaskDependency.workflow_id == candidate.workflow_id,
@@ -905,6 +908,17 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         workspace = Path(task.workspace_path)
         prompt = task.prompt
         permission_mode = task.permission_mode
+        if task.requires_approval and not approval_is_valid(db, task):
+            db.add(TaskEvent(task_id=task.id, event_type="execution.approval_invalid", payload={
+                "reason": "approval_missing_expired_or_scope_changed", "process_started": False,
+            }))
+            task.status = "failed"
+            task.finished_at = now()
+            task.error_summary = "执行审批无效、已过期或任务范围发生变化；未启动执行进程。"
+            task.worker_id = None
+            task.lease_expires_at = None
+            db.commit()
+            return
         acceptance_criteria = task.acceptance_criteria
         verification_commands = list(task.verification_commands or [])
         auto_repair = bool(task.auto_repair)

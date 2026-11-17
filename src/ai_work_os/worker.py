@@ -735,9 +735,14 @@ async def run_repair_attempt(
             mcp_config_path=mcp_config_path, execution_kind="repair",
         )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await _spawn_task_process(task_id, worker_id, invocation)
-            if proc is None:
-                return
+            proc = await asyncio.create_subprocess_exec(
+                *invocation.command,
+                cwd=invocation.cwd,
+                env=invocation.env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
 
             async def drain(stream, target):
                 while chunk := await stream.read(4096):
@@ -1024,22 +1029,6 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             mcp_config_path=mcp_config_path, execution_kind="task",
         )
         logged_command = redact_command_for_event(command)
-        add_event(task_id, "executor.started", {
-            "command": logged_command,
-            "workspace": str(workspace),
-            "permission_mode": permission_mode,
-            "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
-            "setting_sources": setting_sources,
-            "model_env_policy": "strip_inherited_model_overrides",
-            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
-            "configured_model": CLAUDE_MODEL,
-            "mcp_policy": "deny_all",
-            "mcp_config_path": str(mcp_config_path),
-            "attempt": attempt_number,
-            "max_attempts": max_attempts,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-        })
         add_event(task_id, "executor.settings_isolation_configured", {
             "policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
@@ -1055,14 +1044,25 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "disallowed_tool_pattern": "mcp__*",
         })
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd,
-                env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            proc = await _spawn_task_process(task_id, worker_id, invocation)
+            if proc is None:
+                return
+            add_event(task_id, "executor.started", {
+                "command": logged_command,
+                "workspace": str(workspace),
+                "permission_mode": permission_mode,
+                "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+                "setting_sources": setting_sources,
+                "model_env_policy": "strip_inherited_model_overrides",
+                "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+                "configured_model": CLAUDE_MODEL,
+                "mcp_policy": "deny_all",
+                "mcp_config_path": str(mcp_config_path),
+                "attempt": attempt_number,
+                "max_attempts": max_attempts,
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+            })
 
             async def read_stdout() -> None:
                 nonlocal session_id, result_event_seen, final_assistant_text_seen

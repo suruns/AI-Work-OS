@@ -76,9 +76,9 @@ def test_workflow_detail_refreshes_without_reselection(dashboard):
     assert response.status == 200
 
     # The dashboard polls every five seconds. No second click or manual refresh is used.
-    page.locator("#workflow-detail .pill").filter(has_text="cancelled").wait_for(timeout=8_000)
+    page.locator("#workflow-detail .pill").filter(has_text="已取消").wait_for(timeout=8_000)
     page.locator(f'#workflows [data-workflow-id="{workflow_id}"] .pill').filter(
-        has_text="cancelled"
+        has_text="已取消"
     ).wait_for(timeout=8_000)
 
 
@@ -152,7 +152,7 @@ def test_workflow_cancel_handles_queued_and_running_members_from_dashboard(dashb
     page.locator(f'#workflows [data-workflow-id="{workflow_id}"]').click()
     page.locator("#workflow-detail").get_by_text("Cancel mixed workflow").wait_for()
     page.locator("#cancel-workflow").click()
-    page.locator("#workflow-detail .pill").filter(has_text="cancelled").wait_for(timeout=8_000)
+    page.locator("#workflow-detail .pill").filter(has_text="已取消").wait_for(timeout=8_000)
 
     detail_response = page.request.get(f'{dashboard["base_url"]}/workflows/{workflow_id}')
     assert detail_response.status == 200
@@ -198,9 +198,9 @@ def test_worker_monitor_renders_idle_and_expired_workers(dashboard):
     page.locator("#workers .worker-card").filter(has_text="e2e-host").wait_for()
     idle_card = page.locator("#workers .worker-card").filter(has_text="e2e-idle-worker")
     offline_card = page.locator("#workers .worker-card").filter(has_text="e2e-offline-worker")
-    assert "idle" in idle_card.inner_text()
-    assert "offline" in offline_card.inner_text()
-    assert f"Last heartbeat: {expected_local_time}" in idle_card.inner_text()
+    assert "空闲" in idle_card.inner_text()
+    assert "离线" in offline_card.inner_text()
+    assert f"最近心跳：{expected_local_time}" in idle_card.inner_text()
 
 
 def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashboard):
@@ -240,7 +240,7 @@ def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashb
     page.locator(f'#workflows [data-workflow-id="{workflow_id}"]').click()
     detail = page.locator("#workflow-detail")
     detail.get_by_text("Trace workflow").wait_for()
-    detail.get_by_text("Needs attention").wait_for()
+    detail.get_by_text("需要关注").wait_for()
     detail.get_by_text("Trace verify: verification command failed", exact=True).wait_for()
     timeline = detail.locator(".event-list")
     timeline.locator('[data-workflow-event-task="' + tasks["Trace prepare"] + '"]').first.wait_for()

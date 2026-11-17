@@ -151,9 +151,19 @@ async function loadApprovals(){
    const needsResubmit=a.can_resubmit&&(["rejected","revoked","expired"].includes(a.status)||!a.scope_valid);
    const actions=needsResubmit
     ? '<button class="primary resubmit-execution" data-task-id="'+esc(a.task_id)+'">重新申请审批</button>'
-    : (a.status==="pending"
+    : a.status==="pending"
       ? '<button class="primary approve-execution" data-id="'+esc(a.id)+'" '+(!a.scope_valid?'disabled':"")+' >批准并允许执行</button><button class="danger reject-execution" data-id="'+esc(a.id)+'">拒绝</button>'
-      : (a.task_status==="queued" ? '<button class="danger revoke-execution" data-id="'+esc(a.id)+'">撤销审批</button>' : a.task_status==="running" ? '<span class="muted small">任务已开始执行；如需停止，请使用任务取消操作。</span>' : '<span class="muted small">任务已结束，此审批不可继续使用。</span>'));
+      : a.status==="approved"&&a.task_status==="queued"
+        ? '<button class="danger revoke-execution" data-id="'+esc(a.id)+'">撤销审批</button>'
+        : a.status==="approved"&&a.task_status==="running"
+          ? '<span class="muted small">任务已开始执行；如需停止，请使用任务取消操作。</span>'
+          : a.status==="rejected"
+            ? '<span class="muted small">此申请已被拒绝。</span>'
+            : a.status==="revoked"
+              ? '<span class="muted small">此审批已撤销。</span>'
+              : a.status==="expired"
+                ? '<span class="muted small">此审批已过期。</span>'
+                : '<span class="muted small">任务已结束，此审批不可继续使用。</span>';
    const policy=a.runtime_policy||{};
    const sandboxLabel=policy.sandbox_mode==="bubblewrap"?"Bubblewrap 沙箱":(policy.sandbox_mode||"off")==="off"?"未启用 OS 沙箱":String(policy.sandbox_mode);
    const networkLabel=policy.sandbox_mode==="bubblewrap"?(policy.sandbox_network==="host"?"主机网络（允许出站访问）":policy.sandbox_network==="none"?"无网络":String(policy.sandbox_network||"未配置")):"网络访问不受 Bubblewrap 限制";

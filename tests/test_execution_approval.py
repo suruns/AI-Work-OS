@@ -216,6 +216,7 @@ def test_local_start_script_waits_for_api_health_before_workers():
     )
     assert rejected.returncode == 2
     assert "只允许 API 绑定本机回环地址" in rejected.stderr
+    assert 'if [[ "$API_HOST" == "::1" ]]; then URL_HOST="[::1]"; fi' in source
 
 
 def test_cancelling_queued_task_invalidates_pending_approval(tmp_path):

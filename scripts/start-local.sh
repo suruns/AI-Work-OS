@@ -18,7 +18,9 @@ case "$API_HOST" in
     exit 2
     ;;
 esac
-HEALTH_URL="http://${API_HOST}:${API_PORT}/health"
+URL_HOST="$API_HOST"
+if [[ "$API_HOST" == "::1" ]]; then URL_HOST="[::1]"; fi
+HEALTH_URL="http://${URL_HOST}:${API_PORT}/health"
 
 api_pid=""
 worker_pid=""
@@ -70,8 +72,8 @@ python -m ai_work_os.master_agent &
 master_pid=$!
 
 echo "AI Work OS 已启动。按 Ctrl+C 可停止三个进程。"
-echo "聊天界面：http://127.0.0.1:${API_PORT}/"
-echo "任务控制台：http://127.0.0.1:${API_PORT}/dashboard"
+echo "聊天界面：http://${URL_HOST}:${API_PORT}/"
+echo "任务控制台：http://${URL_HOST}:${API_PORT}/dashboard"
 
 # If any service exits, stop the remaining processes instead of leaving a partial stack.
 set +e

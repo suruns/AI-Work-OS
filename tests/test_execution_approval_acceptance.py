@@ -25,7 +25,7 @@ def test_real_controlled_write_requires_approval_and_runs_under_bubblewrap():
         timeout=600,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + "\\n" + result.stderr
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
     assert "PASS: 受控执行审批闭环" in result.stdout
 
 

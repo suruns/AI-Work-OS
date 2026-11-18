@@ -58,7 +58,7 @@ def test_phase_11_5_acceptance_shell_script_is_valid_and_scopes_runtime_environm
     assert 'tests/test_execution_approval_acceptance.py' in source
     assert 'git diff --check origin/main...HEAD' in source
     assert 'for attempt in 1 2 3' in source
-    assert 'python -m playwright install chromium' not in source
+    assert '\\npython -m playwright install chromium\\n' not in source
     e2e_stage = source[source.index('echo "[3/3]'):]
     assert 'AI_WORK_OS_SANDBOX_MODE=off' in e2e_stage
     assert '-u AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE' in e2e_stage

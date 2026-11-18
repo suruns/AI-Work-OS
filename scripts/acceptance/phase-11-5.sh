@@ -100,7 +100,13 @@ env \
 echo "[3/3] 连续运行 Dashboard 浏览器 E2E 三轮"
 for attempt in 1 2 3; do
   echo "Dashboard E2E 验收：第 $attempt/3 轮"
-  python -m pytest -q tests/e2e -m e2e
+  env \
+    -u AI_WORK_OS_RUN_CLAUDE_MCP_ACCEPTANCE \
+    -u AI_WORK_OS_RUN_BUBBLEWRAP_MCP_ACCEPTANCE \
+    -u AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE \
+    -u AI_WORK_OS_SANDBOX_NETWORK \
+    AI_WORK_OS_SANDBOX_MODE=off \
+    python -m pytest -q tests/e2e -m e2e
 done
 
 echo "PASS：Phase 11.5 本机集中验收全部通过。"

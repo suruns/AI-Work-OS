@@ -75,6 +75,40 @@ SQLite 首次建库时，多个进程同时执行 `create_all()` 可能发生并
 
 不要在全新数据库上同时启动三个进程。启动脚本会拒绝非回环 API 监听地址；API 和审批控制台必须绑定 localhost/127.0.0.1/::1。不要将当前无身份认证的 API 当作远程多人服务。
 
+## Phase 11.5 一键验收
+
+在 Linux 独立 worktree、非 root 用户和已配置模型网关的环境中运行：
+
+```bash
+bash scripts/acceptance/phase-11-5.sh
+```
+
+验收脚本将测试分为三个互相隔离的阶段：
+
+1. **API/单元测试**：强制 `AI_WORK_OS_SANDBOX_MODE=off`，并清除所有真实 CLI/MCP/Bubblewrap/受控写入验收开关，避免 monkeypatch 假 CLI 被意外包进 Bubblewrap。
+2. **真实执行验收**：只对三个真实验收测试文件启用 Bubblewrap、host 网络及真实验收开关；模型通过 `AI_WORK_OS_CLAUDE_MODEL` 从当前 shell 继承。
+3. **Dashboard E2E**：重新强制 sandbox off，并清除真实验收开关；连续执行三轮浏览器测试。
+
+### Python 与浏览器依赖
+
+`e2e` extra 将 Playwright 固定为 **1.64.1**，对应 Chromium revision **1248**。在验收环境创建虚拟环境后安装项目依赖：
+
+```bash
+pip install -e ".[dev,e2e]"
+```
+
+首次准备浏览器时，需要能够访问 Playwright 浏览器下载源，并执行：
+
+```bash
+python -m playwright install chromium
+```
+
+如果验收机器无法访问下载源，可在可联网且使用相同 Playwright 1.64.1 的环境预先准备对应 Chromium 浏览器缓存，再将该缓存提供给验收环境。**不要用其他 Playwright 版本的 Chromium revision 代替。**
+
+一键验收脚本只做版本与浏览器可执行文件预检，不会在测试过程中自动下载浏览器；缺少匹配浏览器时会立即失败并给出准备说明，避免网络受限环境长时间卡在下载阶段。
+
+脚本结束前会运行 `git diff --check origin/main...HEAD`。任何阶段失败都会因 `set -Eeuo pipefail` 立即中止，只有全部阶段成功才会输出最终 PASS。
+
 ## 明确限制
 
 - 当前审批是单机信任模型，不是身份认证、RBAC、远程审批或多租户安全方案。

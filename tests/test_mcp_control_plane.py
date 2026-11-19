@@ -69,6 +69,7 @@ def test_task_creation_is_project_bound_plan_only_and_only_queues(monkeypatch, t
     try:
         result = mcp.call_tool("create_task", {
             "title": "Inspect API", "prompt": "Review API behavior",
+            "verification_commands": ["python -m pytest -q tests/test_api.py"],
         })
         with factory() as db:
             task = db.get(Task, result["id"])
@@ -76,6 +77,8 @@ def test_task_creation_is_project_bound_plan_only_and_only_queues(monkeypatch, t
             assert task.workspace_path == str(tmp_path)
             assert task.permission_mode == "plan"
             assert task.status == "queued"
+            assert task.verification_commands == ["python -m pytest -q tests/test_api.py"]
+            assert task.verification_status == "pending"
             assert not task.auto_repair
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task.id)))
             assert [event.event_type for event in events] == ["task.queued"]
@@ -353,6 +356,7 @@ def test_broker_client_import_does_not_initialize_host_database(tmp_path):
 def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatch, tmp_path):
     engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
     try:
+        mcp.call_tool("start_goal", {"goal": "修复登录页面并验证"}, request_id="goal-before-write")
         args = {
             "title": "修复登录页面", "prompt": "修复项目中的登录页面并运行验证",
             "acceptance_criteria": "登录流程测试通过", "verification_commands": ["pytest -q tests/test_login.py"],
@@ -372,6 +376,11 @@ def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatc
             assert approval.status == "pending"
             assert approval.project_id == project_id
             assert approval.scope_hash
+            run = db.scalar(select(MasterRun))
+            assert db.scalar(select(MasterRunTask.id).where(
+                MasterRunTask.master_run_id == run.id,
+                MasterRunTask.task_id == task.id,
+            )) is not None
             assert db.scalar(select(MCPToolInvocation).where(
                 MCPToolInvocation.request_id == "s:write-request-1"
             )) is not None

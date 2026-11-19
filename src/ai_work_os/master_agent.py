@@ -205,7 +205,7 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
             if pending_turn is not None:
                 continue
             rows = db.execute(
-                select(MasterRunTask, Task, ExecutionApproval.status)
+                select(MasterRunTask, Task, ExecutionApproval.status, ExecutionApproval.expires_at)
                 .join(Task, Task.id == MasterRunTask.task_id)
                 .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
                 .where(
@@ -214,7 +214,16 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
                 )
                 .order_by(MasterRunTask.created_at, MasterRunTask.id)
             ).all()
-            required = [(link, task, approval_status) for link, task, approval_status in rows if link.required]
+            required = []
+            for link, task, approval_status, approval_expires_at in rows:
+                if not link.required:
+                    continue
+                if (
+                    approval_status == "pending" and approval_expires_at is not None
+                    and approval_expires_at <= now()
+                ):
+                    approval_status = "expired"
+                required.append((link, task, approval_status))
             if not required:
                 continue
             if any(approval_status == "pending" for _, _, approval_status in required):

@@ -222,3 +222,49 @@ class ExecutionApproval(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     decision_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+
+class MasterRun(Base):
+    """Durable goal-level orchestration state spanning multiple AgentTurns."""
+    __tablename__ = "master_runs"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "active_key", name="uq_master_run_conversation_active_key"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="planning", nullable=False, index=True)
+    plan: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    checkpoint: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    active_key: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    step_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_steps: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MasterRunTask(Base):
+    __tablename__ = "master_run_tasks"
+    __table_args__ = (
+        UniqueConstraint("master_run_id", "task_id", name="uq_master_run_task"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_run_id: Mapped[str] = mapped_column(ForeignKey("master_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    required: Mapped[bool] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class MasterRunWorkflow(Base):
+    __tablename__ = "master_run_workflows"
+    __table_args__ = (
+        UniqueConstraint("master_run_id", "workflow_id", name="uq_master_run_workflow"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_run_id: Mapped[str] = mapped_column(ForeignKey("master_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

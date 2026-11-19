@@ -319,11 +319,6 @@ def cancel_run(
         workflow_ids = list(db.scalars(select(MasterRunWorkflow.workflow_id).where(
             MasterRunWorkflow.master_run_id == run_id,
         )))
-        for workflow_id in workflow_ids:
-            workflow = db.get(Workflow, workflow_id)
-            if workflow is not None and workflow.status not in TERMINAL_STATUSES:
-                workflow.status = "cancelled"
-                workflow.finished_at = timestamp
 
         task_ids = list(db.scalars(select(MasterRunTask.task_id).where(
             MasterRunTask.master_run_id == run_id,
@@ -366,6 +361,15 @@ def cancel_run(
                         "reason": "master_run_cancelled", "control_surface": "master_run",
                     }))
                     cancellation_requested += 1
+
+        # Do not mark workflows cancelled while their linked workers are still
+        # running; keep their persisted state truthful until cancellation settles.
+        if not running_tasks_remaining:
+            for workflow_id in workflow_ids:
+                workflow = db.get(Workflow, workflow_id)
+                if workflow is not None and workflow.status not in TERMINAL_STATUSES:
+                    workflow.status = "cancelled"
+                    workflow.finished_at = timestamp
 
         run.status = "cancelling" if running_tasks_remaining else "cancelled"
         run.finished_at = None if running_tasks_remaining else timestamp

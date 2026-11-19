@@ -493,6 +493,7 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
         return [{
             "task_id": task.id, "title": task.title, "status": task.status,
             "required": bool(link.required), "verification_status": task.verification_status,
+            "cancel_requested": bool(task.cancel_requested),
             "approval_status": _effective_approval_status(approval_status, approval_expires_at),
             "acceptance_criteria": task.acceptance_criteria,
             "verification_commands": list(task.verification_commands or []),

@@ -549,8 +549,18 @@ def list_project_master_runs(
             if status and status not in {run.status, derived}:
                 continue
             result.append({
-                **goal_service._summary(run),
+                "id": run.id,
+                "conversation_id": run.conversation_id,
+                "project_id": run.project_id,
+                "goal": run.goal,
+                "status": run.status,
                 "derived_status": derived,
+                "step_count": run.step_count,
+                "max_steps": run.max_steps,
+                "deadline_at": run.deadline_at.isoformat() if run.deadline_at else None,
+                "created_at": run.created_at.isoformat() if run.created_at else None,
+                "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
                 "task_count": len(tasks),
                 "required_task_count": sum(bool(task["required"]) for task in tasks),
                 "completed_task_count": sum(

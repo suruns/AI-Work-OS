@@ -121,6 +121,8 @@ def create_or_resume_run(
             ))
             if existing is None:
                 raise
+            if existing.project_id != project_id or existing.goal.strip() != goal.strip():
+                raise MasterRunError("当前对话已有不同的活动目标；请先继续或结束该目标。")
             return _summary(existing)
         db.refresh(run)
         return _summary(run)
@@ -149,6 +151,8 @@ def update_plan_checkpoint(
             raise MasterRunError("plan 必须包含可序列化的 JSON 数据。") from exc
         if plan_size > 100_000:
             raise MasterRunError("plan 大小不能超过 100 KB。")
+    if not isinstance(increment_step, bool):
+        raise MasterRunError("increment_step 必须是布尔值。")
     if checkpoint is not None:
         if not isinstance(checkpoint, dict):
             raise MasterRunError("checkpoint 必须是 JSON 对象。")
@@ -246,6 +250,10 @@ def link_task(run_id: str, conversation_id: str, project_id: str, task_id: str, 
         task = db.get(Task, task_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
+        if run.status in TERMINAL_STATUSES:
+            raise MasterRunError("已结束的目标不能再关联任务。")
+        if not isinstance(required, bool):
+            raise MasterRunError("required 必须是布尔值。")
         if task is None or task.project_id != project_id:
             raise MasterRunError("任务不属于当前项目。")
         existing = db.scalar(select(MasterRunTask).where(
@@ -263,6 +271,8 @@ def link_workflow(run_id: str, conversation_id: str, project_id: str, workflow_i
         workflow = db.get(Workflow, workflow_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
+        if run.status in TERMINAL_STATUSES:
+            raise MasterRunError("已结束的目标不能再关联工作流。")
         if workflow is None or workflow.project_id != project_id:
             raise MasterRunError("工作流不属于当前项目。")
         existing = db.scalar(select(MasterRunWorkflow).where(

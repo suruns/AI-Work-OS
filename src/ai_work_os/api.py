@@ -571,6 +571,29 @@ def get_conversation_master_run(conversation_id: str) -> dict:
         }
 
 
+@app.post("/conversations/{conversation_id}/master-run/cancel")
+def cancel_conversation_master_run(conversation_id: str, body: dict | None = None) -> dict:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="对话不存在。")
+        if not conversation.project_id:
+            raise HTTPException(status_code=404, detail="当前对话没有绑定项目目标。")
+        run = db.scalar(select(MasterRun).where(
+            MasterRun.conversation_id == conversation.id,
+            MasterRun.active_key == conversation.id,
+        ))
+        if run is None:
+            raise HTTPException(status_code=404, detail="当前对话没有活动目标。")
+        reason = (body or {}).get("reason")
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 2000):
+            raise HTTPException(status_code=422, detail="reason 必须是长度不超过 2000 个字符的字符串。")
+        return goal_service.cancel_run(
+            run.id, conversation.id, conversation.project_id, reason=reason,
+        )
+
+
 @app.patch("/conversations/{conversation_id}")
 def update_conversation(conversation_id: str, body: ConversationUpdate) -> dict:
     changes = body.model_dump(exclude_unset=True)

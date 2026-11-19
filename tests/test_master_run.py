@@ -72,3 +72,16 @@ def test_revoked_approval_blocks_goal():
     assert derive_run_status([
         _task("queued", verification="pending", approval="revoked"),
     ]) == "blocked"
+
+
+def test_goal_is_not_reported_succeeded_until_master_run_terminal_transition():
+    from ai_work_os.master_run import reported_run_status
+    from ai_work_os.models import MasterRun
+
+    rows = [_task("succeeded", verification="passed")]
+    run = MasterRun(status="running")
+    assert reported_run_status(run, rows) == "verifying"
+    run.status = "succeeded"
+    assert reported_run_status(run, rows) == "succeeded"
+    run.status = "failed"
+    assert reported_run_status(run, rows) == "failed"

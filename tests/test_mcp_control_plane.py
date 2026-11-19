@@ -440,3 +440,27 @@ def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatc
             )) is not None
     finally:
         engine.dispose()
+
+
+def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        mcp.call_tool("start_goal", {"goal": "取消运行中的任务"}, request_id="running-cancel-start")
+        task = mcp.call_tool("create_task", {
+            "title": "运行中任务", "prompt": "执行只读检查",
+        }, request_id="running-cancel-task")
+        with factory() as db:
+            row = db.get(Task, task["id"])
+            row.status = "running"
+            db.commit()
+        result = mcp.call_tool("cancel_goal", {}, request_id="running-cancel-goal")
+        assert result["status"] == "cancelled"
+        assert result["cancellation_requested_tasks"] == 1
+        with factory() as db:
+            row = db.get(Task, task["id"])
+            assert row.status == "running"
+            assert row.cancel_requested is True
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
+            assert any(event.event_type == "task.cancel_requested" for event in events)
+    finally:
+        engine.dispose()

@@ -133,6 +133,10 @@ def test_master_run_success_requires_persisted_verification_evidence(monkeypatch
             run_service.transition_run(
                 run_id, conversation_id, project_id, "succeeded",
             )
+        with pytest.raises(run_service.MasterRunError, match="cancel_goal"):
+            run_service.transition_run(
+                run_id, conversation_id, project_id, "cancelled",
+            )
         with factory() as db:
             db.get(Task, task_id).verification_status = "passed"
             db.commit()

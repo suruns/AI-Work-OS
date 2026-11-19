@@ -144,3 +144,45 @@ def test_master_run_success_requires_persisted_verification_evidence(monkeypatch
             assert db.get(MasterRun, run_id).active_key is None
     finally:
         engine.dispose()
+
+
+def test_budget_extension_resumes_a_blocked_goal_only_within_limits(monkeypatch, tmp_path):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(run_service, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(
+                name="Budget project", slug="budget-project",
+                workspace_path=str(tmp_path), status="active",
+            )
+            db.add(project)
+            db.flush()
+            conversation = Conversation(project_id=project.id, title="Budget")
+            db.add(conversation)
+            db.flush()
+            run = MasterRun(
+                conversation_id=conversation.id, project_id=project.id,
+                goal="受限目标", status="blocked", active_key=conversation.id,
+                plan={}, checkpoint={"stop_reason": "step_budget_exceeded"},
+                step_count=20, max_steps=20, deadline_at=utcnow(),
+            )
+            db.add(run)
+            db.commit()
+            run_id, conversation_id, project_id = run.id, conversation.id, project.id
+        result = run_service.extend_run_budget(
+            run_id, conversation_id, project_id,
+            max_steps=30, deadline_hours=2,
+        )
+        assert result["status"] == "running"
+        assert result["max_steps"] == 30
+        assert "stop_reason" not in result["checkpoint"]
+        with pytest.raises(run_service.MasterRunError, match="新的 max_steps"):
+            run_service.extend_run_budget(
+                run_id, conversation_id, project_id, max_steps=30,
+            )
+    finally:
+        engine.dispose()

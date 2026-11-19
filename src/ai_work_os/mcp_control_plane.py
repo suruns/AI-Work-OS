@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-    from .models import AgentTurn, MasterRun, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
+    from .models import AgentTurn, MasterRun, MasterRunTask, MasterRunWorkflow, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
     from .execution_approval import DEFAULT_TTL_HOURS, task_scope_hash
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
@@ -27,7 +27,7 @@ else:
     SessionLocal = None
     Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = ExecutionApproval = utcnow = None
     task_scope_hash = None
-    AgentTurn = MasterRun = None
+    AgentTurn = MasterRun = MasterRunTask = MasterRunWorkflow = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
 TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
@@ -187,12 +187,18 @@ def _create_task(db, project: Project, args: dict) -> dict:
     if criteria is not None and (not isinstance(criteria, str) or len(criteria) > 10_000):
         raise ToolError("acceptance_criteria 必须是字符串，且长度不能超过 10000 个字符。")
     workspace = project.workspace_path
+    commands = args.get("verification_commands", [])
+    if not isinstance(commands, list) or len(commands) > 5 or any(
+        not isinstance(command, str) or not command.strip() or len(command) > 2000
+        for command in commands
+    ):
+        raise ToolError("verification_commands 最多包含 5 条命令；每条必须非空且不超过 2000 个字符。")
     task = Task(
         project_id=project.id, title=title.strip(), prompt=prompt,
         workspace_path=workspace, permission_mode="plan", priority=0,
         max_attempts=1, acceptance_criteria=criteria,
-        verification_commands=[], auto_repair=False, max_repair_attempts=0,
-        verification_status="not_configured",
+        verification_commands=commands, auto_repair=False, max_repair_attempts=0,
+        verification_status="pending" if commands else "not_configured",
     )
     db.add(task)
     db.flush()
@@ -508,21 +514,31 @@ def call_tool(
                         MasterRun.active_key == turn.conversation_id,
                     ))
                     if active_run is not None:
-                        from . import master_run as goal_service
-                        goal_service.SessionLocal = SessionLocal
                         if name in {"create_task", "request_execution"}:
-                            goal_service.link_task(
-                                active_run.id, turn.conversation_id, project.id, value["id"],
-                            )
+                            if db.scalar(select(MasterRunTask.id).where(
+                                MasterRunTask.master_run_id == active_run.id,
+                                MasterRunTask.task_id == value["id"],
+                            )) is None:
+                                db.add(MasterRunTask(
+                                    master_run_id=active_run.id, task_id=value["id"], required=True,
+                                ))
                         elif name == "create_workflow":
-                            goal_service.link_workflow(
-                                active_run.id, turn.conversation_id, project.id, value["id"],
-                            )
+                            if db.scalar(select(MasterRunWorkflow.id).where(
+                                MasterRunWorkflow.master_run_id == active_run.id,
+                                MasterRunWorkflow.workflow_id == value["id"],
+                            )) is None:
+                                db.add(MasterRunWorkflow(
+                                    master_run_id=active_run.id, workflow_id=value["id"],
+                                ))
                             for created_task in value.get("tasks", []):
-                                goal_service.link_task(
-                                    active_run.id, turn.conversation_id, project.id,
-                                    created_task["id"],
-                                )
+                                if db.scalar(select(MasterRunTask.id).where(
+                                    MasterRunTask.master_run_id == active_run.id,
+                                    MasterRunTask.task_id == created_task["id"],
+                                )) is None:
+                                    db.add(MasterRunTask(
+                                        master_run_id=active_run.id,
+                                        task_id=created_task["id"], required=True,
+                                    ))
             if request_key is None:
                 db.commit()
                 return value

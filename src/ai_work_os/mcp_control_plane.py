@@ -422,6 +422,15 @@ def call_tool(
             return value
 
         project = _project(db, project_id)
+        if name in {"create_task", "create_workflow", "request_execution"} and invocation_turn_id:
+            turn = db.get(AgentTurn, invocation_turn_id)
+            if turn is not None:
+                active_run = db.scalar(select(MasterRun).where(
+                    MasterRun.conversation_id == turn.conversation_id,
+                    MasterRun.active_key == turn.conversation_id,
+                ))
+                if active_run is not None and active_run.status == "cancelling":
+                    raise ToolError("当前目标正在等待关联任务停止，不能再创建新任务或工作流。")
         if name == "get_goal":
             from . import master_run as goal_service
             goal_service.SessionLocal = SessionLocal

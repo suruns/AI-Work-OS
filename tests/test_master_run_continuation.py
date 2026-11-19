@@ -172,3 +172,22 @@ def test_step_budget_exhaustion_persists_blocked_stop_reason(monkeypatch, tmp_pa
             assert run.active_key is not None
     finally:
         engine.dispose()
+
+
+def test_expired_pending_approval_does_not_trigger_goal_continuation(monkeypatch, tmp_path):
+    engine, factory, (run_id, _, task_id, project_id) = _isolated(monkeypatch, tmp_path)
+    try:
+        with factory() as db:
+            task = db.get(Task, task_id)
+            db.add(ExecutionApproval(
+                task_id=task.id, project_id=project_id,
+                workspace_path=task.workspace_path, scope_hash="d" * 64,
+                status="pending", expires_at=utcnow() - timedelta(seconds=1),
+            ))
+            db.commit()
+        assert master_agent.enqueue_goal_continuations() == 0
+        with factory() as db:
+            assert db.scalar(select(AgentTurn.id)) is None
+            assert db.get(MasterRun, run_id).checkpoint == {}
+    finally:
+        engine.dispose()

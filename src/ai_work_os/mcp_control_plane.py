@@ -366,12 +366,12 @@ def call_tool(
                     value = goal_service.update_plan_checkpoint(
                         active.id, turn.conversation_id, project.id,
                         plan=args.get("plan"), checkpoint=args.get("checkpoint"),
-                        increment_step=args.get("increment_step", False),
+                        increment_step=args.get("increment_step", False), session=db,
                     )
                 if args.get("status") is not None:
                     value = goal_service.transition_run(
                         active.id, turn.conversation_id, project.id,
-                        args["status"], reason=args.get("reason"),
+                        args["status"], reason=args.get("reason"), session=db,
                     )
             db.add(MCPToolInvocation(
                 turn_id=invocation_turn_id, project_id=project.id,

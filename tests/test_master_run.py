@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from ai_work_os import master_run as run_service
 from ai_work_os.db import Base
-from ai_work_os.models import Conversation, MasterRun, MasterRunTask, Project, Task, utcnow
+from ai_work_os.models import Conversation, MasterRun, MasterRunTask, Project, Task, TaskEvent, utcnow
 
 
 def _task(status, *, verification="passed", approval=None, required=True):
@@ -199,3 +199,60 @@ def test_expired_pending_approval_status_handles_naive_sqlite_timestamp():
 
     expired = (utcnow() - timedelta(seconds=1)).replace(tzinfo=None)
     assert _effective_approval_status("pending", expired) == "expired"
+
+
+def test_goal_task_evidence_is_summarized_without_raw_command_output(monkeypatch, tmp_path):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(run_service, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(
+                name="Evidence summary project", slug="evidence-summary-project",
+                workspace_path=str(tmp_path), status="active",
+            )
+            db.add(project)
+            db.flush()
+            conversation = Conversation(project_id=project.id, title="Evidence summary")
+            db.add(conversation)
+            db.flush()
+            run = MasterRun(
+                conversation_id=conversation.id, project_id=project.id,
+                goal="生成证据摘要", status="running", active_key=conversation.id,
+                plan={}, checkpoint={}, step_count=1, max_steps=20,
+            )
+            task = Task(
+                project_id=project.id, title="验证任务", prompt="执行验证",
+                workspace_path=str(tmp_path), permission_mode="plan",
+                status="succeeded", verification_status="passed",
+                verification_commands=["python -m pytest -q"],
+            )
+            db.add_all([run, task])
+            db.flush()
+            db.add(MasterRunTask(master_run_id=run.id, task_id=task.id, required=True))
+            db.add_all([
+                TaskEvent(task_id=task.id, event_type="verification.finished", payload={
+                    "status": "passed",
+                    "commands": [{"command": "python -m pytest -q", "exit_code": 0,
+                                  "timed_out": False, "stdout": "secret raw output"}],
+                }),
+                TaskEvent(task_id=task.id, event_type="workspace.changes_reported", payload={
+                    "available": True, "changed_file_count": 2,
+                    "report_path": "/tmp/workspace-changes.json",
+                    "report_written": True, "preexisting_file_count": 0,
+                }),
+            ])
+            db.commit()
+            run_id, conversation_id, project_id = run.id, conversation.id, project.id
+        rows = run_service.list_run_tasks(run_id, conversation_id, project_id)
+        evidence = rows[0]["evidence"]
+        assert evidence["verification"] == {
+            "status": "passed", "command_count": 1, "passed_count": 1, "failed_count": 0,
+        }
+        assert evidence["workspace_changes"]["changed_file_count"] == 2
+        assert "stdout" not in str(evidence)
+    finally:
+        engine.dispose()

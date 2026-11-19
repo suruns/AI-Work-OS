@@ -117,9 +117,11 @@ def test_rejected_approval_never_triggers_automatic_resubmission(monkeypatch, tm
 
 
 def test_approved_task_can_trigger_goal_continuation_after_completion(monkeypatch, tmp_path):
-    engine, factory, (_, _, task_id, project_id) = _isolated(monkeypatch, tmp_path)
+    engine, factory, (run_id, _, task_id, project_id) = _isolated(monkeypatch, tmp_path)
     try:
         with factory() as db:
+            run = db.get(MasterRun, run_id)
+            run.status = "waiting_approval"
             task = db.get(Task, task_id)
             approval = ExecutionApproval(
                 task_id=task.id, project_id=project_id,

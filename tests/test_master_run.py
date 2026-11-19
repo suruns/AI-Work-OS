@@ -60,3 +60,15 @@ def test_success_requires_passed_verification_for_every_required_task():
 
 def test_no_required_tasks_remains_in_planning():
     assert derive_run_status([_task("failed", required=False)]) == "planning"
+
+
+def test_rejected_approval_blocks_goal():
+    assert derive_run_status([
+        _task("queued", verification="pending", approval="rejected"),
+    ]) == "blocked"
+
+
+def test_revoked_approval_blocks_goal():
+    assert derive_run_status([
+        _task("queued", verification="pending", approval="revoked"),
+    ]) == "blocked"

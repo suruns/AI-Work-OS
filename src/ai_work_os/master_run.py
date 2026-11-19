@@ -198,6 +198,52 @@ def update_plan_checkpoint(
         return _summary(run)
 
 
+def extend_run_budget(
+    run_id: str, conversation_id: str, project_id: str, *,
+    max_steps: int | None = None, deadline_hours: int | None = None, session=None,
+) -> dict:
+    """Explicitly extend a blocked goal's bounded execution budget."""
+    if max_steps is not None and (
+        not isinstance(max_steps, int) or isinstance(max_steps, bool)
+        or not 1 <= max_steps <= MAX_MAX_STEPS
+    ):
+        raise MasterRunError(f"max_steps 必须介于 1 和 {MAX_MAX_STEPS} 之间。")
+    if deadline_hours is not None and (
+        not isinstance(deadline_hours, int) or isinstance(deadline_hours, bool)
+        or not 1 <= deadline_hours <= 24
+    ):
+        raise MasterRunError("deadline_hours 必须介于 1 和 24 之间。")
+    if max_steps is None and deadline_hours is None:
+        raise MasterRunError("必须提供 max_steps 或 deadline_hours 以扩展预算。")
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
+        _assert_scope(db, conversation_id, project_id)
+        run = db.get(MasterRun, run_id)
+        if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
+            raise MasterRunError("当前对话中不存在该目标。")
+        if run.status in TERMINAL_STATUSES:
+            raise MasterRunError("已结束的目标不能扩展预算。")
+        if max_steps is not None:
+            if max_steps <= run.max_steps or max_steps <= run.step_count:
+                raise MasterRunError("新的 max_steps 必须大于当前上限和已用步骤数。")
+            run.max_steps = max_steps
+        if deadline_hours is not None:
+            run.deadline_at = utcnow() + timedelta(hours=deadline_hours)
+        checkpoint = dict(run.checkpoint or {})
+        if checkpoint.get("stop_reason") in {"deadline_exceeded", "step_budget_exceeded"}:
+            checkpoint.pop("stop_reason", None)
+            if run.status == "blocked":
+                run.status = "running"
+        checkpoint["budget_extended_at"] = utcnow().isoformat()
+        run.checkpoint = checkpoint
+        run.updated_at = utcnow()
+        if session is None:
+            db.commit()
+            db.refresh(run)
+        else:
+            db.flush()
+        return _summary(run)
+
+
 def transition_run(
     run_id: str, conversation_id: str, project_id: str,
     status: str, *, reason: str | None = None, session=None,

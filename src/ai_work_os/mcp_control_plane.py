@@ -177,6 +177,7 @@ def _tools() -> list[dict[str, Any]]:
                         "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
                         "depends_on": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
                         "acceptance_criteria": {"type": "string", "maxLength": 10000},
+                        "verification_commands": {"type": "array", "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
                     }, "required": ["key", "title", "prompt"], "additionalProperties": False,
                 }},
             }, "required": ["title", "tasks"], "additionalProperties": False},
@@ -250,6 +251,12 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
                 raise ToolError(f"任务 {key!r} 缺少必需字段 {field}。")
             if value is not None and (not isinstance(value, str) or len(value) > maximum):
                 raise ToolError(f"任务 {key!r} 的字段 {field} 无效。")
+        commands = spec.get("verification_commands", [])
+        if not isinstance(commands, list) or len(commands) > 5 or any(
+            not isinstance(command, str) or not command.strip() or len(command) > 2000
+            for command in commands
+        ):
+            raise ToolError(f"任务 {key!r} 的 verification_commands 最多包含 5 条有效命令。")
     visiting: set[str] = set()
     visited: set[str] = set()
     def visit(key: str) -> None:
@@ -276,8 +283,9 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
             workspace_path=project.workspace_path, permission_mode="plan",
             priority=0, max_attempts=1,
             acceptance_criteria=spec.get("acceptance_criteria"),
-            verification_commands=[], auto_repair=False, max_repair_attempts=0,
-            verification_status="not_configured",
+            verification_commands=spec.get("verification_commands", []),
+            auto_repair=False, max_repair_attempts=0,
+            verification_status="pending" if spec.get("verification_commands") else "not_configured",
         )
         db.add(task)
         created[key] = task

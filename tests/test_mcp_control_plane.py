@@ -198,6 +198,31 @@ def test_start_goal_is_persisted_and_idempotent(monkeypatch, tmp_path):
         engine.dispose()
 
 
+def test_goal_checkpoint_update_is_idempotent_across_retries(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "跨轮次持续推进"},
+            request_id="goal-create-once",
+        )
+        args = {
+            "plan": {"steps": [{"id": "inspect", "status": "pending"}]},
+            "checkpoint": {"last_completed_step": "none"},
+            "increment_step": True,
+        }
+        first = mcp.call_tool("update_goal", args, request_id="goal-checkpoint-once")
+        retry = mcp.call_tool("update_goal", args, request_id="goal-checkpoint-once")
+        assert first["id"] == started["id"] == retry["id"]
+        with factory() as db:
+            run = db.get(MasterRun, started["id"])
+            assert run.step_count == 1
+            assert run.checkpoint == {"last_completed_step": "none"}
+            assert run.plan["steps"][0]["id"] == "inspect"
+            assert len(list(db.scalars(select(MCPToolInvocation)))) == 2
+    finally:
+        engine.dispose()
+
+
 def test_tasks_created_during_active_goal_are_linked_automatically(monkeypatch, tmp_path):
     engine, factory, _ = isolated(monkeypatch, tmp_path)
     try:

@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, MasterRun, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
 from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
@@ -526,6 +526,38 @@ def get_conversation(conversation_id: str) -> dict:
         if conversation is None:
             raise HTTPException(status_code=404, detail="对话不存在。")
         return _conversation_payload(db, conversation)
+
+
+@app.get("/conversations/{conversation_id}/master-run")
+def get_conversation_master_run(conversation_id: str) -> dict:
+    """Return the durable goal and its task evidence for Chat refresh/recovery."""
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="对话不存在。")
+        if not conversation.project_id:
+            return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
+        run = db.scalar(select(MasterRun).where(
+            MasterRun.conversation_id == conversation.id,
+            MasterRun.active_key == conversation.id,
+        ))
+        if run is None:
+            return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
+        tasks = goal_service.list_run_tasks(run.id, conversation.id, conversation.project_id)
+        return {
+            **goal_service.get_run(run.id, conversation.id, conversation.project_id),
+            "derived_status": goal_service.derive_run_status(tasks),
+            "tasks": tasks,
+            "progress": {
+                "required": sum(bool(item["required"]) for item in tasks),
+                "completed": sum(bool(item["required"]) and item["status"] == "succeeded" for item in tasks),
+                "running": sum(bool(item["required"]) and item["status"] == "running" for item in tasks),
+                "queued": sum(bool(item["required"]) and item["status"] == "queued" for item in tasks),
+                "waiting_approval": sum(bool(item["required"]) and item.get("approval_status") == "pending" for item in tasks),
+                "blocked": sum(bool(item["required"]) and item["status"] in {"blocked", "failed"} for item in tasks),
+            },
+        }
 
 
 @app.patch("/conversations/{conversation_id}")

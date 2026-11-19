@@ -65,6 +65,10 @@ def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_pa
     assert payload["progress"]["queued"] == 1
     assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
 
+    global_listing = client.get("/master-runs?limit=30")
+    assert global_listing.status_code == 200
+    assert any(item["id"] == run["id"] for item in global_listing.json())
+
     listing = client.get(f"/projects/{project_id}/master-runs")
     assert listing.status_code == 200
     assert listing.json()[0]["id"] == run["id"]
@@ -163,6 +167,9 @@ def test_dashboard_is_served():
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
     assert "workflowDetailToken" in response.text
+    assert 'id="master-runs"' in response.text
+    assert "renderMasterRuns" in response.text
+    assert '/master-runs?limit=30' in response.text
     assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
 
 

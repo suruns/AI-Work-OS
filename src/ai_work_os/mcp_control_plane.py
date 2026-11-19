@@ -411,7 +411,7 @@ def call_tool(
             tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id)
             return {
                 **goal_service.get_run(active.id, turn.conversation_id, project.id),
-                "derived_status": goal_service.derive_run_status(tasks),
+                "derived_status": goal_service.reported_run_status(active, tasks),
                 "tasks": tasks,
             }
 

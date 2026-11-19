@@ -95,3 +95,22 @@ def test_pending_approval_prevents_automatic_goal_continuation(monkeypatch, tmp_
             assert db.get(MasterRun, run_id).checkpoint == {}
     finally:
         engine.dispose()
+
+
+def test_rejected_approval_never_triggers_automatic_resubmission(monkeypatch, tmp_path):
+    engine, factory, (run_id, _, task_id, project_id) = _isolated(monkeypatch, tmp_path)
+    try:
+        with factory() as db:
+            task = db.get(Task, task_id)
+            db.add(ExecutionApproval(
+                task_id=task.id, project_id=project_id,
+                workspace_path=task.workspace_path, scope_hash="b" * 64,
+                status="rejected", expires_at=utcnow() + timedelta(hours=1),
+            ))
+            db.commit()
+        assert master_agent.enqueue_goal_continuations() == 0
+        with factory() as db:
+            assert db.scalar(select(AgentTurn.id)) is None
+            assert db.get(MasterRun, run_id).checkpoint == {}
+    finally:
+        engine.dispose()

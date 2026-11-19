@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, MasterRun, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, MasterRun, MasterRunWorkflow, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
 from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
@@ -526,6 +526,78 @@ def get_conversation(conversation_id: str) -> dict:
         if conversation is None:
             raise HTTPException(status_code=404, detail="对话不存在。")
         return _conversation_payload(db, conversation)
+
+
+@app.get("/projects/{project_id}/master-runs")
+def list_project_master_runs(
+    project_id: str,
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        runs = list(db.scalars(
+            select(MasterRun).where(MasterRun.project_id == project_id)
+            .order_by(MasterRun.updated_at.desc(), MasterRun.id.desc()).limit(limit)
+        ))
+        result = []
+        for run in runs:
+            tasks = goal_service.list_run_tasks(run.id, run.conversation_id, project_id)
+            derived = goal_service.reported_run_status(run, tasks)
+            if status and status not in {run.status, derived}:
+                continue
+            result.append({
+                **goal_service._summary(run),
+                "derived_status": derived,
+                "task_count": len(tasks),
+                "required_task_count": sum(bool(task["required"]) for task in tasks),
+                "completed_task_count": sum(
+                    bool(task["required"]) and task["status"] == "succeeded"
+                    and task.get("verification_status") in {"passed", "not_required"}
+                    for task in tasks
+                ),
+            })
+        return result
+
+
+@app.get("/projects/{project_id}/master-runs/{run_id}")
+def get_project_master_run(project_id: str, run_id: str) -> dict:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        run = db.get(MasterRun, run_id)
+        if run is None or run.project_id != project_id:
+            raise HTTPException(status_code=404, detail="项目中不存在该目标。")
+        tasks = goal_service.list_run_tasks(run.id, run.conversation_id, project_id)
+        workflows = list(db.scalars(
+            select(Workflow)
+            .join(MasterRunWorkflow, MasterRunWorkflow.workflow_id == Workflow.id)
+            .where(
+                MasterRunWorkflow.master_run_id == run.id,
+                Workflow.project_id == project_id,
+            ).order_by(Workflow.created_at, Workflow.id)
+        ))
+        return {
+            **goal_service._summary(run),
+            "derived_status": goal_service.reported_run_status(run, tasks),
+            "tasks": tasks,
+            "workflows": [{
+                "id": workflow.id, "title": workflow.title, "status": workflow.status,
+                "counts": _workflow_counts(db, workflow.id),
+                "created_at": workflow.created_at,
+                "finished_at": workflow.finished_at,
+            } for workflow in workflows],
+            "evidence_summary": {
+                "verified_tasks": sum(task.get("verification_status") in {"passed", "not_required"} for task in tasks),
+                "unverified_tasks": sum(task.get("verification_status") not in {"passed", "not_required"} for task in tasks),
+                "pending_approvals": sum(task.get("approval_status") == "pending" for task in tasks),
+                "rejected_or_revoked_approvals": sum(task.get("approval_status") in {"rejected", "revoked", "expired"} for task in tasks),
+                "failed_tasks": sum(task.get("status") in {"failed", "blocked"} for task in tasks),
+            },
+        }
 
 
 @app.get("/conversations/{conversation_id}/master-run")

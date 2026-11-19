@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-    from .models import AgentTurn, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
+    from .models import AgentTurn, MasterRun, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
     from .execution_approval import DEFAULT_TTL_HOURS, task_scope_hash
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
@@ -27,7 +27,7 @@ else:
     SessionLocal = None
     Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = ExecutionApproval = utcnow = None
     task_scope_hash = None
-    AgentTurn = None
+    AgentTurn = MasterRun = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
 TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
@@ -353,9 +353,9 @@ def call_tool(
                     deadline_hours=args.get("deadline_hours", 4),
                 )
             else:
-                active = db.scalar(select(__import__(".models", fromlist=["MasterRun"]).MasterRun).where(
-                    __import__(".models", fromlist=["MasterRun"]).MasterRun.conversation_id == turn.conversation_id,
-                    __import__(".models", fromlist=["MasterRun"]).MasterRun.active_key == turn.conversation_id,
+                active = db.scalar(select(MasterRun).where(
+                    MasterRun.conversation_id == turn.conversation_id,
+                    MasterRun.active_key == turn.conversation_id,
                 ))
                 if active is None:
                     raise ToolError("当前对话没有活动目标，请先调用 start_goal。")
@@ -397,7 +397,6 @@ def call_tool(
             turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
             if turn is None:
                 raise ToolError("目标查询必须绑定有效的 Master Agent 轮次。")
-            from .models import MasterRun
             active = db.scalar(select(MasterRun).where(
                 MasterRun.conversation_id == turn.conversation_id,
                 MasterRun.active_key == turn.conversation_id,

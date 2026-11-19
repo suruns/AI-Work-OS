@@ -462,7 +462,7 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
         assert result["status"] == "cancelling"
         assert result["cancellation_requested_tasks"] == 1
         with factory() as db:
-            row = db.get(Task, task["id"])
+            row = db.get(Task, task_id)
             assert row.status == "running"
             assert row.cancel_requested == 1
             workflow_row = db.get(Workflow, workflow["id"])

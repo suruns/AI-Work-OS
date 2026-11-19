@@ -59,6 +59,14 @@ def test_workflow_click_does_not_select_a_task_or_request_undefined(dashboard):
     ).click()
 
     page.locator("#workflow-detail").get_by_text("Workflow click isolation").wait_for()
+    workflow_copy = page.locator("#workflow-detail").inner_text()
+    assert "工作流步骤" in workflow_copy
+    assert "查看任务" in workflow_copy
+    assert "排队中" in workflow_copy
+    assert "任务已排队" in workflow_copy
+    assert "task.queued" not in workflow_copy
+    assert "Workflow steps" not in workflow_copy
+    assert "queued" not in workflow_copy
     page.locator("#detail").get_by_text("Keep task selection").wait_for()
     assert bad_requests == []
 
@@ -76,9 +84,9 @@ def test_workflow_detail_refreshes_without_reselection(dashboard):
     assert response.status == 200
 
     # The dashboard polls every five seconds. No second click or manual refresh is used.
-    page.locator("#workflow-detail .pill").filter(has_text="cancelled").wait_for(timeout=8_000)
+    page.locator("#workflow-detail .pill").filter(has_text="已取消").wait_for(timeout=8_000)
     page.locator(f'#workflows [data-workflow-id="{workflow_id}"] .pill').filter(
-        has_text="cancelled"
+        has_text="已取消"
     ).wait_for(timeout=8_000)
 
 
@@ -152,7 +160,7 @@ def test_workflow_cancel_handles_queued_and_running_members_from_dashboard(dashb
     page.locator(f'#workflows [data-workflow-id="{workflow_id}"]').click()
     page.locator("#workflow-detail").get_by_text("Cancel mixed workflow").wait_for()
     page.locator("#cancel-workflow").click()
-    page.locator("#workflow-detail .pill").filter(has_text="cancelled").wait_for(timeout=8_000)
+    page.locator("#workflow-detail .pill").filter(has_text="已取消").wait_for(timeout=8_000)
 
     detail_response = page.request.get(f'{dashboard["base_url"]}/workflows/{workflow_id}')
     assert detail_response.status == 200
@@ -198,9 +206,9 @@ def test_worker_monitor_renders_idle_and_expired_workers(dashboard):
     page.locator("#workers .worker-card").filter(has_text="e2e-host").wait_for()
     idle_card = page.locator("#workers .worker-card").filter(has_text="e2e-idle-worker")
     offline_card = page.locator("#workers .worker-card").filter(has_text="e2e-offline-worker")
-    assert "idle" in idle_card.inner_text()
-    assert "offline" in offline_card.inner_text()
-    assert f"Last heartbeat: {expected_local_time}" in idle_card.inner_text()
+    assert "空闲" in idle_card.inner_text()
+    assert "离线" in offline_card.inner_text()
+    assert f"最近心跳：{expected_local_time}" in idle_card.inner_text()
 
 
 def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashboard):
@@ -240,7 +248,7 @@ def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashb
     page.locator(f'#workflows [data-workflow-id="{workflow_id}"]').click()
     detail = page.locator("#workflow-detail")
     detail.get_by_text("Trace workflow").wait_for()
-    detail.get_by_text("Needs attention").wait_for()
+    detail.get_by_text("需要关注").wait_for()
     detail.get_by_text("Trace verify: verification command failed", exact=True).wait_for()
     timeline = detail.locator(".event-list")
     timeline.locator('[data-workflow-event-task="' + tasks["Trace prepare"] + '"]').first.wait_for()
@@ -248,3 +256,78 @@ def test_workflow_timeline_shows_cross_task_failures_and_opens_task_detail(dashb
     timeline.locator('[data-workflow-event-task="' + tasks["Trace verify"] + '"]').first.click()
     page.locator("#detail").get_by_text("Trace verify").wait_for()
     page.locator("#detail .event").filter(has_text="verification command failed").first.wait_for()
+
+
+def test_dashboard_requires_explicit_approval_for_configured_task(dashboard):
+    page: Page = dashboard["page"]
+    base_url = dashboard["base_url"]
+    workspace = dashboard["workspace"]
+    project_response = page.request.post(base_url + "/projects", data={
+        "name": "审批界面项目", "slug": "approval-dashboard-project",
+        "workspace_path": str(workspace),
+    })
+    assert project_response.status == 201
+    project = project_response.json()
+
+    def create_pending(title):
+        task_response = page.request.post(base_url + "/tasks", data={
+            "project_id": project["id"], "title": title,
+            "prompt": "在项目工作区中创建一个小型变更",
+            "workspace_path": str(workspace), "permission_mode": "configured",
+        })
+        assert task_response.status == 201
+        task = task_response.json()
+        approval_response = page.request.post(base_url + f"/execution-approvals/request/{task['id']}")
+        assert approval_response.status == 200
+        return task, approval_response.json()
+
+    approved_task, approved = create_pending("批准测试任务")
+    rejected_task, rejected = create_pending("拒绝测试任务")
+    revoked_task, revoked = create_pending("撤销测试任务")
+    page.reload(wait_until="domcontentloaded")
+    page.locator("#connection").filter(has_text="API 已连接").wait_for(timeout=10_000)
+
+    approved_card = page.locator("#approval-list .approval-card").filter(has_text="批准测试任务")
+    approval_copy = approved_card.inner_text()
+    assert "执行隔离：" in approval_copy
+    assert "网络策略：" in approval_copy
+    assert "权限配置来源：" in approval_copy
+    assert "最大自动修复次数：" in approval_copy
+    assert "审批前请检查 Claude 设置" in approval_copy
+    assert "hooks 等命令配置" in approval_copy
+    assert "CLAUDE.md" in approval_copy
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{approved['id']}/approve")) as approve_response:
+        approved_card.get_by_role("button", name="批准并允许执行").click()
+    assert approve_response.value.status == 200, approve_response.value.text()
+    approved_status = page.request.get(base_url + f"/execution-approvals/{approved['id']}")
+    assert approved_status.status == 200
+    assert approved_status.json()["status"] == "approved"
+
+    rejected_card = page.locator("#approval-list .approval-card").filter(has_text="拒绝测试任务")
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{rejected['id']}/reject")) as reject_response:
+        rejected_card.get_by_role("button", name="拒绝").click()
+    assert reject_response.value.status == 200, reject_response.value.text()
+    rejected_status = page.request.get(base_url + f"/execution-approvals/{rejected['id']}")
+    assert rejected_status.status == 200
+    assert rejected_status.json()["status"] == "rejected"
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/request/{rejected_task['id']}")) as resubmit_response:
+        rejected_card.get_by_role("button", name="重新申请审批").click()
+    assert resubmit_response.value.status == 200, resubmit_response.value.text()
+    assert resubmit_response.value.json()["status"] == "pending"
+
+    revoke_pending_card = page.locator("#approval-list .approval-card").filter(has_text="撤销测试任务")
+    page.once("dialog", lambda dialog: dialog.accept())
+    revoke_pending_card.get_by_role("button", name="批准并允许执行").click()
+    revoke_approved_card = page.locator("#approval-list .approval-card").filter(has_text="撤销测试任务")
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda response: response.url.endswith(f"/execution-approvals/{revoked['id']}/revoke")) as revoke_response:
+        revoke_approved_card.get_by_role("button", name="撤销审批").click()
+    assert revoke_response.value.status == 200, revoke_response.value.text()
+    revoked_status = page.request.get(base_url + f"/execution-approvals/{revoked['id']}")
+    assert revoked_status.status == 200
+    assert revoked_status.json()["status"] == "revoked"
+
+    assert page.request.get(base_url + f"/tasks/{approved_task['id']}").json()["status"] == "queued"
+    assert page.request.get(base_url + f"/tasks/{rejected_task['id']}").json()["status"] == "queued"
+    assert page.request.get(base_url + f"/tasks/{revoked_task['id']}").json()["status"] == "queued"

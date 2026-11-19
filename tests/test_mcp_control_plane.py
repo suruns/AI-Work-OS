@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from ai_work_os import mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
+from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
 
 
 def isolated(monkeypatch, tmp_path):
@@ -100,7 +100,7 @@ def test_cross_project_task_and_workflow_ids_are_not_disclosed(monkeypatch, tmp_
             try:
                 mcp.call_tool(name, args)
             except mcp.ToolError as exc:
-                assert "not found" in str(exc)
+                assert "不存在" in str(exc)
             else:
                 raise AssertionError("cross-project object was exposed")
         overview = mcp.call_tool("get_project_overview", {})
@@ -137,7 +137,7 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
                 ],
             })
         except mcp.ToolError as exc:
-            assert "acyclic" in str(exc)
+            assert "环" in str(exc)
         else:
             raise AssertionError("cyclic workflow was accepted")
         with factory() as db:
@@ -151,9 +151,16 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     assert init["result"]["capabilities"]["tools"] == {}
     listed = mcp._reply({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {tool["name"] for tool in listed["result"]["tools"]}
+    request_schema = next(
+        tool["inputSchema"] for tool in listed["result"]["tools"]
+        if tool["name"] == "request_execution"
+    )
+    assert "verification_commands" in request_schema["properties"]
+    assert request_schema["properties"]["verification_commands"]["maxItems"] == 5
+    assert all(any("\u4e00" <= char <= "\u9fff" for char in tool["description"]) for tool in listed["result"]["tools"])
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
-        "get_workflow", "create_task", "create_workflow",
+        "get_workflow", "create_task", "create_workflow", "request_execution",
     }
 
 
@@ -227,7 +234,7 @@ def test_json_rpc_request_id_cannot_be_reused_for_another_tool(monkeypatch, tmp_
             }},
         })
         assert conflict["result"]["isError"] is True
-        assert "different tool arguments" in conflict["result"]["content"][0]["text"]
+        assert "不同的工具参数" in conflict["result"]["content"][0]["text"]
         with factory() as db:
             assert len(list(db.scalars(select(Task)))) == 1
             assert len(list(db.scalars(select(Workflow)))) == 0
@@ -252,7 +259,7 @@ def test_json_rpc_request_id_reuse_with_different_arguments_is_rejected(monkeypa
             }},
         })
         assert retry["result"]["isError"] is True
-        assert "different tool arguments" in retry["result"]["content"][0]["text"]
+        assert "不同的工具参数" in retry["result"]["content"][0]["text"]
         with factory() as db:
             assert len(list(db.scalars(select(Task)))) == 1
     finally:
@@ -270,3 +277,32 @@ def test_broker_client_import_does_not_initialize_host_database(tmp_path):
     )
     subprocess.run([sys.executable, "-c", code], check=True, env=env)
     assert not db_path.parent.exists()
+
+
+def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatch, tmp_path):
+    engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
+    try:
+        args = {
+            "title": "修复登录页面", "prompt": "修复项目中的登录页面并运行验证",
+            "acceptance_criteria": "登录流程测试通过", "verification_commands": ["pytest -q tests/test_login.py"],
+        }
+        first = mcp.call_tool("request_execution", args, request_id="write-request-1")
+        second = mcp.call_tool("request_execution", args, request_id="write-request-1")
+        assert first == second
+        assert first["permission_mode"] == "configured"
+        assert first["requires_approval"] is True
+        assert first["approval_status"] == "pending"
+        with factory() as db:
+            task = db.get(Task, first["id"])
+            approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task.id))
+            assert task.project_id == project_id
+            assert task.status == "queued"
+            assert task.verification_commands == ["pytest -q tests/test_login.py"]
+            assert approval.status == "pending"
+            assert approval.project_id == project_id
+            assert approval.scope_hash
+            assert db.scalar(select(MCPToolInvocation).where(
+                MCPToolInvocation.request_id == "s:write-request-1"
+            )) is not None
+    finally:
+        engine.dispose()

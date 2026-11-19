@@ -6,6 +6,7 @@ import subprocess
 import signal
 import sys
 import threading
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, timezone
 from fastapi.testclient import TestClient
@@ -47,12 +48,12 @@ def test_dashboard_is_served():
     assert response.status_code == 200
     assert "AI Work OS" in response.text
     assert "function renderTaskResult(events)" in response.text
-    assert "Agent result" in response.text
+    assert "智能体执行结果" in response.text
     assert "function renderArtifacts(data)" in response.text
     assert "function renderArtifactLibrary(data,append=false)" in response.text
-    assert "Artifact library" in response.text
+    assert "产物库" in response.text
     assert 'api("/artifacts?"' in response.text
-    assert "Workspace files changed during task" in response.text
+    assert "任务执行期间发生变更的工作区文件" in response.text
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
     assert "workflowDetailToken" in response.text
@@ -218,7 +219,7 @@ def test_missing_claude_executable_finishes_task_as_failed(tmp_path, monkeypatch
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["exit_code"] == 127
-    assert "executable not found" in task["error_summary"]
+    assert "未找到 Claude Code 可执行文件" in task["error_summary"]
     attempt_log = tmp_path / "storage" / "tasks" / task_id / "stdout.attempt-001.jsonl"
     assert attempt_log.is_file()
     assert (attempt_log.parent / "stdout.jsonl").is_file()
@@ -246,7 +247,7 @@ def test_worker_restart_marks_orphaned_running_tasks_failed_without_retry(tmp_pa
     assert task["status"] == "failed"
     assert task["finished_at"] is not None
     assert task["exit_code"] == 125
-    assert "not retried automatically" in task["error_summary"]
+    assert "未自动重试" in task["error_summary"]
 
     events = client.get(f"/tasks/{task_id}/events").json()
     recovery = [event for event in events if event["event_type"] == "worker.orphaned_task_recovered"]
@@ -363,7 +364,7 @@ def test_logged_command_redacts_secrets_and_preserves_effective_permission_args(
         assert mcp_path not in serialized
 
 
-def test_permission_modes_are_persisted_and_applied():
+def test_permission_modes_are_persisted_and_applied(tmp_path):
     from ai_work_os.worker import build_command
 
     plan = client.post("/tasks", json={
@@ -377,10 +378,17 @@ def test_permission_modes_are_persisted_and_applied():
     assert plan_command[-4:] == ["--permission-mode", "plan", "--disallowedTools", "mcp__*"]
     assert plan_command[plan_command.index("--setting-sources") + 1] == "project,local"
 
+    project = client.post("/projects", json={
+        "name": "Configured mode project",
+        "slug": f"configured-mode-{uuid4().hex}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project.status_code == 201
     configured = client.post("/tasks", json={
+        "project_id": project.json()["id"],
         "title": "Local configured mode",
         "prompt": "Use configured CLI permissions",
-        "workspace_path": ".",
+        "workspace_path": str(tmp_path),
         "permission_mode": "configured",
     })
     assert configured.status_code == 201
@@ -456,7 +464,7 @@ def test_worker_timeout_is_explicit_and_finishes_task(tmp_path, monkeypatch):
 
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
-    assert "timed out" in task["error_summary"]
+    assert "超时" in task["error_summary"]
     events = client.get(f"/tasks/{task_id}/events").json()
     timeout_events = [event for event in events if event["event_type"] == "executor.timed_out"]
     assert len(timeout_events) == 1
@@ -541,7 +549,7 @@ def test_worker_interruption_terminates_subprocess_and_records_failure(tmp_path,
 
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
-    assert "interrupted" in task["error_summary"].lower()
+    assert "中断" in task["error_summary"].lower()
     events = client.get(f"/tasks/{task_id}/events").json()
     assert any(event["event_type"] == "executor.interrupted" for event in events)
     assert events[-1]["payload"]["terminal_reason"] == "worker_interrupted"
@@ -895,7 +903,7 @@ def test_task_verification_failure_fails_task_without_retrying_agent(tmp_path, m
     assert task["status"] == "failed"
     assert task["exit_code"] == 0
     assert task["verification_status"] == "failed"
-    assert "Verification failed" in task["error_summary"]
+    assert "验证命令执行失败" in task["error_summary"]
     events = client.get(f"/tasks/{task_id}/events").json()
     finished = [event for event in events if event["event_type"] == "executor.finished"][-1]
     assert finished["payload"]["terminal_reason"] == "verification_failed"
@@ -973,7 +981,7 @@ def test_bounded_repair_can_turn_failed_verification_into_success(tmp_path, monk
     task_id = created.json()["id"]
     calls = []
 
-    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands):
+    async def fake_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands, worker_id=None):
         calls.append((repair_number, commands))
         return True, [{
             "index": 1, "command": commands[0], "exit_code": 0,
@@ -1009,7 +1017,7 @@ def test_bounded_repair_stops_at_configured_cap(tmp_path, monkeypatch):
     task_id = created.json()["id"]
     calls = []
 
-    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands):
+    async def failing_repair(task_id_arg, workspace_arg, permission_mode, prompt, task_dir, repair_number, max_repair_attempts, commands, worker_id=None):
         calls.append(repair_number)
         return False, [{
             "index": 1, "command": commands[0], "exit_code": 1,
@@ -1319,7 +1327,7 @@ def test_failed_parent_blocks_all_descendants(tmp_path):
     assert states[task_ids["build"]] == "blocked"
     assert detail["status"] == "failed"
     blocked = next(task for task in detail["tasks"] if task["id"] == task_ids["build"])
-    assert "prerequisite task" in blocked["blocked_reason"]
+    assert "前置任务" in blocked["blocked_reason"]
 
 
 def test_workflow_cancel_cancels_queued_tasks(tmp_path):
@@ -1555,7 +1563,7 @@ def test_cancelled_member_does_not_cancel_workflow_or_starve_others(tmp_path):
     detail, by_title = _workflow_states(workflow_id)
     assert by_title["A"]["status"] == "cancelled"
     assert by_title["C"]["status"] == "blocked"
-    assert "cancelled" in by_title["C"]["blocked_reason"]
+    assert "已取消" in by_title["C"]["blocked_reason"]
     assert ids["A"] in by_title["C"]["blocked_reason"]
     assert detail["status"] in {"queued", "running"}
     assert detail["status"] != "cancelled"
@@ -1613,7 +1621,7 @@ def test_multi_level_cancellation_blocks_descendants_only(tmp_path):
     assert by_title["B"]["status"] == "blocked"
     assert by_title["C"]["status"] == "blocked"
     for key in ("B", "C"):
-        assert "cancelled" in by_title[key]["blocked_reason"]
+        assert "已取消" in by_title[key]["blocked_reason"]
         assert ids["A"] in by_title[key]["blocked_reason"]
     assert by_title["D"]["status"] == "queued"
     assert detail["status"] in {"queued", "running"}
@@ -2148,7 +2156,7 @@ def test_task_diagnostics_classifies_verification_failure_and_replays_events(tmp
         task.status = "failed"
         task.verification_status = "failed"
         task.exit_code = 1
-        task.error_summary = "Verification failed for command: python -m pytest -q"
+        task.error_summary = "验证命令执行失败：python -m pytest -q"
         db.add_all([
             TaskEvent(task_id=task_id, occurred_at=base + timedelta(seconds=2),
                       event_type="verification.finished",
@@ -2183,7 +2191,7 @@ def test_task_diagnostics_classifies_worker_loss_and_unknown_without_inference(t
     with SessionLocal() as db:
         lost = db.get(Task, worker_task)
         lost.status = "failed"
-        lost.error_summary = "Worker lease expired"
+        lost.error_summary = "Worker 租约已过期"
         db.add(TaskEvent(task_id=worker_task, event_type="worker.orphaned_task_recovered",
                          payload={"automatic_retry": False}))
         db.get(Task, unknown_task).status = "succeeded"
@@ -2206,8 +2214,8 @@ def test_dashboard_exposes_failure_analysis_and_execution_replay_entry_points():
     response = client.get("/dashboard")
     assert response.status_code == 200
     assert '"/tasks/"+encodeURIComponent(id)+"/diagnostics"' in response.text
-    assert "Failure analysis" in response.text
-    assert "Execution replay" in response.text
+    assert "失败分析" in response.text
+    assert "执行回放" in response.text
 
 
 def test_task_diagnostics_prioritizes_nested_verification_timeout(tmp_path):
@@ -2397,7 +2405,7 @@ def test_worker_rejects_zero_exit_without_terminal_output(tmp_path, monkeypatch)
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["exit_code"] == 0
-    assert "without a terminal result event" in task["error_summary"]
+    assert "终止结果事件" in task["error_summary"]
     assert task["attempt_count"] == 1
     events = client.get(f"/tasks/{task_id}/events").json()
     validated = [event for event in events if event["event_type"] == "executor.output_validated"]
@@ -2577,7 +2585,7 @@ def test_worker_rejects_result_event_with_tool_use_stop_reason(tmp_path, monkeyp
     task = client.get(f"/tasks/{task_id}").json()
     assert task["status"] == "failed"
     assert task["attempt_count"] == 1
-    assert task["error_summary"] and "without a terminal result event" in task["error_summary"]
+    assert task["error_summary"] and "终止结果事件" in task["error_summary"]
     events = client.get(f"/tasks/{task_id}/events").json()
     validated = [event for event in events if event["event_type"] == "executor.output_validated"][-1]
     assert validated["payload"]["result_event_seen"] is False
@@ -3253,3 +3261,32 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert 'before_id="+messages[0].id' in html
     assert 'id="load-older-messages"' in html
     assert 'after_id="+cursor' in html
+
+
+def test_configured_write_tasks_require_project_root_binding(tmp_path):
+    unbound = client.post("/tasks", json={
+        "title": "Unbound write task", "prompt": "Write a file",
+        "workspace_path": str(tmp_path), "permission_mode": "configured",
+    })
+    assert unbound.status_code == 422
+    project = client.post("/projects", json={
+        "name": "Write scope project", "slug": f"write-scope-{uuid4().hex}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project.status_code == 201
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    out_of_scope = client.post("/tasks", json={
+        "project_id": project.json()["id"], "title": "Nested write task",
+        "prompt": "Write a file", "workspace_path": str(nested),
+        "permission_mode": "configured",
+    })
+    assert out_of_scope.status_code == 422
+    unbound_workflow = client.post("/workflows", json={
+        "title": "Unbound write workflow",
+        "tasks": [{
+            "key": "write", "title": "Write", "prompt": "Write a file",
+            "workspace_path": str(tmp_path), "permission_mode": "configured",
+        }],
+    })
+    assert unbound_workflow.status_code == 422

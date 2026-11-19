@@ -14,6 +14,7 @@ from sqlalchemy import exists, or_, select, update
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, elapsed_ms
 from .sandbox import build_sandbox_invocation, sandbox_mode
+from .execution_approval import approval_is_valid, expire_approval_if_needed
 
 def heartbeat_worker(worker_id: str, concurrency: int | None = None) -> None:
     """Persist process liveness; active task ownership remains authoritative on Task rows."""
@@ -517,8 +518,11 @@ def reconcile_workflows() -> None:
                     ), None)
                     if failed_parent is None:
                         continue
+                    parent_status_zh = {
+                        "failed": "失败", "cancelled": "已取消", "blocked": "已阻塞",
+                    }.get(failed_parent.status, failed_parent.status)
                     root_reason = failed_parent.blocked_reason or (
-                        f"Blocked because prerequisite task {failed_parent.id} ended as {failed_parent.status}."
+                        f"前置任务 {failed_parent.id} 已以“{parent_status_zh}”状态结束，当前任务因此被阻塞。"
                     )
                     if failed_parent.status in {"failed", "cancelled"}:
                         ancestor_status = failed_parent.status
@@ -607,6 +611,7 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
         ))
         task = None
+        approval_expired = False
         attempt_number = 1
         workflow_not_cancelled = or_(
             Task.workflow_id.is_(None),
@@ -618,6 +623,25 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             ),
         )
         for candidate in candidates:
+            # Lock in the same task -> approval -> project order used by the
+            # local decision endpoints. A concurrent revoke must win before a
+            # task can transition from queued to running.
+            candidate = db.scalar(
+                select(Task).where(Task.id == candidate.id).with_for_update()
+            )
+            if candidate is None or candidate.status != "queued":
+                continue
+            available_at = candidate.available_at
+            if available_at is not None and available_at.tzinfo is None:
+                available_at = available_at.replace(tzinfo=timezone.utc)
+            if available_at is not None and available_at > started_at:
+                continue
+            if candidate.permission_mode != "plan":
+                if expire_approval_if_needed(db, candidate, started_at):
+                    approval_expired = True
+                    continue
+                if not candidate.requires_approval or not approval_is_valid(db, candidate):
+                    continue
             if candidate.workflow_id is not None:
                 parent_ids = list(db.scalars(select(WorkflowTaskDependency.upstream_task_id).where(
                     WorkflowTaskDependency.workflow_id == candidate.workflow_id,
@@ -642,6 +666,10 @@ def claim_task(worker_id: str = "legacy-worker") -> str | None:
             task = candidate
             break
         if task is None:
+            if approval_expired:
+                db.commit()
+            else:
+                db.rollback()
             return None
         task_id = task.id
         if task.workflow_id is not None:
@@ -677,6 +705,7 @@ async def run_repair_attempt(
     repair_number: int,
     max_repair_attempts: int,
     verification_commands: list[str],
+    worker_id: str | None = None,
 ) -> tuple[bool, list[dict], str | None]:
     """Run one bounded repair and re-check the original, already-validated commands."""
     stdout_path = task_dir / f"repair-{repair_number:02d}.stdout.jsonl"
@@ -697,17 +726,6 @@ async def run_repair_attempt(
             })
             raise
         mcp_config_path = write_isolated_mcp_config(task_dir)
-        add_event(task_id, "repair.started", {
-            "repair_attempt": repair_number,
-            "max_repair_attempts": max_repair_attempts,
-            "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
-            "setting_sources": setting_sources,
-            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
-            "configured_model": CLAUDE_MODEL,
-            "mcp_policy": "deny_all",
-            "mcp_config_path": str(mcp_config_path),
-        })
-        repair_started = True
         add_event(task_id, "executor.settings_isolation_configured", {
             "policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
@@ -730,14 +748,53 @@ async def run_repair_attempt(
             mcp_config_path=mcp_config_path, execution_kind="repair",
         )
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd,
-                env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            if worker_id is not None:
+                with SessionLocal() as db:
+                    current_task = db.get(Task, task_id)
+                    repair_worker_id = (
+                        worker_id
+                        if current_task is not None
+                        and current_task.status == "running"
+                        and current_task.worker_id == worker_id
+                        else None
+                    )
+                    was_cancelled = (
+                        current_task is None
+                        or current_task.status == "cancelled"
+                        or bool(current_task.cancel_requested)
+                    )
+                if repair_worker_id is None:
+                    return False, [], "cancelled" if was_cancelled else "approval_invalid_or_lease_lost"
+                proc = await _spawn_task_process(task_id, repair_worker_id, invocation)
+                if proc is None:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        if current is None or current.status == "cancelled" or bool(current.cancel_requested):
+                            return False, [], "cancelled"
+                    return False, [], "approval_invalid_or_lease_lost"
+            else:
+                # Test-only compatibility path. Production callers must pass the
+                # fenced worker identity so a missing/cancelled lease can never
+                # fall through to an unfenced Claude process spawn.
+                proc = await asyncio.create_subprocess_exec(
+                    *invocation.command,
+                    cwd=invocation.cwd,
+                    env=invocation.env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name == "posix"),
+                )
+            add_event(task_id, "repair.started", {
+                "repair_attempt": repair_number,
+                "max_repair_attempts": max_repair_attempts,
+                "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+                "setting_sources": setting_sources,
+                "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+                "configured_model": CLAUDE_MODEL,
+                "mcp_policy": "deny_all",
+                "mcp_config_path": str(mcp_config_path),
+            })
+            repair_started = True
 
             async def drain(stream, target):
                 while chunk := await stream.read(4096):
@@ -827,13 +884,23 @@ async def run_repair_attempt(
                 task_id, argv, workspace, task_dir, permission_mode, None,
                 execution_kind="verification",
             )
-            check = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd, env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            if worker_id is not None:
+                check = await _spawn_task_process(task_id, worker_id, invocation)
+                if check is None:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        if current is None or current.status == "cancelled" or bool(current.cancel_requested):
+                            return False, results, "cancelled"
+                    return False, results, "approval_invalid_or_lease_lost"
+            else:
+                # Test-only compatibility path; production repair verification is fenced.
+                check = await asyncio.create_subprocess_exec(
+                    *invocation.command,
+                    cwd=invocation.cwd, env=invocation.env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name == "posix"),
+                )
             communicate_task = asyncio.create_task(check.communicate())
             timed_out = False
             cancelled = False
@@ -897,6 +964,74 @@ async def run_repair_attempt(
     return passed, results, None
 
 
+async def _spawn_task_process(task_id: str, worker_id: str, invocation):
+    """Fence cancellation, lease ownership, and approval immediately before spawn."""
+    with SessionLocal() as db:
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        if task is None or task.status != "running" or task.worker_id != worker_id:
+            db.rollback()
+            return None
+
+        if task.cancel_requested:
+            task.status = "cancelled"
+            task.finished_at = now()
+            task.error_summary = "任务在执行进程启动前已取消。"
+            task.worker_id = None
+            task.lease_expires_at = None
+            db.add(TaskEvent(task_id=task.id, event_type="task.cancelled", payload={
+                "status": "cancelled", "reason": "cancelled_before_process_start",
+                "process_started": False,
+            }))
+            db.commit()
+            return None
+
+        lease_expires_at = task.lease_expires_at
+        if lease_expires_at is not None:
+            if lease_expires_at.tzinfo is None:
+                lease_expires_at = lease_expires_at.replace(tzinfo=timezone.utc)
+            if lease_expires_at <= now():
+                db.rollback()
+                return None
+
+        if task.permission_mode != "plan" and (
+            not task.requires_approval or not approval_is_valid(db, task)
+        ):
+            db.add(TaskEvent(task_id=task.id, event_type="execution.approval_invalid", payload={
+                "reason": "approval_missing_expired_or_scope_changed",
+                "process_started": False,
+                "check": "immediately_before_spawn",
+            }))
+            task.status = "failed"
+            task.finished_at = now()
+            task.error_summary = "执行审批无效、已过期或任务范围发生变化；未启动执行进程。"
+            task.worker_id = None
+            task.lease_expires_at = None
+            db.commit()
+            return None
+
+        # Keep the write reservation until the child exists. A concurrent cancel
+        # either wins before spawn or is recorded just after spawn and handled by
+        # the regular process-group cancellation loop.
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *invocation.command,
+                cwd=invocation.cwd,
+                env=invocation.env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
+            db.commit()
+        except BaseException:
+            if proc is not None and proc.returncode is None:
+                await terminate_process_tree(proc)
+            raise
+        return proc
+
+
 async def _execute_task(task_id: str, worker_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
@@ -904,7 +1039,25 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             return
         workspace = Path(task.workspace_path)
         prompt = task.prompt
+        prompt = (
+            "请默认使用简体中文（zh-CN）编写面向用户的说明、执行摘要和最终报告；"
+            "如果用户在任务要求中明确指定其他语言，则遵从该要求。代码、标识符、命令和原始错误保持原样。\n\n"
+            + prompt
+        )
         permission_mode = task.permission_mode
+        if task.permission_mode != "plan" and (
+            not task.requires_approval or not approval_is_valid(db, task)
+        ):
+            db.add(TaskEvent(task_id=task.id, event_type="execution.approval_invalid", payload={
+                "reason": "approval_missing_expired_or_scope_changed", "process_started": False,
+            }))
+            task.status = "failed"
+            task.finished_at = now()
+            task.error_summary = "执行审批无效、已过期或任务范围发生变化；未启动执行进程。"
+            task.worker_id = None
+            task.lease_expires_at = None
+            db.commit()
+            return
         acceptance_criteria = task.acceptance_criteria
         verification_commands = list(task.verification_commands or [])
         auto_repair = bool(task.auto_repair)
@@ -944,22 +1097,6 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             mcp_config_path=mcp_config_path, execution_kind="task",
         )
         logged_command = redact_command_for_event(command)
-        add_event(task_id, "executor.started", {
-            "command": logged_command,
-            "workspace": str(workspace),
-            "permission_mode": permission_mode,
-            "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
-            "setting_sources": setting_sources,
-            "model_env_policy": "strip_inherited_model_overrides",
-            "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
-            "configured_model": CLAUDE_MODEL,
-            "mcp_policy": "deny_all",
-            "mcp_config_path": str(mcp_config_path),
-            "attempt": attempt_number,
-            "max_attempts": max_attempts,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-        })
         add_event(task_id, "executor.settings_isolation_configured", {
             "policy": "exclude_user" if "user" not in setting_sources else "include_user",
             "setting_sources": setting_sources,
@@ -975,14 +1112,25 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             "disallowed_tool_pattern": "mcp__*",
         })
         with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-            proc = await asyncio.create_subprocess_exec(
-                *invocation.command,
-                cwd=invocation.cwd,
-                env=invocation.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
-            )
+            proc = await _spawn_task_process(task_id, worker_id, invocation)
+            if proc is None:
+                return
+            add_event(task_id, "executor.started", {
+                "command": logged_command,
+                "workspace": str(workspace),
+                "permission_mode": permission_mode,
+                "settings_policy": "exclude_user" if "user" not in setting_sources else "include_user",
+                "setting_sources": setting_sources,
+                "model_env_policy": "strip_inherited_model_overrides",
+                "model_policy": "explicit_worker_model" if CLAUDE_MODEL else "cli_default",
+                "configured_model": CLAUDE_MODEL,
+                "mcp_policy": "deny_all",
+                "mcp_config_path": str(mcp_config_path),
+                "attempt": attempt_number,
+                "max_attempts": max_attempts,
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+            })
 
             async def read_stdout() -> None:
                 nonlocal session_id, result_event_seen, final_assistant_text_seen
@@ -1056,13 +1204,13 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                         if cancel_requested:
                             process_tree_stopped = await terminate_process_tree(proc)
                             terminal_reason = "cancelled"
-                            error_summary = "Cancelled by request"
+                            error_summary = "用户请求取消任务。"
                             add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
                             break
                         if asyncio.get_running_loop().time() >= deadline:
                             process_tree_stopped = await terminate_process_tree(proc)
                             terminal_reason = "timeout"
-                            error_summary = f"Task timed out after {MAX_TASK_SECONDS} seconds"
+                            error_summary = f"任务执行超时（{MAX_TASK_SECONDS} 秒）。"
                             add_event(task_id, "executor.timed_out", {
                                 "timeout_seconds": MAX_TASK_SECONDS,
                                 "exit_code": proc.returncode,
@@ -1077,20 +1225,20 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 if cancel_requested_after_exit and terminal_reason is None:
                     process_tree_stopped = await terminate_process_tree(proc)
                     terminal_reason = "cancelled"
-                    error_summary = "Cancelled by request"
+                    error_summary = "用户请求取消任务。"
                     add_event(task_id, "executor.cancelled", {"reason": "cancel_requested"})
             except asyncio.CancelledError:
                 process_tree_stopped = await terminate_process_tree(proc)
                 terminal_reason = "worker_interrupted"
-                error_summary = "Worker interrupted; Claude subprocess tree terminated"
+                error_summary = "Worker 已中断；Claude 子进程树已终止。"
                 add_event(task_id, "executor.interrupted", {"reason": "worker_shutdown"})
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
             exit_code = proc.returncode
     except FileNotFoundError:
-        error_summary, exit_code = f"Claude Code executable not found: {CLAUDE_BIN}", 127
+        error_summary, exit_code = f"未找到 Claude Code 可执行文件：{CLAUDE_BIN}", 127
     except Exception as exc:
-        error_summary, exit_code = f"{type(exc).__name__}: {exc}", 1
+        error_summary, exit_code = f"执行过程中发生错误（{type(exc).__name__}）：{exc}", 1
         if mcp_config_attempted and mcp_config_path is None:
             add_event(task_id, "executor.mcp_isolation_failed", {
                 "policy": "deny_all",
@@ -1104,8 +1252,8 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
     if exit_code == 0 and error_summary is None and terminal_reason is None and not output_complete:
         terminal_reason = "incomplete_output"
         error_summary = (
-            "Claude Code exited with status 0 without a terminal result event "
-            "or a final assistant message."
+            "Claude Code 返回成功退出码，但没有提供终止结果事件"
+            "或最终回复。"
         )
     add_event(task_id, "executor.output_validated", {
         "complete": output_complete,
@@ -1147,12 +1295,21 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     task_id, argv, workspace, task_dir, permission_mode, None,
                     execution_kind="verification",
                 )
-                proc = await asyncio.create_subprocess_exec(
-                    *invocation.command, cwd=invocation.cwd, env=invocation.env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=(os.name == "posix"),
-                )
+                proc = await _spawn_task_process(task_id, worker_id, invocation)
+                if proc is None:
+                    with SessionLocal() as db:
+                        current = db.get(Task, task_id)
+                        was_cancelled = (
+                            current is None or current.status == "cancelled"
+                            or bool(current.cancel_requested)
+                        )
+                    if was_cancelled:
+                        verification_cancelled = True
+                        terminal_reason = "cancelled"
+                    else:
+                        terminal_reason = "approval_invalid_or_lease_lost"
+                        error_summary = "验证进程启动前审批或 Worker 租约失效；未启动验证命令。"
+                    break
                 communicate_task = asyncio.create_task(proc.communicate())
                 timed_out = False
                 cancelled = False
@@ -1217,9 +1374,9 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 terminal_reason = "verification_failed"
                 failed = next((item for item in verification_results if item.get("exit_code") != 0 or item.get("timed_out")), {})
                 error_summary = (
-                    f"Verification failed for command: {failed.get('command', 'unknown command')}"
-                    + (" (timed out after 120 seconds)" if failed.get("timed_out") else "")
-                    + (f" (exit code {failed.get('exit_code')})" if failed.get("exit_code") is not None else "")
+                    f"验证命令执行失败：{failed.get('command', '未知命令')}"
+                    + ("（执行超时，超过 120 秒）" if failed.get("timed_out") else "")
+                    + (f"（退出码：{failed.get('exit_code')}）" if failed.get("exit_code") is not None else "")
                 )
         try:
             (task_dir / "verification.json").write_text(
@@ -1241,6 +1398,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                     break
             failed_details = json.dumps(verification_results, ensure_ascii=True, indent=2)[-12000:]
             repair_prompt = (
+                "请默认使用简体中文撰写面向用户的说明和最终报告；任务明确指定其他语言时遵从任务。\\n\\n"
                 "A bounded automatic repair was explicitly enabled for this task.\n"
                 "Fix only the cause of the failed acceptance checks in the existing workspace. "
                 "Do not broaden scope, remove or weaken tests, alter verification commands, "
@@ -1254,6 +1412,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             passed, repair_results, repair_error = await run_repair_attempt(
                 task_id, workspace, permission_mode, repair_prompt, task_dir,
                 repair_number, max_repair_attempts, verification_commands,
+                worker_id=worker_id,
             )
             verification_results = repair_results
             if passed:
@@ -1272,7 +1431,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
                 })
                 break
             if repair_error:
-                error_summary = f"Automatic repair attempt {repair_number} failed: {repair_error}"
+                error_summary = f"第 {repair_number} 次自动修复失败：{repair_error}"
             if repair_error == "cancelled":
                 terminal_reason = "cancelled"
                 verification_status = "not_run"
@@ -1339,12 +1498,12 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
             return
         task.exit_code, task.session_id = exit_code, session_id
         task.repair_attempt_count = repair_attempt_count
-        attempt_error = error_summary or (None if exit_code == 0 else f"Claude Code exited with status {exit_code}")
+        attempt_error = error_summary or (None if exit_code == 0 else f"Claude Code 退出，状态码：{exit_code}")
         retry_scheduled = False
         if task.cancel_requested or terminal_reason == "cancelled":
             task.status = "cancelled"
             task.finished_at = now()
-            task.error_summary = attempt_error or "Cancelled by request"
+            task.error_summary = attempt_error or "用户请求取消任务。"
         elif exit_code == 0 and error_summary is None and verification_status != "failed":
             task.status = "succeeded"
             task.finished_at = now()
@@ -1366,7 +1525,7 @@ async def _execute_task(task_id: str, worker_id: str) -> None:
         else:
             task.status = "failed"
             task.finished_at = now()
-            task.error_summary = attempt_error or "Task failed"
+            task.error_summary = attempt_error or "任务执行失败。"
             if verification_status == "pending":
                 verification_status = "not_run"
         task.verification_status = verification_status
@@ -1438,9 +1597,9 @@ def recover_orphaned_running_tasks() -> int:
                 .values(
                     status="failed", finished_at=recovered_at, exit_code=125,
                     error_summary=(
-                        "Worker lease expired. The task was marked failed and was not retried "
-                        "automatically because the previous agent process may have produced side effects. "
-                        "Inspect workspace and process state before manually retrying."
+                        "Worker 租约已过期。任务已标记失败，未自动重试，"
+                        "因为上一次 Agent 进程可能已经产生副作用。"
+                        "手动重试前，请检查工作区和相关进程状态。"
                     ),
                     worker_id=None, lease_expires_at=None,
                 )
@@ -1485,6 +1644,34 @@ async def _renew_worker_lease(task_id: str, worker_id: str) -> None:
         if result.rowcount != 1:
             raise RuntimeError(f"Worker lease lost for task {task_id}")
         heartbeat_worker(worker_id, MAX_CONCURRENT_TASKS)
+
+
+def _record_worker_interruption(task_id: str, worker_id: str) -> None:
+    """Close the task lifecycle if cancellation interrupted setup before _execute_task could finalize it."""
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.status != "running" or task.worker_id != worker_id:
+            return
+        finished_at = now()
+        task.status = "failed"
+        task.finished_at = finished_at
+        task.exit_code = 130
+        task.error_summary = "Worker 在任务执行完成前中断；手动重试前请检查工作区和相关进程状态。"
+        task.worker_id = None
+        task.lease_expires_at = None
+        if task.verification_status == "pending":
+            task.verification_status = "not_run"
+        db.add(TaskEvent(task_id=task_id, event_type="executor.interrupted", payload={
+            "worker_id": worker_id, "reason": "worker_interrupted",
+            "process_tree_status": "not_verified",
+        }))
+        db.add(TaskEvent(task_id=task_id, event_type="executor.finished", payload={
+            "status": "failed", "exit_code": 130, "error_summary": task.error_summary,
+            "verification_status": task.verification_status,
+            "terminal_reason": "worker_interrupted",
+            "attempt": task.attempt_count, "max_attempts": task.max_attempts,
+        }))
+        db.commit()
 
 
 async def execute_task(task_id: str, worker_id: str | None = None) -> None:
@@ -1547,6 +1734,7 @@ async def execute_task(task_id: str, worker_id: str | None = None) -> None:
     except asyncio.CancelledError:
         execution.cancel()
         await asyncio.gather(execution, return_exceptions=True)
+        _record_worker_interruption(task_id, worker_id)
         return
     finally:
         heartbeat.cancel()

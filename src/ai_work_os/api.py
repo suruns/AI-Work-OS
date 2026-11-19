@@ -10,12 +10,14 @@ from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
 Base.metadata.create_all(bind=engine)
 ensure_schema_compatibility()
 app = FastAPI(title="AI Work OS API", version="0.2.0")
+app.include_router(execution_approval_router)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STORAGE = Path(os.getenv("AI_WORK_OS_STORAGE", "./storage")).resolve()
@@ -317,16 +319,16 @@ def _validate_project_workspace(db, project_id: str | None, workspace: Path) -> 
         return None
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在。")
     if project.status != "active":
-        raise HTTPException(status_code=409, detail="archived projects cannot receive new tasks")
+        raise HTTPException(status_code=409, detail="已归档的项目不能接收新任务。")
     root = Path(project.workspace_path).resolve()
     try:
         workspace.relative_to(root)
     except ValueError:
         raise HTTPException(
             status_code=422,
-            detail="workspace_path must be the project workspace or a directory inside it",
+            detail="workspace_path 必须是项目工作区本身或其子目录。",
         )
     return project
 
@@ -335,11 +337,11 @@ def _validate_project_workspace(db, project_id: str | None, workspace: Path) -> 
 def create_project(body: ProjectCreate) -> dict:
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
-        raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
+        raise HTTPException(status_code=422, detail="workspace_path 必须指向已存在的目录。")
     slug = _project_slug(body.slug or body.name) or f"project-{uuid4().hex[:8]}"
     with SessionLocal() as db:
         if db.scalar(select(Project.id).where(Project.slug == slug)) is not None:
-            raise HTTPException(status_code=409, detail="project slug already exists")
+            raise HTTPException(status_code=409, detail="项目 slug 已存在。")
         project = Project(
             name=body.name.strip(), slug=slug, description=body.description,
             workspace_path=str(workspace), status="active",
@@ -367,7 +369,7 @@ def get_project(project_id: str) -> dict:
     with SessionLocal() as db:
         project = db.get(Project, project_id)
         if project is None:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="项目不存在。")
         return _project_payload(db, project)
 
 
@@ -377,16 +379,16 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict:
     with SessionLocal() as db:
         project = db.get(Project, project_id)
         if project is None:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="项目不存在。")
         if "workspace_path" in changes and changes["workspace_path"] is not None:
             workspace = Path(changes["workspace_path"]).expanduser().resolve()
             if not workspace.is_dir():
-                raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
+                raise HTTPException(status_code=422, detail="workspace_path 必须指向已存在的目录。")
             existing_tasks = list(db.scalars(select(Task).where(Task.project_id == project_id)))
             if any(not Path(task.workspace_path).resolve().is_relative_to(workspace) for task in existing_tasks):
                 raise HTTPException(
                     status_code=409,
-                    detail="workspace_path cannot exclude directories used by existing project tasks",
+                    detail="workspace_path 不能排除现有项目任务正在使用的目录。",
                 )
             project.workspace_path = str(workspace)
         if "name" in changes and changes["name"] is not None:
@@ -395,7 +397,7 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict:
             slug = _project_slug(changes["slug"]) or f"project-{uuid4().hex[:8]}"
             duplicate = db.scalar(select(Project.id).where(Project.slug == slug, Project.id != project_id))
             if duplicate is not None:
-                raise HTTPException(status_code=409, detail="project slug already exists")
+                raise HTTPException(status_code=409, detail="项目 slug 已存在。")
             project.slug = slug
         if "description" in changes:
             project.description = changes["description"]
@@ -414,7 +416,7 @@ def list_project_tasks(
 ) -> list[Task]:
     with SessionLocal() as db:
         if db.get(Project, project_id) is None:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="项目不存在。")
         return list(db.scalars(
             select(Task).where(Task.project_id == project_id)
             .order_by(Task.created_at.desc(), Task.id).limit(limit)
@@ -427,7 +429,7 @@ def list_project_workflows(
 ) -> list[dict]:
     with SessionLocal() as db:
         if db.get(Project, project_id) is None:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="项目不存在。")
         workflows = list(db.scalars(
             select(Workflow).where(Workflow.project_id == project_id)
             .order_by(Workflow.created_at.desc(), Workflow.id).limit(limit)
@@ -470,7 +472,7 @@ def list_project_conversations(
 ) -> list[dict]:
     with SessionLocal() as db:
         if db.get(Project, project_id) is None:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="项目不存在。")
         conversations = list(db.scalars(
             select(Conversation).where(Conversation.project_id == project_id)
             .order_by(Conversation.updated_at.desc(), Conversation.id).limit(limit)
@@ -482,13 +484,13 @@ def list_project_conversations(
 def create_conversation(body: ConversationCreate) -> dict:
     with SessionLocal() as db:
         if body.title is not None and not body.title.strip():
-            raise HTTPException(status_code=422, detail="conversation title must not be blank")
+            raise HTTPException(status_code=422, detail="对话标题不能为空。")
         if body.project_id is not None:
             project = db.get(Project, body.project_id)
             if project is None:
-                raise HTTPException(status_code=404, detail="project not found")
+                raise HTTPException(status_code=404, detail="项目不存在。")
             if project.status != "active":
-                raise HTTPException(status_code=409, detail="archived projects cannot receive conversations")
+                raise HTTPException(status_code=409, detail="已归档的项目不能接收新对话。")
         conversation = Conversation(
             project_id=body.project_id,
             title=(body.title or "New conversation").strip(),
@@ -522,7 +524,7 @@ def get_conversation(conversation_id: str) -> dict:
     with SessionLocal() as db:
         conversation = db.get(Conversation, conversation_id)
         if conversation is None:
-            raise HTTPException(status_code=404, detail="conversation not found")
+            raise HTTPException(status_code=404, detail="对话不存在。")
         return _conversation_payload(db, conversation)
 
 
@@ -532,10 +534,10 @@ def update_conversation(conversation_id: str, body: ConversationUpdate) -> dict:
     with SessionLocal() as db:
         conversation = db.get(Conversation, conversation_id)
         if conversation is None:
-            raise HTTPException(status_code=404, detail="conversation not found")
+            raise HTTPException(status_code=404, detail="对话不存在。")
         if changes.get("title") is not None:
             if not changes["title"].strip():
-                raise HTTPException(status_code=422, detail="conversation title must not be blank")
+                raise HTTPException(status_code=422, detail="对话标题不能为空。")
             conversation.title = changes["title"].strip()
         if changes.get("status") is not None:
             conversation.status = changes["status"]
@@ -556,9 +558,9 @@ def list_conversation_messages(
 ) -> list[ConversationMessage]:
     with SessionLocal() as db:
         if db.get(Conversation, conversation_id) is None:
-            raise HTTPException(status_code=404, detail="conversation not found")
+            raise HTTPException(status_code=404, detail="对话不存在。")
         if after_id and before_id:
-            raise HTTPException(status_code=422, detail="after_id and before_id cannot be used together")
+            raise HTTPException(status_code=422, detail="after_id 和 before_id 不能同时使用。")
         query = select(ConversationMessage).where(
             ConversationMessage.conversation_id == conversation_id,
         )
@@ -583,11 +585,11 @@ def list_conversation_messages(
 def create_conversation_message(conversation_id: str, body: ConversationMessageCreate) -> dict:
     content = body.content.strip()
     if not content:
-        raise HTTPException(status_code=422, detail="message content must not be blank")
+        raise HTTPException(status_code=422, detail="消息内容不能为空。")
     with SessionLocal() as db:
         conversation = db.get(Conversation, conversation_id)
         if conversation is None:
-            raise HTTPException(status_code=404, detail="conversation not found")
+            raise HTTPException(status_code=404, detail="对话不存在。")
         if body.client_message_id:
             existing = db.scalar(select(ConversationMessage).where(
                 ConversationMessage.conversation_id == conversation_id,
@@ -602,7 +604,7 @@ def create_conversation_message(conversation_id: str, body: ConversationMessageC
                 }
 
         if conversation.status != "active":
-            raise HTTPException(status_code=409, detail="archived conversations cannot receive new messages")
+            raise HTTPException(status_code=409, detail="已归档的对话不能接收新消息。")
 
         message = ConversationMessage(
             conversation_id=conversation_id, role="user", content=content,
@@ -636,7 +638,7 @@ def create_conversation_message(conversation_id: str, body: ConversationMessageC
             turn_id=turn.id, event_type="turn.queued",
             payload={"conversation_id": conversation_id, "message_id": message.id},
         ))
-        if conversation.title == "New conversation":
+        if conversation.title in {"New conversation", "新对话"}:
             first_line = content.splitlines()[0].strip()
             conversation.title = first_line[:72] or "New conversation"
         conversation.updated_at = utcnow()
@@ -658,7 +660,7 @@ def list_conversation_turns(
 ) -> list[AgentTurn]:
     with SessionLocal() as db:
         if db.get(Conversation, conversation_id) is None:
-            raise HTTPException(status_code=404, detail="conversation not found")
+            raise HTTPException(status_code=404, detail="对话不存在。")
         query = select(AgentTurn).where(AgentTurn.conversation_id == conversation_id)
         if latest:
             rows = list(db.scalars(
@@ -675,7 +677,7 @@ def get_agent_turn(turn_id: str) -> AgentTurn:
     with SessionLocal() as db:
         turn = db.get(AgentTurn, turn_id)
         if turn is None:
-            raise HTTPException(status_code=404, detail="agent turn not found")
+            raise HTTPException(status_code=404, detail="Agent 轮次不存在。")
         return turn
 
 
@@ -688,7 +690,7 @@ def list_agent_turn_events(
 ) -> list[AgentTurnEvent]:
     with SessionLocal() as db:
         if db.get(AgentTurn, turn_id) is None:
-            raise HTTPException(status_code=404, detail="agent turn not found")
+            raise HTTPException(status_code=404, detail="Agent 轮次不存在。")
         query = select(AgentTurnEvent).where(
             AgentTurnEvent.turn_id == turn_id, AgentTurnEvent.id > after_id,
         )
@@ -704,11 +706,17 @@ def list_agent_turn_events(
 
 @app.post("/tasks", response_model=TaskRead, status_code=201)
 def create_task(body: TaskCreate) -> Task:
+    if body.permission_mode != "plan" and body.project_id is None:
+        raise HTTPException(status_code=422, detail="受控写入任务必须绑定项目，并在本机控制台审批后才能执行")
     workspace = Path(body.workspace_path).expanduser().resolve()
     if not workspace.is_dir():
-        raise HTTPException(status_code=422, detail="workspace_path must be an existing directory")
+        raise HTTPException(status_code=422, detail="workspace_path 必须指向已存在的目录。")
     with SessionLocal() as db:
         _validate_project_workspace(db, body.project_id, workspace)
+        if body.permission_mode != "plan":
+            project = db.get(Project, body.project_id)
+            if project is None or Path(project.workspace_path).expanduser().resolve() != workspace:
+                raise HTTPException(status_code=422, detail="受控写入任务当前必须使用项目根目录作为工作区")
         task = Task(
             project_id=body.project_id,
             title=body.title.strip(), prompt=body.prompt, workspace_path=str(workspace),
@@ -748,7 +756,7 @@ def get_task(task_id: str) -> Task:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         return task
 
 
@@ -763,7 +771,7 @@ def get_task_events(
     )
     with SessionLocal() as db:
         if not db.get(Task, task_id):
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         base_query = select(TaskEvent).where(TaskEvent.task_id == task_id)
         if include_thinking_tokens:
             return list(db.scalars(base_query.order_by(TaskEvent.id)))
@@ -960,7 +968,7 @@ def get_task_diagnostics(task_id: str) -> dict:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if task is None:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         events = list(db.scalars(
             select(TaskEvent).where(TaskEvent.task_id == task_id)
             .order_by(TaskEvent.occurred_at, TaskEvent.id)
@@ -972,14 +980,14 @@ def get_task_diagnostics(task_id: str) -> dict:
 def get_workspace_changes(task_id: str) -> dict:
     with SessionLocal() as db:
         if not db.get(Task, task_id):
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
     report_path = STORAGE / "tasks" / task_id / "workspace_changes.json"
     try:
         return json.loads(report_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {"available": False, "reason": "Workspace change report is not available yet."}
     except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read workspace change report: {type(exc).__name__}") from exc
+        raise HTTPException(status_code=500, detail=f"无法读取工作区变更报告：{type(exc).__name__}") from exc
 
 
 @app.get("/tasks/{task_id}/workspace-diff")
@@ -987,22 +995,22 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         workspace = Path(task.workspace_path).resolve()
 
     report_path = STORAGE / "tasks" / task_id / "workspace_changes.json"
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise HTTPException(status_code=409, detail="Workspace change report is not available yet.")
+        raise HTTPException(status_code=409, detail="工作区变更报告尚不可用。")
     except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read workspace change report: {type(exc).__name__}") from exc
+        raise HTTPException(status_code=500, detail=f"无法读取工作区变更报告：{type(exc).__name__}") from exc
     if not report.get("available"):
-        raise HTTPException(status_code=409, detail=report.get("reason", "Workspace diff is unavailable."))
+        raise HTTPException(status_code=409, detail=report.get("reason", "工作区差异不可用。"))
 
     rel_path = PurePosixPath(path)
     if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts or "\x00" in path:
-        raise HTTPException(status_code=400, detail="path must be a safe relative workspace path")
+        raise HTTPException(status_code=400, detail="path 必须是安全的工作区相对路径。")
     allowed_groups = {
         "changed_during_task": report.get("changed_during_task", []),
         "preexisting_changes": report.get("preexisting_changes", []),
@@ -1010,7 +1018,7 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
         "changes_reverted_or_removed": report.get("changes_reverted_or_removed", []),
     }
     if not any(path in values for values in allowed_groups.values()):
-        raise HTTPException(status_code=404, detail="path is not included in this task's workspace report")
+        raise HTTPException(status_code=404, detail="该路径未包含在此任务的工作区变更报告中。")
 
     try:
         root_result = subprocess.run(
@@ -1020,10 +1028,10 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
         root = Path(os.fsdecode(root_result.stdout).strip()).resolve()
         lexical_candidate = root / Path(*rel_path.parts)
         if lexical_candidate.is_symlink():
-            raise HTTPException(status_code=400, detail="symlink diffs are not supported")
+            raise HTTPException(status_code=400, detail="暂不支持查看符号链接的差异。")
         candidate = lexical_candidate.resolve(strict=False)
         if candidate != root and root not in candidate.parents:
-            raise HTTPException(status_code=400, detail="path resolves outside the Git workspace")
+            raise HTTPException(status_code=400, detail="该路径解析后位于 Git 工作区之外。")
         tracked_check = subprocess.run(
             ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", path],
             capture_output=True, timeout=10,
@@ -1046,11 +1054,11 @@ def get_workspace_diff(task_id: str, path: str = Query(min_length=1, max_length=
         else:
             diff_bytes = b""
     except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="Git diff timed out.") from exc
+        raise HTTPException(status_code=504, detail="Git diff 执行超时。") from exc
     except subprocess.CalledProcessError as exc:
-        raise HTTPException(status_code=422, detail="Workspace is not a readable Git repository.") from exc
+        raise HTTPException(status_code=422, detail="工作区不是可读取的 Git 仓库。") from exc
     except OSError as exc:
-        raise HTTPException(status_code=422, detail="Could not execute Git to read this diff.") from exc
+        raise HTTPException(status_code=422, detail="无法执行 Git 来读取差异。") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1076,7 +1084,7 @@ def list_task_artifacts(task_id: str) -> dict:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         workspace = Path(task.workspace_path).resolve()
 
     task_storage_root = STORAGE / "tasks"
@@ -1182,7 +1190,7 @@ def list_artifact_inventory(
 ) -> dict:
     """Search a bounded, stable page of the read-only artifact inventory."""
     if task_id and before_task_id:
-        raise HTTPException(status_code=400, detail="task_id and before_task_id cannot be combined")
+        raise HTTPException(status_code=400, detail="task_id 和 before_task_id 不能同时使用。")
     with SessionLocal() as db:
         statement = select(Task)
         if task_id:
@@ -1190,7 +1198,7 @@ def list_artifact_inventory(
         if before_task_id:
             cursor_task = db.get(Task, before_task_id)
             if not cursor_task:
-                raise HTTPException(status_code=404, detail="artifact pagination cursor task not found")
+                raise HTTPException(status_code=404, detail="产物分页游标对应的任务不存在。")
             statement = statement.where(
                 (Task.created_at < cursor_task.created_at)
                 | ((Task.created_at == cursor_task.created_at) & (Task.id < cursor_task.id))
@@ -1200,7 +1208,7 @@ def list_artifact_inventory(
         has_more_tasks = len(page) > task_limit
         tasks = page[:task_limit]
         if task_id and not tasks:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
 
     needle = q.casefold().strip() if q else None
     items = []
@@ -1248,20 +1256,20 @@ def download_task_artifact(task_id: str, name: str):
         repair_match = re.fullmatch(r"repair-(\d{2})\.(stdout\.jsonl|stderr\.log)", name)
         if match:
             if (match.group(1) == "stdout" and match.group(3) != "jsonl") or (match.group(1) == "stderr" and match.group(3) != "log"):
-                raise HTTPException(status_code=404, detail="artifact not found")
+                raise HTTPException(status_code=404, detail="产物不存在。")
             allowed[name] = "application/x-ndjson" if match.group(1) == "stdout" else "text/plain; charset=utf-8"
         elif repair_match:
             allowed[name] = "application/x-ndjson" if repair_match.group(2).startswith("stdout") else "text/plain; charset=utf-8"
         else:
-            raise HTTPException(status_code=404, detail="artifact not found")
+            raise HTTPException(status_code=404, detail="产物不存在。")
     with SessionLocal() as db:
         if not db.get(Task, task_id):
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
     task_storage_root = STORAGE / "tasks"
     task_dir = task_storage_root / task_id
     candidate = task_dir / name
     if task_storage_root.is_symlink() or task_dir.is_symlink() or candidate.is_symlink() or not candidate.is_file() or task_dir.resolve() not in candidate.resolve().parents:
-        raise HTTPException(status_code=404, detail="artifact not found")
+        raise HTTPException(status_code=404, detail="产物不存在。")
     return FileResponse(candidate, media_type=allowed[name], filename=name)
 
 
@@ -1270,12 +1278,12 @@ def download_workspace_file(task_id: str, path: str = Query(min_length=1, max_le
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         workspace = Path(task.workspace_path).resolve()
 
     rel_path = PurePosixPath(path)
     if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts or "\x00" in path:
-        raise HTTPException(status_code=400, detail="path must be a safe relative workspace path")
+        raise HTTPException(status_code=400, detail="path 必须是安全的工作区相对路径。")
 
     task_storage_root = STORAGE / "tasks"
     task_dir = task_storage_root / task_id
@@ -1285,13 +1293,13 @@ def download_workspace_file(task_id: str, path: str = Query(min_length=1, max_le
             raise OSError("task artifact storage path is not safe")
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=409, detail="Workspace change report is not available yet.") from exc
+        raise HTTPException(status_code=409, detail="工作区变更报告尚不可用。") from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail="Could not read workspace change report.") from exc
+        raise HTTPException(status_code=500, detail="无法读取工作区变更报告。") from exc
     if not report.get("available"):
-        raise HTTPException(status_code=409, detail=report.get("reason", "Workspace file downloads are unavailable."))
+        raise HTTPException(status_code=409, detail=report.get("reason", "工作区文件下载暂不可用。"))
     if path not in report.get("changed_during_task", []):
-        raise HTTPException(status_code=404, detail="path was not changed during this task")
+        raise HTTPException(status_code=404, detail="该路径在此任务执行期间未发生变更。")
 
     try:
         root_result = subprocess.run(
@@ -1302,18 +1310,18 @@ def download_workspace_file(task_id: str, path: str = Query(min_length=1, max_le
         lexical = root / Path(*rel_path.parts)
         chain = [lexical, *lexical.parents]
         if any(item.is_symlink() for item in chain if item == root or root in item.parents):
-            raise HTTPException(status_code=400, detail="symlink downloads are not supported")
+            raise HTTPException(status_code=400, detail="暂不支持下载符号链接。")
         candidate = lexical.resolve(strict=True)
         if candidate == root or root not in candidate.parents or not candidate.is_file():
-            raise HTTPException(status_code=404, detail="workspace file not found")
+            raise HTTPException(status_code=404, detail="工作区文件不存在。")
     except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="Git workspace lookup timed out.") from exc
+        raise HTTPException(status_code=504, detail="Git 工作区查询超时。") from exc
     except subprocess.CalledProcessError as exc:
-        raise HTTPException(status_code=422, detail="Workspace is not a readable Git repository.") from exc
+        raise HTTPException(status_code=422, detail="工作区不是可读取的 Git 仓库。") from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="workspace file not found") from exc
+        raise HTTPException(status_code=404, detail="工作区文件不存在。") from exc
     except OSError as exc:
-        raise HTTPException(status_code=422, detail="Could not inspect workspace file.") from exc
+        raise HTTPException(status_code=422, detail="无法检查工作区文件。") from exc
     return FileResponse(candidate, media_type="application/octet-stream", filename=candidate.name)
 
 
@@ -1322,7 +1330,7 @@ def cancel_task(task_id: str) -> Task:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
-            raise HTTPException(status_code=404, detail="task not found")
+            raise HTTPException(status_code=404, detail="任务不存在。")
         if task.status in {"queued", "running"}:
             timestamp = utcnow()
             queued_result = db.execute(
@@ -1334,6 +1342,15 @@ def cancel_task(task_id: str) -> Task:
                 )
             )
             if queued_result.rowcount == 1:
+                approval = db.scalar(select(ExecutionApproval).where(ExecutionApproval.task_id == task_id))
+                if approval is not None and approval.status in {"pending", "approved"}:
+                    approval.status = "revoked"
+                    approval.decided_at = timestamp
+                    approval.decision_source = "task_state"
+                    approval.decision_note = "任务在开始执行前已取消。"
+                    db.add(TaskEvent(task_id=task_id, event_type="execution.approval_revoked", payload={
+                        "approval_id": approval.id, "reason": "task_cancelled_before_start",
+                    }))
                 db.add(TaskEvent(
                     task_id=task_id, event_type="task.cancelled",
                     payload={
@@ -1387,21 +1404,21 @@ def _workflow_payload(db, workflow: Workflow) -> dict:
 def _validate_dag(items: list) -> dict[str, list[str]]:
     by_key = {item.key: item for item in items}
     if len(by_key) != len(items):
-        raise HTTPException(status_code=422, detail="task keys must be unique")
+        raise HTTPException(status_code=422, detail="任务 key 必须唯一。")
     graph = {}
     for item in items:
         if item.key in item.depends_on:
-            raise HTTPException(status_code=422, detail=f"task {item.key!r} cannot depend on itself")
+            raise HTTPException(status_code=422, detail=f"任务 {item.key!r} 不能依赖自身。")
         unknown = sorted(set(item.depends_on) - set(by_key))
         if unknown:
-            raise HTTPException(status_code=422, detail=f"task {item.key!r} references unknown dependencies: {unknown}")
+            raise HTTPException(status_code=422, detail=f"任务 {item.key!r} 引用了未知依赖项：{unknown}")
         if len(set(item.depends_on)) != len(item.depends_on):
-            raise HTTPException(status_code=422, detail=f"task {item.key!r} has duplicate dependencies")
+            raise HTTPException(status_code=422, detail=f"任务 {item.key!r} 存在重复依赖项。")
         graph[item.key] = list(item.depends_on)
     visiting, visited = set(), set()
     def visit(key: str) -> None:
         if key in visiting:
-            raise HTTPException(status_code=422, detail="workflow dependencies contain a cycle")
+            raise HTTPException(status_code=422, detail="工作流依赖关系包含循环。")
         if key in visited:
             return
         visiting.add(key)
@@ -1416,19 +1433,25 @@ def _validate_dag(items: list) -> dict[str, list[str]]:
 
 @app.post("/workflows", status_code=201)
 def create_workflow(body: WorkflowCreate) -> dict:
+    if body.project_id is None and any(item.permission_mode != "plan" for item in body.tasks):
+        raise HTTPException(status_code=422, detail="受控写入工作流必须绑定项目，并逐项完成本机审批")
     graph = _validate_dag(body.tasks)
     if any(item.project_id not in (None, body.project_id) for item in body.tasks):
-        raise HTTPException(status_code=422, detail="workflow task project_id must match the workflow project_id")
+        raise HTTPException(status_code=422, detail="工作流任务的 project_id 必须与工作流 project_id 一致。")
     workspaces = {}
     for item in body.tasks:
         workspace = Path(item.workspace_path).expanduser().resolve()
         if not workspace.is_dir():
-            raise HTTPException(status_code=422, detail=f"workspace_path for task {item.key!r} must be an existing directory")
+            raise HTTPException(status_code=422, detail=f"任务 {item.key!r} 的 workspace_path 必须指向已存在的目录。")
         workspaces[item.key] = str(workspace)
 
     with SessionLocal() as db:
         for item in body.tasks:
             _validate_project_workspace(db, body.project_id, Path(workspaces[item.key]))
+            if item.permission_mode != "plan":
+                project = db.get(Project, body.project_id) if body.project_id else None
+                if project is None or Path(project.workspace_path).expanduser().resolve() != Path(workspaces[item.key]):
+                    raise HTTPException(status_code=422, detail="受控写入工作流任务当前必须使用项目根目录作为工作区")
         workflow = Workflow(project_id=body.project_id, title=body.title.strip(), status="queued")
         db.add(workflow)
         db.flush()
@@ -1491,7 +1514,7 @@ def get_workflow(workflow_id: str) -> dict:
     with SessionLocal() as db:
         workflow = db.get(Workflow, workflow_id)
         if workflow is None:
-            raise HTTPException(status_code=404, detail="workflow not found")
+            raise HTTPException(status_code=404, detail="工作流不存在。")
         tasks = list(db.scalars(select(Task).where(Task.workflow_id == workflow_id).order_by(Task.created_at, Task.id)))
         edges = list(db.scalars(select(WorkflowTaskDependency).where(WorkflowTaskDependency.workflow_id == workflow_id)))
         return {
@@ -1519,7 +1542,7 @@ def get_workflow_events(
     )
     with SessionLocal() as db:
         if db.get(Workflow, workflow_id) is None:
-            raise HTTPException(status_code=404, detail="workflow not found")
+            raise HTTPException(status_code=404, detail="工作流不存在。")
         query = (
             select(TaskEvent, Task.title)
             .join(Task, Task.id == TaskEvent.task_id)
@@ -1547,7 +1570,7 @@ def cancel_workflow(workflow_id: str) -> dict:
     with SessionLocal() as db:
         workflow = db.get(Workflow, workflow_id)
         if workflow is None:
-            raise HTTPException(status_code=404, detail="workflow not found")
+            raise HTTPException(status_code=404, detail="工作流不存在。")
         if workflow.status in {"succeeded", "failed", "cancelled"}:
             return _workflow_payload(db, workflow)
         timestamp = utcnow()
@@ -1656,13 +1679,13 @@ def get_agent_session(session_id: str) -> dict:
             if (event.payload or {}).get("session_id") == session_id
         ]
         if not matching:
-            raise HTTPException(status_code=404, detail="session not found")
+            raise HTTPException(status_code=404, detail="会话不存在。")
         task_ids = {event.task_id for event in matching}
         if len(task_ids) != 1:
-            raise HTTPException(status_code=409, detail="session ID is associated with multiple tasks")
+            raise HTTPException(status_code=409, detail="该 session ID 关联了多个任务。")
         task = db.get(Task, next(iter(task_ids)))
         if task is None:
-            raise HTTPException(status_code=404, detail="session not found")
+            raise HTTPException(status_code=404, detail="会话不存在。")
 
         events = list(db.scalars(
             select(TaskEvent).where(TaskEvent.task_id == task.id)
@@ -1724,7 +1747,7 @@ def cancel_agent_turn(turn_id: str) -> AgentTurn:
     with SessionLocal() as db:
         turn = db.get(AgentTurn, turn_id)
         if turn is None:
-            raise HTTPException(status_code=404, detail="agent turn not found")
+            raise HTTPException(status_code=404, detail="Agent 轮次不存在。")
         if turn.status == "queued":
             cancelled_at = utcnow()
             turn.status = "cancelled"

@@ -72,7 +72,7 @@ def dashboard(tmp_path: Path, request: pytest.FixtureRequest):
             try:
                 page.goto(base_url + "/dashboard", wait_until="domcontentloaded")
                 page.locator("#connection").filter(
-                    has_text="API connected"
+                    has_text="API 已连接"
                 ).wait_for(timeout=10_000)
                 yield {
                     "page": page,

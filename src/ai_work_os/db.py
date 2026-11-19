@@ -44,6 +44,9 @@ def ensure_schema_compatibility() -> None:
         if "lease_expires_at" not in columns:
             connection.execute(text("ALTER TABLE tasks ADD COLUMN lease_expires_at DATETIME"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_workflow_id ON tasks (workflow_id)"))
+        if "requires_approval" not in columns:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_requires_approval ON tasks (requires_approval)"))
         if "permission_mode" not in columns:
             connection.execute(text(
                 "ALTER TABLE tasks ADD COLUMN permission_mode VARCHAR(32) NOT NULL DEFAULT 'plan'"

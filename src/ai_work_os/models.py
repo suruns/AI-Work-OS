@@ -52,6 +52,7 @@ class Task(Base):
     workspace_path: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     permission_mode: Mapped[str] = mapped_column(String(32), default="plan", nullable=False)
+    requires_approval: Mapped[bool] = mapped_column(Integer, default=0, nullable=False, index=True)
     priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -205,3 +206,19 @@ class Worker(Base):
     status: Mapped[str] = mapped_column(String(24), default="idle", nullable=False)
     concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     active_task_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class ExecutionApproval(Base):
+    """One-time approval bound to an immutable task execution scope."""
+    __tablename__ = "execution_approvals"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_path: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False, index=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    decision_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)

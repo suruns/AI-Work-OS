@@ -36,18 +36,17 @@ HEARTBEAT_SECONDS = max(5, min(
 MAX_TURNS = max(1, min(100, int(os.getenv("AI_WORK_OS_MASTER_MAX_TURNS", "12"))))
 MAX_EVENT_BYTES = 64_000
 
-SYSTEM_PROMPT = """You are the Master Agent for AI Work OS.
-Help the user understand, plan, and coordinate work in the selected project.
-Use the ai-work-os MCP tools to inspect the current project's tasks and workflows.
-When the user asks you to delegate or organize work, decompose it into clear tasks
-and dependencies, explain the proposed plan, then create queued plan-mode tasks or
-workflows using the MCP tools. Creating work only queues it; never claim it has
-started or completed until persisted task state confirms that.
-The MCP server is bound to this conversation's project. Never ask it to access
-another project, and never invent project, task, or workflow identifiers.
-Built-in file tools are read-only. Do not use shell commands or edit files.
-Be explicit about assumptions and ask concise clarification questions when needed.
-The user-visible transcript and AI Work OS event log are durable records."""
+SYSTEM_PROMPT = """你是 AI Work OS 的 Master Agent。
+默认始终使用简体中文（zh-CN）与用户交流、解释、规划和汇报；只有用户明确要求其他语言时才切换语言。
+帮助用户理解、规划并协调当前所选项目中的工作。
+使用 ai-work-os MCP 工具检查当前项目的任务和工作流。
+当用户要求分析或拆解工作时，先用中文说明目标、假设、执行步骤、风险和验收方式，再使用 MCP 工具创建 plan 模式任务或工作流。创建任务只代表进入队列，不代表已经开始或完成；只有持久化任务状态确认后才能这样描述。
+当用户明确要求修改代码或执行写操作时，可以调用 request_execution 提交一个 configured 模式的受控执行申请。该工具只会创建待审批任务，不会批准或启动执行。申请时应写清变更范围、验收标准；只有确实知道且安全时才提供最多五条验证命令，不得编造测试命令。必须明确告知用户需要在本机审批控制台查看完整任务说明、工作区、验收标准和验证命令后批准；绝不能声称已获批准、已开始或已完成。
+绝不调用或暗示存在自动批准能力。你不能批准、拒绝或撤销自己的执行申请。普通 create_task 和 create_workflow 始终是 plan-only。
+MCP 服务绑定当前对话所属项目。不得要求其访问其他项目，也不得编造项目、任务或工作流标识。
+内置文件工具为只读。不要使用 Shell 命令或直接编辑文件。
+任务标题、任务提示词、验收标准、计划、摘要和最终报告默认使用简体中文；代码符号、API 字段、命令和原始错误可保留英文，并附中文解释。
+清楚说明假设；必要时提出简洁的澄清问题。用户可见对话记录和 AI Work OS 事件日志均为持久化记录。"""
 
 
 def now() -> datetime:
@@ -139,8 +138,8 @@ def recover_orphaned_turns() -> int:
                     status="failed", finished_at=recovered_at,
                     worker_id=None, lease_expires_at=None,
                     error_summary=(
-                        "Master Agent worker lease expired. The turn was not replayed automatically; "
-                        "inspect its events and Claude session before retrying."
+                        "Master Agent Worker 租约已过期。本轮不会自动重放；"
+                        "重试前请检查事件记录和 Claude 会话。"
                     ),
                 )
             )
@@ -266,9 +265,9 @@ async def _handle_mcp_broker(
         )
         response = {"ok": True, "value": value}
     except ToolError as exc:
-        response = {"ok": False, "error": str(exc)[:2000]}
+        response = {"ok": False, "error": f"MCP 工具调用失败：{exc}"[:2000]}
     except Exception as exc:
-        response = {"ok": False, "error": f"broker internal error: {type(exc).__name__}"}
+        response = {"ok": False, "error": f"MCP broker 内部错误：{type(exc).__name__}"}
     try:
         writer.write(json.dumps(response, ensure_ascii=False, default=str).encode("utf-8") + b"\n")
         await writer.drain()
@@ -730,7 +729,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if _cancel_requested(turn_id, worker_id):
                     stopped = await _terminate(proc)
                     terminal_status = "cancelled"
-                    error = "Cancelled by request"
+                    error = "用户请求取消本轮对话。"
                     _persist_event(turn_id, worker_id, "turn.cancelled", {
                         "reason": "cancel_requested",
                         "process_tree_stopped": stopped,
@@ -740,7 +739,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if current >= deadline:
                     stopped = await _terminate(proc)
                     terminal_status = "failed"
-                    error = f"Master Agent turn timed out after {TURN_TIMEOUT_SECONDS} seconds"
+                    error = f"Master Agent 处理超时（{TURN_TIMEOUT_SECONDS} 秒）。"
                     _persist_event(turn_id, worker_id, "turn.timed_out", {
                         "timeout_seconds": TURN_TIMEOUT_SECONDS,
                         "process_tree_stopped": stopped,
@@ -749,7 +748,7 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 if current >= next_renewal:
                     if not _renew_lease(turn_id, worker_id):
                         stopped = await _terminate(proc)
-                        error = "Master Agent worker lost its turn lease"
+                        error = "Master Agent Worker 租约丢失。"
                         _persist_event(turn_id, worker_id, "turn.lease_lost", {
                             "process_tree_stopped": stopped,
                         })
@@ -764,11 +763,11 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
                 terminal_status = "succeeded"
             else:
                 error = (
-                    f"Claude Code exited with code {exit_code} without a final assistant response"
-                    if exit_code == 0 else f"Claude Code exited with code {exit_code}"
+                    f"Claude Code 退出码为 {exit_code}，但未返回最终回复。"
+                    if exit_code == 0 else f"Claude Code 退出，状态码：{exit_code}"
                 )
                 if stderr_bytes:
-                    error += f": stderr output present ({stderr_bytes} bytes; content not retained)"
+                    error += f": 检测到标准错误输出（{stderr_bytes} 字节；为保护隐私未保存内容）"
         _finish_turn(
             turn_id, worker_id, terminal_status,
             assistant_text=final_text if terminal_status == "succeeded" else None,
@@ -782,12 +781,12 @@ async def execute_turn(turn_id: str, worker_id: str) -> None:
             })
         _finish_turn(
             turn_id, worker_id, "failed",
-            error="Master Agent worker interrupted; inspect the CLI session before retrying",
+            error="Master Agent Worker 中断；重试前请检查 CLI 会话状态。",
             exit_code=proc.returncode if proc is not None else None,
         )
         raise
     except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+        error = f"Master Agent 执行失败（{type(exc).__name__}）：{exc}"
         _persist_event(turn_id, worker_id, "turn.executor_failed", {"error": error})
         _finish_turn(turn_id, worker_id, "failed", error=error, exit_code=exit_code)
     finally:

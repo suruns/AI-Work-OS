@@ -1,16 +1,37 @@
 # AI Work OS
 
-A control plane around existing coding agents. The first vertical slice targets Claude Code CLI and focuses on durable task records, execution events, logs, and a small HTTP API.
+> **默认语言：简体中文（zh-CN）**。Chat、Dashboard、Master Agent、Worker 面向用户的计划与报告默认使用中文；代码、API 字段、命令和原始错误保留英文标识。
 
-## Status
-Local MVP for a single trusted developer machine. The API and worker are separate processes; SQLite is the task store. Authentication, multi-user isolation, and production deployment hardening are out of scope.
+AI Work OS 是面向 CLI 编程 Agent 的项目级工作控制台，提供持久化对话、任务与工作流编排、执行追踪、产物管理和受控执行审批。
 
-## Requirements
-- Python 3.11+
-- Claude Code CLI installed and authenticated (claude --version, claude auth status)
-- A trusted project directory to use as a workspace
+## 中文快速启动与部署顺序
 
-## Run locally
+在 Linux 本机可信环境运行。首次使用新的 SQLite 数据库时，必须串行启动服务，避免多个进程同时建表：
+
+1. 先启动 API：`uvicorn ai_work_os.api:app --host 127.0.0.1 --port 8000`
+2. 等待健康检查成功：`curl --fail http://127.0.0.1:8000/health`
+3. 再启动 Worker：`python -m ai_work_os.worker`
+4. 最后启动 Master Agent：`python -m ai_work_os.master_agent`
+
+也可以在完成依赖安装后使用一条命令按正确顺序启动三个进程，并在 API 健康检查通过后才启动 Worker / Master Agent：
+
+```bash
+bash scripts/start-local.sh
+```
+
+浏览器打开 `http://127.0.0.1:8000/` 进入聊天界面，`http://127.0.0.1:8000/dashboard` 查看任务、产物和写入审批。
+
+> **安全提醒：** Master Agent 的普通任务创建仍是只读 plan 模式。写入任务必须通过 `request_execution` 提交申请，并由用户在本机 Dashboard 明确批准。当前审批控制面仅适用于可信本机部署，不支持远程身份认证或多用户 RBAC。详见 [Phase 11.5 中文实施说明](docs/phase-11-5-implementation.md)。
+
+## 项目状态
+当前版本面向单一可信开发者的本机试运行环境。API 与 Worker 为独立进程，SQLite 用作任务存储。当前尚未提供用户身份认证、多用户隔离或生产环境加固。
+
+## 环境要求
+- Python 3.11 或更高版本
+- 已安装并完成认证的 Claude Code CLI（可运行 `claude --version`、`claude auth status` 检查）
+- 一个可信的项目目录作为工作区
+
+## 本机启动
 ~~~bash
 python -m venv .venv
 source .venv/bin/activate
@@ -19,33 +40,33 @@ cp .env.example .env
 uvicorn ai_work_os.api:app --reload
 ~~~
 
-In another terminal, start the worker:
+在另一个终端启动 Worker（必须先确认 API 健康检查成功）：
 ~~~bash
 source .venv/bin/activate
 python -m ai_work_os.worker
 ~~~
 
-Create a task:
+创建一个只读任务：
 ~~~bash
 curl -X POST http://127.0.0.1:8000/tasks -H 'content-type: application/json' -d '{"title":"Inspect project","prompt":"Only list files and summarize the project. Do not modify files.","workspace_path":"/absolute/path/to/a/trusted/project"}'
 ~~~
 
-Open http://127.0.0.1:8000/ for the task console and /docs for the API.
+打开 http://127.0.0.1:8000/ 使用对话界面，打开 /dashboard 查看任务控制台，打开 /docs 查看 API。
 
-For the chat-first Master Agent runtime, start a separate process after the API:
+Master Agent 也必须在 API 健康检查成功后再单独启动：
 
 ~~~bash
 source .venv/bin/activate
 python -m ai_work_os.master_agent
 ~~~
 
-The initial Master Agent runtime is read-only (Claude Code plan mode) and disables MCP servers. Project-linked conversations use the project's workspace; unlinked conversations use `AI_WORK_OS_MASTER_WORKSPACE` or a dedicated storage workspace. See [Phase 11.3 runtime notes](docs/phase-11-3-master-agent-runtime.md).
+Master Agent 普通任务创建保持只读（Claude Code plan 模式）。项目对话使用项目工作区；未绑定项目的对话使用 `AI_WORK_OS_MASTER_WORKSPACE` 或专用存储工作区。详见 [Phase 11.3 运行说明](docs/phase-11-3-master-agent-runtime.md)。
 
-## Safety
+## 安全说明
 
 - Phase 10.1 adds an opt-in Linux Bubblewrap execution boundary. It is **off by default** for compatibility; set `AI_WORK_OS_SANDBOX_MODE=bubblewrap` only after local preflight and acceptance. When enabled, missing Bubblewrap, invalid paths, or mount setup errors fail the task before starting the agent; there is no unsandboxed fallback. The Worker must run as a non-root user; the sandbox keeps that host UID/GID and disables nested user namespaces.
 - Bubblewrap defaults to `AI_WORK_OS_SANDBOX_NETWORK=none`. Claude API calls require explicitly choosing `host` networking, which permits outbound network access and carries data-exfiltration risk. Workspace access is enforced by OS mounts: `plan` is read-only; configured/editing tasks are read-write. The task MCP config is mounted read-only by itself; the real home directory, user Claude settings, Worker storage, and database are not mounted. If task artifacts happen to live inside the selected workspace, their directory is overlaid with an empty tmpfs and only the MCP config is separately exposed. Nested host mountpoints inside a workspace are rejected.
-- Claude permission behavior is explicit: `plan` uses `--permission-mode plan`; `configured` uses `--permission-mode acceptEdits`, which allows Claude's native file-edit tools without an interactive approval prompt. This is **not** `bypassPermissions`. Configured mode explicitly removes the Claude `Bash` tool from the available tool set (alongside all MCP tools), because `acceptEdits` may permit workspace-local shell writes. Use native Edit/Write tools for workspace changes. This deliberately means the Agent cannot run shell commands in Configured mode; task verification commands are still launched separately by the Worker inside the same OS sandbox.
+- Claude 权限行为明确：`plan` 使用 `--permission-mode plan`；`configured` 使用 `--permission-mode acceptEdits`，允许 Claude 使用原生文件编辑工具，不需要 CLI 内交互提示。**但 AI Work OS 必须先完成独立的本机审批，Worker 才会启动 configured 任务。** 这不是 `bypassPermissions`。 Configured mode explicitly removes the Claude `Bash` tool from the available tool set (alongside all MCP tools), because `acceptEdits` may permit workspace-local shell writes. Use native Edit/Write tools for workspace changes. This deliberately means the Agent cannot run shell commands in Configured mode; task verification commands are still launched separately by the Worker inside the same OS sandbox.
 - The sandbox creates an ephemeral `/tmp/home` and passes only a small provider/auth environment allowlist to Claude (including `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_AUTH_TOKEN`). Authentication values are passed through the sanitized process environment, not command-line arguments, so they do not appear in process command-line listings or policy events. Credentials stored only in the real `~/.claude` login directory are intentionally not mounted; use supported service environment credentials for sandbox runs. External verification executables outside the workspace/system paths require explicit `AI_WORK_OS_SANDBOX_RUNTIME_PATHS` entries separated by the host path separator. Git snapshot commands also run inside a read-only sandbox; for snapshots to remain available, the selected workspace must itself be the Git repository root and its Git metadata must be inside the workspace.
 - Bubblewrap is Linux-only and is not a kernel-exploit boundary. Network host mode can exfiltrate data readable inside the sandbox, and read-write mode permits arbitrary changes within the selected workspace. The Worker, database, artifact collection, and Git snapshots remain host-side.
 - Never run this service against untrusted workspaces.
@@ -57,7 +78,7 @@ The initial Master Agent runtime is read-only (Claude Code plan mode) and disabl
 - This MCP policy is a Claude Code CLI configuration boundary, not an OS sandbox. It does not isolate filesystem access, environment secrets, built-in tools, or arbitrary host processes. Keep the worker on trusted hosts and do not treat it as protection against a compromised CLI or execution outside this MCP boundary.
 - CLI output is stored under storage/tasks/<task-id>/; it may contain source code or secrets. Protect this directory.
 - Bind the API to localhost unless authentication and network controls have been configured.
-- New tasks default to Claude Code `plan` permission mode (read-only). Choose "Use project/local Claude Code settings" when the task is expected to edit files; this uses project and project-local permission settings while excluding user settings by default. Set `AI_WORK_OS_CLAUDE_SETTING_SOURCES=user,project,local` only when you intentionally want the user's global settings loaded.
+- 新任务默认使用 Claude Code `plan` 只读模式。需要修改文件时，任务必须使用 `configured` 模式并通过本机 Dashboard 明确审批；未获审批的任务不会被 Worker 领取。该模式使用项目级与项目本地权限配置，默认排除用户级设置。
 - Plan mode is a Claude Code permission control, not an OS-level sandbox. Continue to use trusted workspaces and review agent activity.
 
 ## Initial API
@@ -74,7 +95,8 @@ The initial Master Agent runtime is read-only (Claude Code plan mode) and disabl
 - `GET /health`
 - `GET /stats`
 - `GET /insights?period_days=30` — read-only task/workflow timing, success, throughput, reported Claude usage/cost, and current worker snapshot
-- `POST /tasks` (optional `project_id`)
+- `POST /tasks` (optional `project_id`；configured 写任务必须绑定项目并申请审批)
+- `/execution-approvals` — 查询审批，提交申请、批准、拒绝和撤销；仅允许本机 loopback 访问
 - `GET /tasks` (optional `project_id` filter)
 - `GET /tasks/{task_id}`
 - `GET /tasks/{task_id}/events`

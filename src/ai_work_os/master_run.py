@@ -439,6 +439,51 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
             .where(MasterRunTask.master_run_id == run_id, Task.project_id == project_id)
             .order_by(MasterRunTask.created_at, MasterRunTask.id)
         ).all()
+        task_ids = [task.id for _, task, _, _ in rows]
+        evidence_by_task: dict[str, dict[str, Any]] = {}
+        if task_ids:
+            event_rows = db.execute(
+                select(TaskEvent.task_id, TaskEvent.event_type, TaskEvent.payload)
+                .where(
+                    TaskEvent.task_id.in_(task_ids),
+                    TaskEvent.event_type.in_({
+                        "workspace.changes_reported", "verification.finished", "executor.finished",
+                    }),
+                )
+                .order_by(TaskEvent.id)
+            ).all()
+            for task_id, event_type, payload in event_rows:
+                payload = payload if isinstance(payload, dict) else {}
+                evidence = evidence_by_task.setdefault(task_id, {})
+                if event_type == "workspace.changes_reported":
+                    evidence["workspace_changes"] = {
+                        key: payload.get(key) for key in (
+                            "available", "changed_file_count", "report_path",
+                            "report_written", "preexisting_file_count", "report_write_error",
+                        ) if key in payload
+                    }
+                elif event_type == "verification.finished":
+                    commands = payload.get("commands", [])
+                    commands = commands if isinstance(commands, list) else []
+                    evidence["verification"] = {
+                        "status": payload.get("status"),
+                        "command_count": len(commands),
+                        "passed_count": sum(
+                            item.get("exit_code") == 0 and not item.get("timed_out")
+                            for item in commands if isinstance(item, dict)
+                        ),
+                        "failed_count": sum(
+                            item.get("exit_code") != 0 or item.get("timed_out")
+                            for item in commands if isinstance(item, dict)
+                        ),
+                    }
+                elif event_type == "executor.finished":
+                    evidence["execution"] = {
+                        key: payload.get(key) for key in (
+                            "status", "exit_code", "terminal_reason",
+                            "output_complete", "error_summary", "attempt", "max_attempts",
+                        ) if key in payload
+                    }
         return [{
             "task_id": task.id, "title": task.title, "status": task.status,
             "required": bool(link.required), "verification_status": task.verification_status,
@@ -446,6 +491,7 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
             "acceptance_criteria": task.acceptance_criteria,
             "verification_commands": list(task.verification_commands or []),
             "error_summary": task.error_summary, "workflow_id": task.workflow_id,
+            "evidence": evidence_by_task.get(task.id, {}),
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "finished_at": task.finished_at.isoformat() if task.finished_at else None,
         } for link, task, approval_status, approval_expires_at in rows]

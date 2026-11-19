@@ -505,6 +505,8 @@ def test_workflow_and_dag_tasks_are_linked_to_active_goal(monkeypatch, tmp_path)
                  "depends_on": ["build"], "verification_commands": ["python -m pytest -q"]},
             ],
         }, request_id="goal-dag-create")
+        goal = mcp.call_tool("get_goal", {})
+        assert goal["workflows"][0]["workflow_id"] == workflow["id"]
         with factory() as db:
             assert db.scalar(select(MasterRunWorkflow).where(
                 MasterRunWorkflow.master_run_id == started["id"],

@@ -430,6 +430,30 @@ def link_workflow(run_id: str, conversation_id: str, project_id: str, workflow_i
             db.commit()
 
 
+def list_run_workflows(run_id: str, conversation_id: str, project_id: str) -> list[dict]:
+    with SessionLocal() as db:
+        _assert_scope(db, conversation_id, project_id)
+        run = db.get(MasterRun, run_id)
+        if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
+            raise MasterRunError("当前对话中不存在该目标。")
+        rows = db.execute(
+            select(MasterRunWorkflow, Workflow)
+            .join(Workflow, Workflow.id == MasterRunWorkflow.workflow_id)
+            .where(
+                MasterRunWorkflow.master_run_id == run_id,
+                Workflow.project_id == project_id,
+            )
+            .order_by(MasterRunWorkflow.created_at, MasterRunWorkflow.id)
+        ).all()
+        return [{
+            "workflow_id": workflow.id,
+            "title": workflow.title,
+            "status": workflow.status,
+            "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
+            "finished_at": workflow.finished_at.isoformat() if workflow.finished_at else None,
+        } for _, workflow in rows]
+
+
 def _effective_approval_status(status: str | None, expires_at) -> str | None:
     if status != "pending" or expires_at is None:
         return status

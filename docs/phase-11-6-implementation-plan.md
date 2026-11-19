@@ -17,14 +17,14 @@
 
 ## 开发任务
 
-### 11.6.1 目标编排数据层
+### 11.6.1 目标编排数据层 <状态：实现初版完成，CI 已通过>
 - 新增 MasterRun、MasterRunTask、MasterRunWorkflow（或经实现审查后采用等价规范化关联模型）。
 - 字段：conversation/project 作用域、goal、status、结构化 plan、checkpoint、step_count/max_steps、deadline、时间戳。
 - 添加数据库约束、外键、索引和 additive 迁移；不得重建/清空现有数据。
 - 服务层集中执行状态转换；禁止模型直接写终态成功。
 - 测试跨项目关联拒绝、非法状态转换、并发/重复更新和旧库升级。
 
-### 11.6.2 编排控制面
+### 11.6.2 编排控制面 <状态：MCP 核心工具已接入，持续集成验证中>
 - 增加读取当前 MasterRun、受限保存计划/checkpoint、读取任务证据的 MCP 工具。
 - 所有写调用绑定 conversation、project、turn，校验实体归属。
 - 写工具具备 request-id 幂等保护；参数不一致时拒绝。
@@ -45,7 +45,7 @@
 - 恢复先查询现有 task/approval/event，再决定下一步，避免重复副作用。
 - 取消目标要协调关联任务取消并等待其真实终态。
 
-### 11.6.5 Chat 目标进度体验
+### 11.6.5 Chat 目标进度体验 <状态：会话目标状态 API 初版已接入；前端展示待开发>
 - 中文显示目标名称、状态、阶段、任务计数、待审批/待输入事项。
 - 对话刷新后从 API 持久化状态恢复。
 - “继续”只恢复当前 run，不创建重复 run。
@@ -65,6 +65,17 @@
 - 故障注入：CLI 退出、Worker 崩溃/lease 过期、审批拒绝/撤销/过期、验证失败、取消。
 - 回归 11.2–11.5 所有会话、MCP、DAG、审批、sandbox 和 worker 测试。
 - 最终一键验收退出码 0；验收期间不操作线上服务。
+
+
+## 当前已提交实现
+
+- `MasterRun`、`MasterRunTask`、`MasterRunWorkflow` 数据模型及服务层。
+- 目标创建/恢复、计划与 checkpoint 保存、状态转换、步数/时限预算和跨项目关联保护。
+- MCP 工具 `start_goal`、`get_goal`、`update_goal`；目标写入要求 JSON-RPC request id，并记录幂等调用。
+- 目标活动期间通过 MCP 创建的 Task/Workflow 自动关联到 MasterRun；plan 任务支持显式 verification commands。
+- `get_goal` 提供按任务状态和审批状态计算的 `derived_status`，包括审批拒绝/撤销/过期阻塞。
+- `GET /conversations/{conversation_id}/master-run` 提供 Chat 刷新恢复所需的目标、任务和进度摘要，并可读取最近一个已结束目标。
+- 已新增目标状态、MCP 生命周期、任务自动关联和 API 恢复测试；最新提交 CI 正在运行，尚未将这些新测试全部标记为通过。
 
 ## 验收矩阵
 

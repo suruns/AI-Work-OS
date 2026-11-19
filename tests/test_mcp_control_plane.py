@@ -457,7 +457,7 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
             row.status = "running"
             db.commit()
         result = mcp.call_tool("cancel_goal", {}, request_id="running-cancel-goal")
-        assert result["status"] == "cancelled"
+        assert result["status"] == "cancelling"
         assert result["cancellation_requested_tasks"] == 1
         with factory() as db:
             row = db.get(Task, task["id"])

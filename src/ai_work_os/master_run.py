@@ -391,8 +391,8 @@ def link_task(run_id: str, conversation_id: str, project_id: str, task_id: str, 
         task = db.get(Task, task_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
-        if run.status in TERMINAL_STATUSES:
-            raise MasterRunError("已结束的目标不能再关联任务。")
+        if run.status in TERMINAL_STATUSES or run.status == "cancelling":
+            raise MasterRunError("已结束或正在取消的目标不能再关联任务。")
         if not isinstance(required, bool):
             raise MasterRunError("required 必须是布尔值。")
         if task is None or task.project_id != project_id:
@@ -412,8 +412,8 @@ def link_workflow(run_id: str, conversation_id: str, project_id: str, workflow_i
         workflow = db.get(Workflow, workflow_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
-        if run.status in TERMINAL_STATUSES:
-            raise MasterRunError("已结束的目标不能再关联工作流。")
+        if run.status in TERMINAL_STATUSES or run.status == "cancelling":
+            raise MasterRunError("已结束或正在取消的目标不能再关联工作流。")
         if workflow is None or workflow.project_id != project_id:
             raise MasterRunError("工作流不属于当前项目。")
         existing = db.scalar(select(MasterRunWorkflow).where(

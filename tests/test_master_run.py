@@ -173,6 +173,10 @@ def test_budget_extension_resumes_a_blocked_goal_only_within_limits(monkeypatch,
             db.add(run)
             db.commit()
             run_id, conversation_id, project_id = run.id, conversation.id, project.id
+        with pytest.raises(run_service.MasterRunError, match="必须明确提高 max_steps"):
+            run_service.extend_run_budget(
+                run_id, conversation_id, project_id, deadline_hours=2,
+            )
         result = run_service.extend_run_budget(
             run_id, conversation_id, project_id,
             max_steps=30, deadline_hours=2,

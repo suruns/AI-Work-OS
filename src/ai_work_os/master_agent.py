@@ -173,6 +173,7 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
             .where(MasterRun.active_key.is_not(None))
             .order_by(MasterRun.updated_at, MasterRun.id)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         ))
         for run in runs:
             if run.status in {"waiting_input", "succeeded", "failed", "cancelled"}:

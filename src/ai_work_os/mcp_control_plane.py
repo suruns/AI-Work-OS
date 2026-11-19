@@ -448,10 +448,12 @@ def call_tool(
             if active is None:
                 return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
             tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id)
+            workflows = goal_service.list_run_workflows(active.id, turn.conversation_id, project.id)
             return {
                 **goal_service.get_run(active.id, turn.conversation_id, project.id),
                 "derived_status": goal_service.reported_run_status(active, tasks),
                 "tasks": tasks,
+                "workflows": workflows,
             }
 
         if name == "get_project_overview":

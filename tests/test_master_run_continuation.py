@@ -8,7 +8,7 @@ from ai_work_os import master_agent, master_run
 from ai_work_os.db import Base
 from ai_work_os.models import (
     AgentTurn, AgentTurnEvent, Conversation, ConversationMessage,
-    ExecutionApproval, MasterRun, MasterRunTask, Project, Task, utcnow,
+    ExecutionApproval, MasterRun, MasterRunTask, MasterRunWorkflow, Project, Task, Workflow, utcnow,
 )
 
 
@@ -200,7 +200,13 @@ def test_cancelling_goal_stays_active_until_running_task_reaches_terminal(monkey
         with factory() as db:
             task = db.get(Task, task_id)
             task.status = "running"
+            workflow = Workflow(project_id=project_id, title="取消一致性工作流", status="running")
+            db.add(workflow)
+            db.flush()
+            task.workflow_id = workflow.id
+            db.add(MasterRunWorkflow(master_run_id=run_id, workflow_id=workflow.id))
             db.commit()
+            workflow_id = workflow.id
         result = master_run.cancel_run(
             run_id, conversation_id, project_id, reason="test cancellation",
         )
@@ -209,6 +215,7 @@ def test_cancelling_goal_stays_active_until_running_task_reaches_terminal(monkey
         with factory() as db:
             assert db.get(MasterRun, run_id).active_key == conversation_id
             assert db.get(Task, task_id).cancel_requested == 1
+            assert db.get(Workflow, workflow_id).status == "running"
         assert master_agent.enqueue_goal_continuations() == 0
         with factory() as db:
             db.get(Task, task_id).status = "cancelled"
@@ -219,5 +226,8 @@ def test_cancelling_goal_stays_active_until_running_task_reaches_terminal(monkey
             assert run.status == "cancelled"
             assert run.active_key is None
             assert run.finished_at is not None
+            workflow = db.get(Workflow, workflow_id)
+            assert workflow.status == "cancelled"
+            assert workflow.finished_at == run.finished_at
     finally:
         engine.dispose()

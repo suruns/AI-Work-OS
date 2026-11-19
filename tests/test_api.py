@@ -169,7 +169,7 @@ def test_dashboard_is_served():
     assert "workflowDetailToken" in response.text
     assert 'id="master-runs"' in response.text
     assert "renderMasterRuns" in response.text
-    assert '/master-runs?limit=30' in response.text
+    assert '/master-runs?limit=10' in response.text
     assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
 
 

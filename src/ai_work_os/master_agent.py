@@ -174,7 +174,7 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
             .limit(limit)
         ))
         for run in runs:
-            if run.status in {"waiting_input", "waiting_approval", "succeeded", "failed", "cancelled"}:
+            if run.status in {"waiting_input", "succeeded", "failed", "cancelled"}:
                 continue
             stop_reason = (run.checkpoint or {}).get("stop_reason")
             if stop_reason in {"deadline_exceeded", "step_budget_exceeded"}:

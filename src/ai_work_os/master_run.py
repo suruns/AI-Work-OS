@@ -220,8 +220,8 @@ def extend_run_budget(
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
-        if run.status in TERMINAL_STATUSES:
-            raise MasterRunError("已结束的目标不能扩展预算。")
+        if run.status in TERMINAL_STATUSES or run.status == "cancelling":
+            raise MasterRunError("已结束或正在取消的目标不能扩展预算。")
         if max_steps is not None:
             if max_steps <= run.max_steps or max_steps <= run.step_count:
                 raise MasterRunError("新的 max_steps 必须大于当前上限和已用步骤数。")

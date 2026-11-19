@@ -167,7 +167,7 @@ def test_budget_extension_resumes_a_blocked_goal_only_within_limits(monkeypatch,
             run = MasterRun(
                 conversation_id=conversation.id, project_id=project.id,
                 goal="受限目标", status="blocked", active_key=conversation.id,
-                plan={}, checkpoint={"stop_reason": "step_budget_exceeded"},
+                plan={}, checkpoint={"stop_reason": "step_budget_exceeded", "continuation_signature": "stable-signature"},
                 step_count=20, max_steps=20, deadline_at=utcnow(),
             )
             db.add(run)
@@ -184,6 +184,11 @@ def test_budget_extension_resumes_a_blocked_goal_only_within_limits(monkeypatch,
         assert result["status"] == "running"
         assert result["max_steps"] == 30
         assert "stop_reason" not in result["checkpoint"]
+        updated = run_service.update_plan_checkpoint(
+            run_id, conversation_id, project_id, checkpoint={"last_step": "inspect"},
+        )
+        assert updated["checkpoint"]["continuation_signature"] == "stable-signature"
+        assert updated["checkpoint"]["last_step"] == "inspect"
         with pytest.raises(run_service.MasterRunError, match="新的 max_steps"):
             run_service.extend_run_budget(
                 run_id, conversation_id, project_id, max_steps=30,

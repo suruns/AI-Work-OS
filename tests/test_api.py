@@ -65,6 +65,14 @@ def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_pa
     assert payload["progress"]["queued"] == 1
     assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
 
+    listing = client.get(f"/projects/{project_id}/master-runs")
+    assert listing.status_code == 200
+    assert listing.json()[0]["id"] == run["id"]
+    detail = client.get(f"/projects/{project_id}/master-runs/{run['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["tasks"][0]["verification_commands"] == ["python -m pytest -q"]
+    assert detail.json()["evidence_summary"]["unverified_tasks"] == 1
+
 
 def test_conversation_master_run_endpoint_keeps_latest_completed_goal_visible(tmp_path):
     project_response = client.post("/projects", json={

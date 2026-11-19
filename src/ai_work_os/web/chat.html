@@ -54,6 +54,7 @@ function renderGoalProgress(){
   ["待审批",Number(progress.waiting_approval||0)],["阻塞",Number(progress.blocked||0)]
  ].filter(item=>item[1]>0);
  const status=goalRun.derived_status||goalRun.status;
+ const workflowDetails=(goalRun.workflows||[]).map(workflow=>'<div class="goal-task"><span class="goal-task-name">工作流：'+esc(workflow.title||workflow.workflow_id)+'</span><span class="goal-task-state">'+esc(statusZh(workflow.status))+'</span></div>').join("");
  const taskDetails=tasks.slice(0,6).map(task=>{
   const verification=task.verification_status?(" · 验证："+verificationZh(task.verification_status)):"";
   const approval=task.approval_status?(" · 审批："+statusZh(task.approval_status)):"";
@@ -65,7 +66,7 @@ function renderGoalProgress(){
  }).join("");
  root.classList.add("visible");
  const canCancel=!["succeeded","failed","cancelled","cancelling"].includes(goalRun.status);
- root.innerHTML='<div class="goal-head"><div><div class="goal-title">'+esc(goalRun.goal||"当前工作目标")+'</div><div class="goal-meta">目标状态：'+esc(statusZh(status))+' · 步骤 '+esc(goalRun.step_count)+' / '+esc(goalRun.max_steps)+'</div></div><div class="goal-actions"><strong>'+percent+'%</strong>'+(canCancel?'<button id="cancel-goal" class="goal-cancel" type="button">取消目标</button>':"")+'</div></div><div class="goal-track"><div class="goal-fill" style="width:'+percent+'%"></div></div><div class="goal-task-list">'+(counts.length?counts.map(item=>'<span>'+esc(item[0])+' '+esc(item[1])+'</span>').join(""):'<span>尚未关联任务</span>')+'</div>'+(taskDetails?'<div class="goal-task-details">'+taskDetails+'</div>':"");
+ root.innerHTML='<div class="goal-head"><div><div class="goal-title">'+esc(goalRun.goal||"当前工作目标")+'</div><div class="goal-meta">目标状态：'+esc(statusZh(status))+' · 步骤 '+esc(goalRun.step_count)+' / '+esc(goalRun.max_steps)+'</div></div><div class="goal-actions"><strong>'+percent+'%</strong>'+(canCancel?'<button id="cancel-goal" class="goal-cancel" type="button">取消目标</button>':"")+'</div></div><div class="goal-track"><div class="goal-fill" style="width:'+percent+'%"></div></div><div class="goal-task-list">'+(counts.length?counts.map(item=>'<span>'+esc(item[0])+' '+esc(item[1])+'</span>').join(""):'<span>尚未关联任务</span>')+'</div>'+((workflowDetails||taskDetails)?'<div class="goal-task-details">'+workflowDetails+taskDetails+'</div>':"");
  const cancelButton=$("cancel-goal");
  if(cancelButton)cancelButton.addEventListener("click",async()=>{
   if(!activeConversationId||!confirm("确定取消当前目标及其关联的排队/运行任务吗？"))return;

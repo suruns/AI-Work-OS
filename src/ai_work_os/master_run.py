@@ -413,6 +413,14 @@ def link_workflow(run_id: str, conversation_id: str, project_id: str, workflow_i
             db.commit()
 
 
+def _effective_approval_status(status: str | None, expires_at) -> str | None:
+    if status != "pending" or expires_at is None:
+        return status
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return "expired" if expires_at <= utcnow() else status
+
+
 def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[dict]:
     with SessionLocal() as db:
         _assert_scope(db, conversation_id, project_id)
@@ -429,10 +437,7 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
         return [{
             "task_id": task.id, "title": task.title, "status": task.status,
             "required": bool(link.required), "verification_status": task.verification_status,
-            "approval_status": (
-                "expired" if approval_status == "pending" and approval_expires_at is not None
-                and approval_expires_at <= utcnow() else approval_status
-            ),
+            "approval_status": _effective_approval_status(approval_status, approval_expires_at),
             "acceptance_criteria": task.acceptance_criteria,
             "verification_commands": list(task.verification_commands or []),
             "error_summary": task.error_summary, "workflow_id": task.workflow_id,

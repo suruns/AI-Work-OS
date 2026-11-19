@@ -65,7 +65,7 @@ def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_pa
     assert payload["progress"]["queued"] == 1
     assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
 
-    global_listing = client.get("/master-runs?limit=30")
+    global_listing = client.get("/master-runs?limit=10")
     assert global_listing.status_code == 200
     assert any(item["id"] == run["id"] for item in global_listing.json())
 

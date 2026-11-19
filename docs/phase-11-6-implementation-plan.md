@@ -77,6 +77,7 @@
 - `get_goal` 提供按任务状态和审批状态计算的 `derived_status`，包括审批拒绝/撤销/过期阻塞。
 - `GET /conversations/{conversation_id}/master-run` 提供 Chat 刷新恢复所需的目标、任务和进度摘要，并可读取最近一个已结束目标；进度只将验证通过的任务计入完成数。
 - `GET /projects/{project_id}/master-runs` 与 `GET /projects/{project_id}/master-runs/{run_id}` 提供项目级目标列表和详情；详情含工作流、任务、审批状态及脱敏证据汇总。
+- `GET /master-runs` 为 Dashboard 提供最近目标概览；Dashboard 显示最近 10 个目标及项目、状态、已验证任务比例和预算进度。
 - Master Agent 主循环自动检测必需任务的终态变化，按任务状态签名排入隐藏续跑轮次；审批待处理/拒绝/撤销/过期、等待用户输入和预算耗尽均阻止自动续跑。
 - 目标支持显式取消：取消排队任务、请求停止运行任务、撤销未开始执行的审批；Chat 提供二次确认的取消入口。
 - 支持用户明确授权后扩展目标步骤/时限预算；系统不会自行放大预算。

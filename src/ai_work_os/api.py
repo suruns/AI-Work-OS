@@ -551,7 +551,7 @@ def get_conversation_master_run(conversation_id: str) -> dict:
         tasks = goal_service.list_run_tasks(run.id, conversation.id, conversation.project_id)
         return {
             **goal_service.get_run(run.id, conversation.id, conversation.project_id),
-            "derived_status": goal_service.derive_run_status(tasks),
+            "derived_status": goal_service.reported_run_status(run, tasks),
             "tasks": tasks,
             "progress": {
                 "required": sum(bool(item["required"]) for item in tasks),

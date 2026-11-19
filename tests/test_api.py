@@ -3367,6 +3367,7 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert "正在停止关联任务" in html
     assert "已请求停止" in html
     assert "goal-task-details" in html
+    assert "workflowDetails" in html
     assert "verificationEvidence" in html
     assert "workspace_changes" in html
     assert 'id="cancel-goal"' in html

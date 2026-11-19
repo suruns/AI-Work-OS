@@ -57,10 +57,11 @@ function renderGoalProgress(){
  const taskDetails=tasks.slice(0,6).map(task=>{
   const verification=task.verification_status?(" · 验证："+verificationZh(task.verification_status)):"";
   const approval=task.approval_status?(" · 审批："+statusZh(task.approval_status)):"";
+  const cancellation=task.cancel_requested?" · 已请求停止":"";
   const evidence=task.evidence||{};
   const verificationEvidence=evidence.verification?(" · 检查 "+(evidence.verification.passed_count||0)+"/"+(evidence.verification.command_count||0)):"";
   const changed=evidence.workspace_changes&&evidence.workspace_changes.available?(" · 文件变更 "+(evidence.workspace_changes.changed_file_count||0)):"";
-  return '<div class="goal-task"><span class="goal-task-name">'+esc(task.title||task.task_id)+'</span><span class="goal-task-state">'+esc(statusZh(task.status))+esc(verification)+esc(approval)+esc(verificationEvidence)+esc(changed)+'</span></div>';
+  return '<div class="goal-task"><span class="goal-task-name">'+esc(task.title||task.task_id)+'</span><span class="goal-task-state">'+esc(statusZh(task.status))+esc(verification)+esc(approval)+esc(cancellation)+esc(verificationEvidence)+esc(changed)+'</span></div>';
  }).join("");
  root.classList.add("visible");
  const canCancel=!["succeeded","failed","cancelled","cancelling"].includes(goalRun.status);

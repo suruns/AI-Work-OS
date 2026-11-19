@@ -461,6 +461,14 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
         result = mcp.call_tool("cancel_goal", {}, request_id="running-cancel-goal")
         assert result["status"] == "cancelling"
         assert result["cancellation_requested_tasks"] == 1
+        try:
+            mcp.call_tool("create_task", {
+                "title": "取消后不应创建", "prompt": "测试取消状态保护",
+            }, request_id="running-cancel-create-task")
+        except mcp.ToolError as exc:
+            assert "正在等待关联任务停止" in str(exc)
+        else:
+            raise AssertionError("cancelling goal must reject new tasks")
         with factory() as db:
             row = db.get(Task, task_id)
             assert row.status == "running"

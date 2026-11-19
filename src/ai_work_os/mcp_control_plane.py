@@ -391,7 +391,8 @@ def call_tool(
 
         project = _project(db, project_id)
         if name == "get_goal":
-            from .master_run import MasterRunError, get_run, list_run_tasks
+            from . import master_run as goal_service
+            goal_service.SessionLocal = SessionLocal
             turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
             if turn is None:
                 raise ToolError("目标查询必须绑定有效的 Master Agent 轮次。")

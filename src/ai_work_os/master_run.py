@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from .db import SessionLocal
 from .models import (
     Conversation, ExecutionApproval, MasterRun, MasterRunTask, MasterRunWorkflow,
-    Project, Task, Workflow, utcnow,
+    Project, Task, TaskEvent, Workflow, utcnow,
 )
 
 ACTIVE_STATUSES = {
@@ -241,6 +241,90 @@ def transition_run(
         else:
             db.flush()
         return _summary(run)
+
+
+def cancel_run(
+    run_id: str, conversation_id: str, project_id: str, *,
+    reason: str | None = None, session=None,
+) -> dict:
+    """Cancel a goal and request cancellation of every linked queued/running task."""
+    timestamp = utcnow()
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
+        _assert_scope(db, conversation_id, project_id)
+        run = db.get(MasterRun, run_id)
+        if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
+            raise MasterRunError("当前对话中不存在该目标。")
+        if run.status in {"succeeded", "failed"}:
+            raise MasterRunError("已完成或失败的目标不能取消。")
+        if run.status == "cancelled":
+            return _summary(run)
+
+        workflow_ids = list(db.scalars(select(MasterRunWorkflow.workflow_id).where(
+            MasterRunWorkflow.master_run_id == run_id,
+        )))
+        for workflow_id in workflow_ids:
+            workflow = db.get(Workflow, workflow_id)
+            if workflow is not None and workflow.status not in TERMINAL_STATUSES:
+                workflow.status = "cancelled"
+                workflow.finished_at = timestamp
+
+        task_ids = list(db.scalars(select(MasterRunTask.task_id).where(
+            MasterRunTask.master_run_id == run_id,
+        )))
+        cancelled_tasks = 0
+        cancellation_requested = 0
+        for task_id in task_ids:
+            task = db.get(Task, task_id)
+            if task is None or task.project_id != project_id:
+                continue
+            if task.status == "queued":
+                task.status = "cancelled"
+                task.cancel_requested = True
+                task.finished_at = timestamp
+                task.error_summary = "MasterRun cancelled before task execution"
+                approval = db.scalar(select(ExecutionApproval).where(
+                    ExecutionApproval.task_id == task.id,
+                ))
+                if approval is not None and approval.status in {"pending", "approved"}:
+                    approval.status = "revoked"
+                    approval.decided_at = timestamp
+                    approval.decision_source = "task_state"
+                    approval.decision_note = "所属目标在任务开始执行前已取消。"
+                    db.add(TaskEvent(task_id=task.id, event_type="execution.approval_revoked", payload={
+                        "approval_id": approval.id, "reason": "master_run_cancelled_before_start",
+                    }))
+                db.add(TaskEvent(task_id=task.id, event_type="task.cancelled", payload={
+                    "status": "cancelled", "action": "cancel",
+                    "reason": "master_run_cancelled", "cancelled_before_start": True,
+                    "control_surface": "master_run",
+                }))
+                cancelled_tasks += 1
+            elif task.status == "running" and not task.cancel_requested:
+                task.cancel_requested = True
+                db.add(TaskEvent(task_id=task.id, event_type="task.cancel_requested", payload={
+                    "status": "requested", "action": "cancel",
+                    "reason": "master_run_cancelled", "control_surface": "master_run",
+                }))
+                cancellation_requested += 1
+
+        run.status = "cancelled"
+        run.finished_at = timestamp
+        run.updated_at = timestamp
+        run.active_key = None
+        run.checkpoint = {
+            **(run.checkpoint or {}),
+            "cancelled_at": timestamp.isoformat(),
+            "cancel_reason": (reason or "user_requested")[:2000],
+            "cancelled_task_count": cancelled_tasks,
+            "cancellation_requested_task_count": cancellation_requested,
+        }
+        if session is None:
+            db.commit()
+            db.refresh(run)
+        else:
+            db.flush()
+        return {**_summary(run), "cancelled_tasks": cancelled_tasks,
+                "cancellation_requested_tasks": cancellation_requested}
 
 
 def link_task(run_id: str, conversation_id: str, project_id: str, task_id: str, *, required: bool = True) -> None:

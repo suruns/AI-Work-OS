@@ -555,7 +555,11 @@ def get_conversation_master_run(conversation_id: str) -> dict:
             "tasks": tasks,
             "progress": {
                 "required": sum(bool(item["required"]) for item in tasks),
-                "completed": sum(bool(item["required"]) and item["status"] == "succeeded" for item in tasks),
+                "completed": sum(
+                    bool(item["required"]) and item["status"] == "succeeded"
+                    and item.get("verification_status") in {"passed", "not_required"}
+                    for item in tasks
+                ),
                 "running": sum(bool(item["required"]) and item["status"] == "running" for item in tasks),
                 "queued": sum(bool(item["required"]) and item["status"] == "queued" for item in tasks),
                 "waiting_approval": sum(bool(item["required"]) and item.get("approval_status") == "pending" for item in tasks),

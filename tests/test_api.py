@@ -66,6 +66,36 @@ def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_pa
     assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
 
 
+def test_conversation_master_run_cancel_endpoint_cancels_queued_tasks(tmp_path):
+    project_response = client.post("/projects", json={
+        "name": "Goal cancel project", "slug": f"goal-cancel-{uuid4().hex[:8]}",
+        "workspace_path": str(tmp_path),
+    })
+    project_id = project_response.json()["id"]
+    conversation_response = client.post("/conversations", json={
+        "project_id": project_id, "title": "Goal cancellation",
+    })
+    conversation_id = conversation_response.json()["id"]
+    from ai_work_os.master_run import create_or_resume_run, link_task
+    run = create_or_resume_run(conversation_id, project_id, "取消关联任务")
+    task_response = client.post("/tasks", json={
+        "project_id": project_id, "title": "待取消任务",
+        "prompt": "只读检查", "workspace_path": str(tmp_path),
+    })
+    task_id = task_response.json()["id"]
+    link_task(run["id"], conversation_id, project_id, task_id)
+
+    response = client.post(
+        f"/conversations/{conversation_id}/master-run/cancel",
+        json={"reason": "用户主动取消"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["cancelled_tasks"] == 1
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "cancelled"
+
+
 def test_dashboard_task_selection_is_scoped_to_task_rows():
     response = client.get("/dashboard")
     assert response.status_code == 200

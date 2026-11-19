@@ -257,7 +257,7 @@ def transition_run(
             raise MasterRunError("当前对话中不存在该目标。")
         if status == "succeeded":
             evidence_rows = db.execute(
-                select(MasterRunTask, Task, ExecutionApproval.status)
+                select(MasterRunTask, Task, ExecutionApproval.status, ExecutionApproval.expires_at)
                 .join(Task, Task.id == MasterRunTask.task_id)
                 .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
                 .where(MasterRunTask.master_run_id == run_id, Task.project_id == project_id)
@@ -429,13 +429,16 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
         return [{
             "task_id": task.id, "title": task.title, "status": task.status,
             "required": bool(link.required), "verification_status": task.verification_status,
-            "approval_status": approval_status,
+            "approval_status": (
+                "expired" if approval_status == "pending" and approval_expires_at is not None
+                and approval_expires_at <= utcnow() else approval_status
+            ),
             "acceptance_criteria": task.acceptance_criteria,
             "verification_commands": list(task.verification_commands or []),
             "error_summary": task.error_summary, "workflow_id": task.workflow_id,
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "finished_at": task.finished_at.isoformat() if task.finished_at else None,
-        } for link, task, approval_status in rows]
+        } for link, task, approval_status, approval_expires_at in rows]
 
 
 def reported_run_status(run: MasterRun, task_rows: list[dict]) -> str:

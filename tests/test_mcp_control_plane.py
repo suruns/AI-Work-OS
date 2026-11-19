@@ -487,3 +487,37 @@ def test_cancel_goal_revokes_pending_execution_approval(monkeypatch, tmp_path):
             assert approval.decision_source == "task_state"
     finally:
         engine.dispose()
+
+
+def test_workflow_and_dag_tasks_are_linked_to_active_goal(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "交付一个完整功能"},
+            request_id="goal-dag-start",
+        )
+        workflow = mcp.call_tool("create_workflow", {
+            "title": "功能交付 DAG",
+            "tasks": [
+                {"key": "inspect", "title": "检查", "prompt": "检查现状"},
+                {"key": "build", "title": "实现", "prompt": "实现功能", "depends_on": ["inspect"]},
+                {"key": "verify", "title": "验证", "prompt": "验证功能",
+                 "depends_on": ["build"], "verification_commands": ["python -m pytest -q"]},
+            ],
+        }, request_id="goal-dag-create")
+        with factory() as db:
+            assert db.scalar(select(MasterRunWorkflow).where(
+                MasterRunWorkflow.master_run_id == started["id"],
+                MasterRunWorkflow.workflow_id == workflow["id"],
+            )) is not None
+            links = list(db.scalars(select(MasterRunTask).where(
+                MasterRunTask.master_run_id == started["id"],
+            )))
+            assert len(links) == 3
+            verify = db.get(Task, next(
+                link.task_id for link in links
+                if db.get(Task, link.task_id).title == "验证"
+            ))
+            assert verify.verification_commands == ["python -m pytest -q"]
+    finally:
+        engine.dispose()

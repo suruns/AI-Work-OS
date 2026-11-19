@@ -188,7 +188,7 @@ def update_plan_checkpoint(
         if plan is not None:
             run.plan = plan
         if checkpoint is not None:
-            run.checkpoint = checkpoint
+            run.checkpoint = {**(run.checkpoint or {}), **checkpoint}
         run.updated_at = utcnow()
         if session is None:
             db.commit()

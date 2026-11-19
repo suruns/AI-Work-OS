@@ -108,6 +108,8 @@ def _tools() -> list[dict[str, Any]]:
                 "status": {"type": "string", "enum": ["planning", "ready", "running", "waiting_approval", "waiting_input", "blocked", "verifying", "succeeded", "failed", "cancelled"]},
                 "reason": {"type": "string", "maxLength": 2000},
                 "increment_step": {"type": "boolean", "default": False},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 100},
+                "deadline_hours": {"type": "integer", "minimum": 1, "maximum": 24},
             }, "additionalProperties": False},
         },
         {
@@ -372,9 +374,16 @@ def call_tool(
                         reason=args.get("reason"), session=db,
                     )
                 else:
-                    if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status")):
+                    if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status", "max_steps", "deadline_hours")):
                         raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
                     value = goal_service.get_run(active.id, turn.conversation_id, project.id)
+                    if "max_steps" in args or "deadline_hours" in args:
+                        value = goal_service.extend_run_budget(
+                            active.id, turn.conversation_id, project.id,
+                            max_steps=args.get("max_steps"),
+                            deadline_hours=args.get("deadline_hours"),
+                            session=db,
+                        )
                     if any(key in args for key in ("plan", "checkpoint", "increment_step")):
                         value = goal_service.update_plan_checkpoint(
                             active.id, turn.conversation_id, project.id,

@@ -1,6 +1,7 @@
 """Durable goal-level orchestration services for the Master Agent."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import timedelta, timezone
 import json
 from typing import Any
@@ -137,7 +138,7 @@ def get_run(run_id: str, conversation_id: str, project_id: str) -> dict:
 def update_plan_checkpoint(
     run_id: str, conversation_id: str, project_id: str, *,
     plan: dict | None = None, checkpoint: dict | None = None,
-    increment_step: bool = False,
+    increment_step: bool = False, session=None,
 ) -> dict:
     if plan is not None:
         if not isinstance(plan, dict):
@@ -157,7 +158,7 @@ def update_plan_checkpoint(
             raise MasterRunError("checkpoint 必须包含可序列化的 JSON 数据。") from exc
         if checkpoint_size > 32_000:
             raise MasterRunError("checkpoint 大小不能超过 32 KB。")
-    with SessionLocal() as db:
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
         _assert_scope(db, conversation_id, project_id)
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
@@ -185,18 +186,21 @@ def update_plan_checkpoint(
         if checkpoint is not None:
             run.checkpoint = checkpoint
         run.updated_at = utcnow()
-        db.commit()
-        db.refresh(run)
+        if session is None:
+            db.commit()
+            db.refresh(run)
+        else:
+            db.flush()
         return _summary(run)
 
 
 def transition_run(
     run_id: str, conversation_id: str, project_id: str,
-    status: str, *, reason: str | None = None,
+    status: str, *, reason: str | None = None, session=None,
 ) -> dict:
     if status not in ALL_STATUSES:
         raise MasterRunError("目标状态无效。")
-    with SessionLocal() as db:
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
         _assert_scope(db, conversation_id, project_id)
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
@@ -227,8 +231,11 @@ def transition_run(
             run.active_key = None
         else:
             run.finished_at = None
-        db.commit()
-        db.refresh(run)
+        if session is None:
+            db.commit()
+            db.refresh(run)
+        else:
+            db.flush()
         return _summary(run)
 
 

@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from ai_work_os import mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
+from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, MasterRun, MasterRunTask, Project, Task, TaskEvent, Workflow)
 
 
 def isolated(monkeypatch, tmp_path):
@@ -161,7 +161,78 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
         "get_workflow", "create_task", "create_workflow", "request_execution",
+        "start_goal", "get_goal", "update_goal",
     }
+
+
+
+def test_start_goal_is_persisted_and_idempotent(monkeypatch, tmp_path):
+    engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
+    try:
+        request = {
+            "jsonrpc": "2.0", "id": "goal-start-1", "method": "tools/call",
+            "params": {"name": "start_goal", "arguments": {
+                "goal": "完成一个功能并验证",
+                "max_steps": 12,
+                "deadline_hours": 3,
+            }},
+        }
+        first = mcp._reply(request)
+        retry = mcp._reply(request)
+        assert first["result"]["isError"] is False
+        first_value = __import__("json").loads(first["result"]["content"][0]["text"])
+        retry_value = __import__("json").loads(retry["result"]["content"][0]["text"])
+        assert first_value["id"] == retry_value["id"]
+        assert first_value["status"] == "planning"
+        with factory() as db:
+            runs = list(db.scalars(select(MasterRun)))
+            assert len(runs) == 1
+            assert runs[0].conversation_id
+            assert runs[0].project_id == project_id
+            assert runs[0].max_steps == 12
+            assert len(list(db.scalars(select(MCPToolInvocation)))) == 1
+    finally:
+        engine.dispose()
+
+
+def test_tasks_created_during_active_goal_are_linked_automatically(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp._reply({
+            "jsonrpc": "2.0", "id": "goal-start", "method": "tools/call",
+            "params": {"name": "start_goal", "arguments": {"goal": "修复并验证"}},
+        })
+        assert started["result"]["isError"] is False
+        created = mcp._reply({
+            "jsonrpc": "2.0", "id": "goal-task", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "检查代码", "prompt": "检查项目代码并给出发现",
+            }},
+        })
+        assert created["result"]["isError"] is False
+        task_value = __import__("json").loads(created["result"]["content"][0]["text"])
+        with factory() as db:
+            run = db.scalar(select(MasterRun))
+            link = db.scalar(select(MasterRunTask).where(
+                MasterRunTask.master_run_id == run.id,
+                MasterRunTask.task_id == task_value["id"],
+            ))
+            assert link is not None and link.required
+    finally:
+        engine.dispose()
+
+
+def test_goal_tools_require_request_ids(monkeypatch, tmp_path):
+    engine, _, _ = isolated(monkeypatch, tmp_path)
+    try:
+        response = mcp._reply({
+            "jsonrpc": "2.0", "method": "tools/call",
+            "params": {"name": "start_goal", "arguments": {"goal": "No request id"}},
+        })
+        assert response["result"]["isError"] is True
+        assert "request id" in response["result"]["content"][0]["text"]
+    finally:
+        engine.dispose()
 
 
 def test_create_task_json_rpc_retry_returns_original_result(monkeypatch, tmp_path):

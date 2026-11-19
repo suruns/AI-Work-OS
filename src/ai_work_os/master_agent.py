@@ -257,7 +257,7 @@ async def _handle_mcp_broker(
         request_id = request.get("request_id")
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ToolError("invalid MCP broker request")
-        if name in {"create_task", "create_workflow"} and request_id is None:
+        if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal"} and request_id is None:
             raise ToolError("mutating MCP broker calls require a JSON-RPC request id")
         value = await asyncio.to_thread(
             call_tool, name, arguments, request_id,

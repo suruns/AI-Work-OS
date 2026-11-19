@@ -229,7 +229,12 @@ def extend_run_budget(
         if deadline_hours is not None:
             run.deadline_at = utcnow() + timedelta(hours=deadline_hours)
         checkpoint = dict(run.checkpoint or {})
-        if checkpoint.get("stop_reason") in {"deadline_exceeded", "step_budget_exceeded"}:
+        stop_reason = checkpoint.get("stop_reason")
+        if stop_reason == "step_budget_exceeded" and max_steps is None:
+            raise MasterRunError("步骤预算耗尽；必须明确提高 max_steps 才能恢复。")
+        if stop_reason == "deadline_exceeded" and deadline_hours is None:
+            raise MasterRunError("目标时限已过；必须明确重设 deadline_hours 才能恢复。")
+        if stop_reason in {"deadline_exceeded", "step_budget_exceeded"}:
             checkpoint.pop("stop_reason", None)
             if run.status == "blocked":
                 run.status = "running"

@@ -164,7 +164,7 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
         "get_workflow", "create_task", "create_workflow", "request_execution",
-        "start_goal", "get_goal", "update_goal",
+        "start_goal", "get_goal", "update_goal", "cancel_goal",
     }
 
 
@@ -246,6 +246,35 @@ def test_tasks_created_during_active_goal_are_linked_automatically(monkeypatch, 
                 MasterRunTask.task_id == task_value["id"],
             ))
             assert link is not None and link.required
+    finally:
+        engine.dispose()
+
+
+def test_cancel_goal_cancels_queued_tasks_and_is_idempotent(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "需要可取消的目标"},
+            request_id="cancel-goal-start",
+        )
+        task = mcp.call_tool("create_task", {
+            "title": "待执行任务", "prompt": "执行只读检查",
+        }, request_id="cancel-goal-task")
+        args = {"reason": "用户要求停止"}
+        cancelled = mcp.call_tool("cancel_goal", args, request_id="cancel-goal-once")
+        retry = mcp.call_tool("cancel_goal", args, request_id="cancel-goal-once")
+        assert cancelled == retry
+        assert cancelled["id"] == started["id"]
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["cancelled_tasks"] == 1
+        with factory() as db:
+            run = db.get(MasterRun, started["id"])
+            task_row = db.get(Task, task["id"])
+            assert run.active_key is None
+            assert task_row.status == "cancelled"
+            assert task_row.cancel_requested is True
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
+            assert any(event.event_type == "task.cancelled" for event in events)
     finally:
         engine.dispose()
 

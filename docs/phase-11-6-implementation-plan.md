@@ -51,10 +51,11 @@
 - “继续”只恢复当前 run，不创建重复 run。
 - 状态文案严格映射真实持久化状态。
 
-### 11.6.6 Dashboard 目标关联与交付证据
-- MasterRun 过滤和详情。
-- 目标与 Workflow/Task/Approval 互相导航。
-- 证据摘要包含文件变更、验证结果、审批结果、错误摘要。
+### 11.6.6 Dashboard 目标关联与交付证据 <状态：项目级列表/详情 API 与脱敏证据汇总已实现；Dashboard 独立视图待开发>
+- MasterRun 项目级过滤和详情 API 已提供。
+- 目标详情已关联 Workflow/Task/Approval 状态。
+- 任务证据汇总包含工作区变更报告路径/数量、验证命令通过/失败计数、执行终态和错误摘要；不返回原始 stdout/stderr。
+- Chat 目标卡片展示任务验证与文件变更计数；Dashboard 独立目标视图待开发。
 - 最终报告区分已验证、未验证、未知和未完成。
 
 ### 11.6.7 集成验收
@@ -71,10 +72,11 @@
 
 - `MasterRun`、`MasterRunTask`、`MasterRunWorkflow` 数据模型及服务层。
 - 目标创建/恢复、计划与 checkpoint 保存、状态转换、步数/时限预算和跨项目关联保护。
-- MCP 工具 `start_goal`、`get_goal`、`update_goal`；目标写入要求 JSON-RPC request id，并记录幂等调用。
+- MCP 工具 `start_goal`、`get_goal`、`update_goal`、`cancel_goal`；目标写入要求 JSON-RPC request id，并记录幂等调用。
 - 目标活动期间通过 MCP 创建的 Task/Workflow 自动关联到 MasterRun；plan 任务支持显式 verification commands。
 - `get_goal` 提供按任务状态和审批状态计算的 `derived_status`，包括审批拒绝/撤销/过期阻塞。
 - `GET /conversations/{conversation_id}/master-run` 提供 Chat 刷新恢复所需的目标、任务和进度摘要，并可读取最近一个已结束目标；进度只将验证通过的任务计入完成数。
+- `GET /projects/{project_id}/master-runs` 与 `GET /projects/{project_id}/master-runs/{run_id}` 提供项目级目标列表和详情；详情含工作流、任务、审批状态及脱敏证据汇总。
 - Master Agent 主循环自动检测必需任务的终态变化，按任务状态签名排入隐藏续跑轮次；审批待处理/拒绝/撤销/过期、等待用户输入和预算耗尽均阻止自动续跑。
 - 目标支持显式取消：取消排队任务、请求停止运行任务、撤销未开始执行的审批；Chat 提供二次确认的取消入口。
 - 支持用户明确授权后扩展目标步骤/时限预算；系统不会自行放大预算。

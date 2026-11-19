@@ -296,6 +296,14 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
         } for link, task, approval_status in rows]
 
 
+def reported_run_status(run: MasterRun, task_rows: list[dict]) -> str:
+    """Do not report goal success until the Master Agent commits the terminal transition."""
+    if run.status in TERMINAL_STATUSES:
+        return run.status
+    derived = derive_run_status(task_rows)
+    return "verifying" if derived == "succeeded" else derived
+
+
 def derive_run_status(task_rows: list[dict]) -> str:
     """Derive a conservative goal status from persisted required task states."""
     required = [row for row in task_rows if row.get("required", True)]

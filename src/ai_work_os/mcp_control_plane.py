@@ -401,9 +401,13 @@ def call_tool(
                 MasterRun.active_key == turn.conversation_id,
             ))
             if active is None:
-                return {"status": "no_active_goal", "tasks": []}
-            return {**goal_service.get_run(active.id, turn.conversation_id, project.id),
-                    "tasks": goal_service.list_run_tasks(active.id, turn.conversation_id, project.id)}
+                return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
+            tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id)
+            return {
+                **goal_service.get_run(active.id, turn.conversation_id, project.id),
+                "derived_status": goal_service.derive_run_status(tasks),
+                "tasks": tasks,
+            }
 
         if name == "get_project_overview":
             counts = {}

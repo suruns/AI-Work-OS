@@ -90,6 +90,9 @@ def test_dashboard_is_served():
     assert "任务执行期间发生变更的工作区文件" in response.text
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
+    assert 'id="goal-progress"' in response.text
+    assert "renderGoalProgress" in response.text
+    assert "/master-run" in response.text
     assert "workflowDetailToken" in response.text
     assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
 

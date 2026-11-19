@@ -105,7 +105,7 @@ def _tools() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {
                 "plan": {"type": "object"},
                 "checkpoint": {"type": "object"},
-                "status": {"type": "string", "enum": ["planning", "ready", "running", "waiting_approval", "waiting_input", "blocked", "verifying", "succeeded", "failed", "cancelled"]},
+                "status": {"type": "string", "enum": ["planning", "ready", "running", "waiting_approval", "waiting_input", "blocked", "verifying", "succeeded", "failed"]},
                 "reason": {"type": "string", "maxLength": 2000},
                 "increment_step": {"type": "boolean", "default": False},
                 "max_steps": {"type": "integer", "minimum": 1, "maximum": 100},

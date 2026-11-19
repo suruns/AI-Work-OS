@@ -543,6 +543,10 @@ def get_conversation_master_run(conversation_id: str) -> dict:
             MasterRun.active_key == conversation.id,
         ))
         if run is None:
+            run = db.scalar(select(MasterRun).where(
+                MasterRun.conversation_id == conversation.id,
+            ).order_by(MasterRun.updated_at.desc(), MasterRun.id.desc()).limit(1))
+        if run is None:
             return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
         tasks = goal_service.list_run_tasks(run.id, conversation.id, conversation.project_id)
         return {
@@ -555,7 +559,10 @@ def get_conversation_master_run(conversation_id: str) -> dict:
                 "running": sum(bool(item["required"]) and item["status"] == "running" for item in tasks),
                 "queued": sum(bool(item["required"]) and item["status"] == "queued" for item in tasks),
                 "waiting_approval": sum(bool(item["required"]) and item.get("approval_status") == "pending" for item in tasks),
-                "blocked": sum(bool(item["required"]) and item["status"] in {"blocked", "failed"} for item in tasks),
+                "blocked": sum(bool(item["required"]) and (
+                    item["status"] in {"blocked", "failed"}
+                    or item.get("approval_status") in {"rejected", "revoked", "expired", "invalidated"}
+                ) for item in tasks),
             },
         }
 

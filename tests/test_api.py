@@ -14,7 +14,7 @@ from ai_work_os.api import app
 from ai_work_os import api as api_module
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
-from ai_work_os.models import AgentTurnEvent, Task, TaskEvent, Workflow, utcnow
+from ai_work_os.models import AgentTurnEvent, Conversation, MasterRun, Project, Task, TaskEvent, Workflow, utcnow
 
 client = TestClient(app)
 
@@ -30,6 +30,40 @@ def test_health():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_path):
+    project_response = client.post("/projects", json={
+        "name": "Goal API project", "slug": f"goal-api-{uuid4().hex[:8]}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project_response.status_code == 201
+    project_id = project_response.json()["id"]
+    conversation_response = client.post("/conversations", json={
+        "project_id": project_id, "title": "Goal recovery",
+    })
+    assert conversation_response.status_code == 201
+    conversation_id = conversation_response.json()["id"]
+
+    from ai_work_os.master_run import create_or_resume_run, link_task
+    run = create_or_resume_run(conversation_id, project_id, "交付并验证一个功能")
+    task_response = client.post("/tasks", json={
+        "project_id": project_id, "title": "验证功能",
+        "prompt": "执行只读验证", "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest -q"],
+    })
+    assert task_response.status_code == 201
+    link_task(run["id"], conversation_id, project_id, task_response.json()["id"])
+
+    response = client.get(f"/conversations/{conversation_id}/master-run")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == run["id"]
+    assert payload["goal"] == "交付并验证一个功能"
+    assert payload["derived_status"] == "ready"
+    assert payload["progress"]["required"] == 1
+    assert payload["progress"]["queued"] == 1
+    assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
 
 
 def test_dashboard_task_selection_is_scoped_to_task_rows():

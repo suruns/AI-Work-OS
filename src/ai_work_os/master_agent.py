@@ -231,6 +231,18 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
                         "cancelled_at": run.finished_at.isoformat(),
                         "running_tasks_remaining": 0,
                     }
+                    # Finalize linked workflows only after every linked task has
+                    # reached a terminal state, so workflow status never lies
+                    # about a worker still executing.
+                    from .models import MasterRunWorkflow, Workflow
+                    workflow_ids = list(db.scalars(select(MasterRunWorkflow.workflow_id).where(
+                        MasterRunWorkflow.master_run_id == run.id,
+                    )))
+                    for workflow_id in workflow_ids:
+                        workflow = db.get(Workflow, workflow_id)
+                        if workflow is not None and workflow.status not in terminal_task_states:
+                            workflow.status = "cancelled"
+                            workflow.finished_at = run.finished_at
                     changed = True
                 continue
             required = []

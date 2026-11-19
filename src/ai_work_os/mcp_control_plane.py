@@ -338,16 +338,14 @@ def call_tool(
         if name in {"start_goal", "update_goal"}:
             if request_key is None:
                 raise ToolError("目标写入工具必须提供 JSON-RPC request id。")
-            from .master_run import (
-                MasterRunError, create_or_resume_run, get_run, update_plan_checkpoint,
-                transition_run, list_run_tasks,
-            )
+            from . import master_run as goal_service
+            goal_service.SessionLocal = SessionLocal
             turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
             if turn is None:
                 raise ToolError("目标编排工具必须绑定有效的 Master Agent 轮次。")
             project = _project(db, project_id)
             if name == "start_goal":
-                value = create_or_resume_run(
+                value = goal_service.create_or_resume_run(
                     turn.conversation_id, project.id, args.get("goal"),
                     max_steps=args.get("max_steps", 20),
                     deadline_hours=args.get("deadline_hours", 4),
@@ -361,15 +359,15 @@ def call_tool(
                     raise ToolError("当前对话没有活动目标，请先调用 start_goal。")
                 if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status")):
                     raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
-                value = get_run(active.id, turn.conversation_id, project.id)
+                value = goal_service.get_run(active.id, turn.conversation_id, project.id)
                 if any(key in args for key in ("plan", "checkpoint", "increment_step")):
-                    value = update_plan_checkpoint(
+                    value = goal_service.update_plan_checkpoint(
                         active.id, turn.conversation_id, project.id,
                         plan=args.get("plan"), checkpoint=args.get("checkpoint"),
                         increment_step=args.get("increment_step", False),
                     )
                 if args.get("status") is not None:
-                    value = transition_run(
+                    value = goal_service.transition_run(
                         active.id, turn.conversation_id, project.id,
                         args["status"], reason=args.get("reason"),
                     )
@@ -403,8 +401,8 @@ def call_tool(
             ))
             if active is None:
                 return {"status": "no_active_goal", "tasks": []}
-            return {**get_run(active.id, turn.conversation_id, project.id),
-                    "tasks": list_run_tasks(active.id, turn.conversation_id, project.id)}
+            return {**goal_service.get_run(active.id, turn.conversation_id, project.id),
+                    "tasks": goal_service.list_run_tasks(active.id, turn.conversation_id, project.id)}
 
         if name == "get_project_overview":
             counts = {}
@@ -497,6 +495,29 @@ def call_tool(
                 value = {**_task_summary(task), "approval_id": approval.id, "approval_status": "pending"}
             else:
                 value = _create_task(db, project, args) if name == "create_task" else _create_workflow(db, project, args)
+            if invocation_turn_id:
+                turn = db.get(AgentTurn, invocation_turn_id)
+                if turn is not None:
+                    active_run = db.scalar(select(MasterRun).where(
+                        MasterRun.conversation_id == turn.conversation_id,
+                        MasterRun.active_key == turn.conversation_id,
+                    ))
+                    if active_run is not None:
+                        from . import master_run as goal_service
+                        goal_service.SessionLocal = SessionLocal
+                        if name in {"create_task", "request_execution"}:
+                            goal_service.link_task(
+                                active_run.id, turn.conversation_id, project.id, value["id"],
+                            )
+                        elif name == "create_workflow":
+                            goal_service.link_workflow(
+                                active_run.id, turn.conversation_id, project.id, value["id"],
+                            )
+                            for created_task in value.get("tasks", []):
+                                goal_service.link_task(
+                                    active_run.id, turn.conversation_id, project.id,
+                                    created_task["id"],
+                                )
             if request_key is None:
                 db.commit()
                 return value

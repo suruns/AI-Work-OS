@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -16,7 +17,8 @@ from sqlalchemy.orm import aliased
 
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import (
-    AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, utcnow,
+    AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval,
+    MasterRun, MasterRunTask, Project, Task, utcnow,
 )
 from .sandbox import build_sandbox_invocation, sandbox_mode
 
@@ -153,6 +155,125 @@ def recover_orphaned_turns() -> int:
             recovered += 1
         db.commit()
     return recovered
+
+
+def enqueue_goal_continuations(limit: int = 20) -> int:
+    """Queue one hidden Master Agent turn after every required goal task reaches a terminal state."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    scheduled = 0
+    terminal_task_states = {"succeeded", "failed", "cancelled", "blocked"}
+    denied_approval_states = {"rejected", "revoked", "expired", "invalidated"}
+    with SessionLocal() as db:
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        runs = list(db.scalars(
+            select(MasterRun)
+            .where(MasterRun.active_key.is_not(None))
+            .order_by(MasterRun.updated_at, MasterRun.id)
+            .limit(limit)
+        ))
+        for run in runs:
+            if run.status in {"waiting_input", "waiting_approval", "succeeded", "failed", "cancelled"}:
+                continue
+            stop_reason = (run.checkpoint or {}).get("stop_reason")
+            if stop_reason in {"deadline_exceeded", "step_budget_exceeded"}:
+                continue
+            deadline = run.deadline_at
+            if deadline is not None and deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if deadline is not None and deadline <= now():
+                continue
+            if run.step_count >= run.max_steps:
+                continue
+            conversation = db.get(Conversation, run.conversation_id)
+            if conversation is None or conversation.status != "active" or conversation.project_id != run.project_id:
+                continue
+            pending_turn = db.scalar(select(AgentTurn.id).where(
+                AgentTurn.conversation_id == conversation.id,
+                AgentTurn.status.in_(["queued", "running"]),
+            ).limit(1))
+            if pending_turn is not None:
+                continue
+            rows = db.execute(
+                select(MasterRunTask, Task, ExecutionApproval.status)
+                .join(Task, Task.id == MasterRunTask.task_id)
+                .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
+                .where(
+                    MasterRunTask.master_run_id == run.id,
+                    Task.project_id == run.project_id,
+                )
+                .order_by(MasterRunTask.created_at, MasterRunTask.id)
+            ).all()
+            required = [(link, task, approval_status) for link, task, approval_status in rows if link.required]
+            if not required:
+                continue
+            if any(approval_status == "pending" for _, _, approval_status in required):
+                continue
+            if any(approval_status in denied_approval_states for _, _, approval_status in required):
+                continue
+            if not all(task.status in terminal_task_states for _, task, _ in required):
+                continue
+            state = [{
+                "task_id": task.id,
+                "status": task.status,
+                "verification_status": task.verification_status,
+                "approval_status": approval_status,
+                "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+            } for _, task, approval_status in required]
+            signature = hashlib.sha256(
+                json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            checkpoint = run.checkpoint if isinstance(run.checkpoint, dict) else {}
+            if checkpoint.get("continuation_signature") == signature:
+                continue
+            message = ConversationMessage(
+                conversation_id=conversation.id,
+                role="user",
+                content=(
+                    "系统继续通知：目标关联任务的持久化状态已发生变化。请先调用 get_goal 检查当前目标、任务和验证证据，"
+                    "然后继续推进尚未完成的工作。不要重复创建已经存在的任务；不要绕过审批；"
+                    "只有所有必需任务的验证证据通过后才能将目标标记为成功。"
+                    "如果需要用户审批或补充信息，请停止并明确说明。"
+                ),
+                message_metadata={
+                    "internal": True,
+                    "kind": "master_run_continuation",
+                    "master_run_id": run.id,
+                    "task_state_signature": signature,
+                },
+            )
+            db.add(message)
+            db.flush()
+            turn = AgentTurn(
+                conversation_id=conversation.id,
+                user_message_id=message.id,
+                status="queued",
+                adapter="claude-code",
+                cli_session_id=conversation.cli_session_id,
+            )
+            db.add(turn)
+            db.flush()
+            db.add(AgentTurnEvent(
+                turn_id=turn.id,
+                event_type="turn.queued",
+                payload={
+                    "source": "master_run_continuation",
+                    "master_run_id": run.id,
+                    "task_state_signature": signature,
+                },
+            ))
+            run.checkpoint = {
+                **checkpoint,
+                "continuation_signature": signature,
+                "continuation_turn_id": turn.id,
+                "continuation_scheduled_at": now().isoformat(),
+            }
+            run.updated_at = now()
+            scheduled += 1
+        if scheduled:
+            db.commit()
+    return scheduled
 
 
 def _workspace_for_turn(conversation: Conversation, project: Project | None) -> Path:
@@ -813,6 +934,7 @@ async def run_master_agent() -> None:
     try:
         while True:
             active = {job for job in active if not job.done()}
+            enqueue_goal_continuations()
             if not active:
                 turn_id = _claim_turn(worker_id)
                 if turn_id:

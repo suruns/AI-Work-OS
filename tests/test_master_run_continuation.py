@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ai_work_os import master_agent
+from ai_work_os import master_agent, master_run
 from ai_work_os.db import Base
 from ai_work_os.models import (
     AgentTurn, AgentTurnEvent, Conversation, ConversationMessage,
@@ -189,5 +189,35 @@ def test_expired_pending_approval_does_not_trigger_goal_continuation(monkeypatch
         with factory() as db:
             assert db.scalar(select(AgentTurn.id)) is None
             assert db.get(MasterRun, run_id).checkpoint == {}
+    finally:
+        engine.dispose()
+
+
+def test_cancelling_goal_stays_active_until_running_task_reaches_terminal(monkeypatch, tmp_path):
+    engine, factory, (run_id, conversation_id, task_id, project_id) = _isolated(monkeypatch, tmp_path)
+    monkeypatch.setattr(master_run, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            task = db.get(Task, task_id)
+            task.status = "running"
+            db.commit()
+        result = master_run.cancel_run(
+            run_id, conversation_id, project_id, reason="test cancellation",
+        )
+        assert result["status"] == "cancelling"
+        assert result["cancellation_requested_tasks"] == 1
+        with factory() as db:
+            assert db.get(MasterRun, run_id).active_key == conversation_id
+            assert db.get(Task, task_id).cancel_requested == 1
+        assert master_agent.enqueue_goal_continuations() == 0
+        with factory() as db:
+            db.get(Task, task_id).status = "cancelled"
+            db.commit()
+        assert master_agent.enqueue_goal_continuations() == 0
+        with factory() as db:
+            run = db.get(MasterRun, run_id)
+            assert run.status == "cancelled"
+            assert run.active_key is None
+            assert run.finished_at is not None
     finally:
         engine.dispose()

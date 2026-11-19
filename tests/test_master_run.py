@@ -1,4 +1,11 @@
 from ai_work_os.master_run import derive_run_status
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from ai_work_os import master_run as run_service
+from ai_work_os.db import Base
+from ai_work_os.models import Conversation, MasterRun, MasterRunTask, Project, Task, utcnow
 
 
 def _task(status, *, verification="passed", approval=None, required=True):
@@ -85,3 +92,55 @@ def test_goal_is_not_reported_succeeded_until_master_run_terminal_transition():
     assert reported_run_status(run, rows) == "succeeded"
     run.status = "failed"
     assert reported_run_status(run, rows) == "failed"
+
+
+def test_master_run_success_requires_persisted_verification_evidence(monkeypatch, tmp_path):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(run_service, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(
+                name="Evidence project", slug="evidence-project",
+                workspace_path=str(tmp_path), status="active",
+            )
+            db.add(project)
+            db.flush()
+            conversation = Conversation(project_id=project.id, title="Evidence")
+            db.add(conversation)
+            db.flush()
+            run = MasterRun(
+                conversation_id=conversation.id, project_id=project.id,
+                goal="完成并验证", status="running", active_key=conversation.id,
+                plan={}, checkpoint={}, step_count=1, max_steps=20,
+            )
+            task = Task(
+                project_id=project.id, title="实现", prompt="实现功能",
+                workspace_path=str(tmp_path), permission_mode="plan",
+                status="succeeded", verification_status="not_configured",
+            )
+            db.add_all([run, task])
+            db.flush()
+            db.add(MasterRunTask(master_run_id=run.id, task_id=task.id, required=True))
+            db.commit()
+            run_id, conversation_id, project_id, task_id = (
+                run.id, conversation.id, project.id, task.id,
+            )
+        with pytest.raises(run_service.MasterRunError, match="验证通过"):
+            run_service.transition_run(
+                run_id, conversation_id, project_id, "succeeded",
+            )
+        with factory() as db:
+            db.get(Task, task_id).verification_status = "passed"
+            db.commit()
+        result = run_service.transition_run(
+            run_id, conversation_id, project_id, "succeeded",
+        )
+        assert result["status"] == "succeeded"
+        with factory() as db:
+            assert db.get(MasterRun, run_id).active_key is None
+    finally:
+        engine.dispose()

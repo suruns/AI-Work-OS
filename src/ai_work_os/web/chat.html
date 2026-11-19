@@ -35,7 +35,7 @@ const when=value=>{if(!value)return "";const s=typeof value==="string"&&!/(?:Z|[
 async function api(url,options={}){const response=await fetch(url,{headers:{"Content-Type":"application/json"},...options});const data=await response.json().catch(()=>({detail:response.statusText}));if(!response.ok)throw new Error("请求失败（HTTP "+response.status+"）："+String(data.detail||"服务端未提供错误详情"));return data}
 let projects=[],conversations=[],activeConversationId=null,activeConversation=null,goalRun=null,turns=[],messages=[],eventRows=[],eventCursors=new Map(),loadedConversationId=null,hasOlderMessages=false,loadingOlderMessages=false,pollBusy=false,lastError="";
 function setError(message){$("error").textContent=message||""}
-function statusZh(value){return ({queued:"排队中",running:"执行中",succeeded:"已成功",failed:"失败",cancelled:"已取消",blocked:"已阻塞",pending:"待审批",approved:"已批准",rejected:"已拒绝",revoked:"已撤销",expired:"已过期",planning:"规划中",ready:"等待执行",waiting_approval:"等待审批",waiting_input:"等待用户输入",verifying:"验证中"})[value]||value}
+function statusZh(value){return ({queued:"排队中",running:"执行中",succeeded:"已成功",failed:"失败",cancelled:"已取消",blocked:"已阻塞",pending:"待审批",approved:"已批准",rejected:"已拒绝",revoked:"已撤销",expired:"已过期",planning:"规划中",ready:"等待执行",waiting_approval:"等待审批",waiting_input:"等待用户输入",verifying:"验证中",cancelling:"正在停止关联任务"})[value]||value}
 function roleZh(value){return value==="user"?"你":value==="assistant"?"Master Agent":value}
 function verificationZh(value){return ({pending:"待验证",running:"验证中",passed:"验证通过",failed:"验证失败",not_configured:"未配置验证",not_required:"无需验证"})[value]||value}
 function eventZh(value){return ({"turn.queued":"对话已排队","turn.started":"Agent 开始处理","turn.finished":"Agent 处理完成","turn.failed":"Agent 处理失败","turn.executor_failed":"Agent 执行失败","turn.timed_out":"本轮处理超时","turn.lease_lost":"Worker 租约丢失","turn.worker_interrupted":"Agent Worker 中断","turn.cancel_requested":"已请求取消","turn.cancelled":"本轮已取消","execution.approval_requested":"写入执行待审批"})[value]||value}
@@ -63,7 +63,7 @@ function renderGoalProgress(){
   return '<div class="goal-task"><span class="goal-task-name">'+esc(task.title||task.task_id)+'</span><span class="goal-task-state">'+esc(statusZh(task.status))+esc(verification)+esc(approval)+esc(verificationEvidence)+esc(changed)+'</span></div>';
  }).join("");
  root.classList.add("visible");
- const canCancel=!["succeeded","failed","cancelled"].includes(goalRun.status);
+ const canCancel=!["succeeded","failed","cancelled","cancelling"].includes(goalRun.status);
  root.innerHTML='<div class="goal-head"><div><div class="goal-title">'+esc(goalRun.goal||"当前工作目标")+'</div><div class="goal-meta">目标状态：'+esc(statusZh(status))+' · 步骤 '+esc(goalRun.step_count)+' / '+esc(goalRun.max_steps)+'</div></div><div class="goal-actions"><strong>'+percent+'%</strong>'+(canCancel?'<button id="cancel-goal" class="goal-cancel" type="button">取消目标</button>':"")+'</div></div><div class="goal-track"><div class="goal-fill" style="width:'+percent+'%"></div></div><div class="goal-task-list">'+(counts.length?counts.map(item=>'<span>'+esc(item[0])+' '+esc(item[1])+'</span>').join(""):'<span>尚未关联任务</span>')+'</div>'+(taskDetails?'<div class="goal-task-details">'+taskDetails+'</div>':"");
  const cancelButton=$("cancel-goal");
  if(cancelButton)cancelButton.addEventListener("click",async()=>{

@@ -118,7 +118,7 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
         result = mcp.call_tool("create_workflow", {
             "title": "Build and test",
             "tasks": [
-                {"key": "build", "title": "Build", "prompt": "Build the app"},
+                {"key": "build", "title": "Build", "prompt": "Build the app", "verification_commands": ["python -m pytest -q"]},
                 {"key": "test", "title": "Test", "prompt": "Test the app", "depends_on": ["build"]},
             ],
         })
@@ -130,6 +130,9 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
             assert len(tasks) == 2
             assert all(task.permission_mode == "plan" for task in tasks)
             assert all(task.status == "queued" for task in tasks)
+            build_task = next(task for task in tasks if task.title == "Build")
+            assert build_task.verification_commands == ["python -m pytest -q"]
+            assert build_task.verification_status == "pending"
             assert len(list(db.scalars(select(TaskEvent)))) == 2
         try:
             mcp.call_tool("create_workflow", {

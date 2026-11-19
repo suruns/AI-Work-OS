@@ -203,6 +203,21 @@ def transition_run(
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
+        if status == "succeeded":
+            evidence_rows = db.execute(
+                select(MasterRunTask, Task, ExecutionApproval.status)
+                .join(Task, Task.id == MasterRunTask.task_id)
+                .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
+                .where(MasterRunTask.master_run_id == run_id, Task.project_id == project_id)
+            ).all()
+            task_evidence = [{
+                "status": task.status,
+                "required": bool(link.required),
+                "verification_status": task.verification_status,
+                "approval_status": approval_status,
+            } for link, task, approval_status in evidence_rows]
+            if derive_run_status(task_evidence) != "succeeded":
+                raise MasterRunError("缺少全部必需任务成功及验证通过的持久化证据，不能将目标标记为完成。")
         if status not in _ALLOWED_TRANSITIONS.get(run.status, set()):
             raise MasterRunError(f"不允许目标状态从 {run.status} 转换为 {status}。")
         run.status = status

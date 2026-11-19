@@ -951,13 +951,18 @@ async def run_master_agent() -> None:
         flush=True,
     )
     active: set[asyncio.Task] = set()
+    goal_check_interval = max(POLL_SECONDS, 2.0)
+    next_goal_check = 0.0
+    loop = asyncio.get_running_loop()
     try:
         while True:
             active = {job for job in active if not job.done()}
-            try:
-                enqueue_goal_continuations()
-            except Exception as exc:
-                print(f"MasterRun continuation scheduler error: {type(exc).__name__}", flush=True)
+            if loop.time() >= next_goal_check:
+                try:
+                    enqueue_goal_continuations()
+                except Exception as exc:
+                    print(f"MasterRun continuation scheduler error: {type(exc).__name__}", flush=True)
+                next_goal_check = loop.time() + goal_check_interval
             if not active:
                 turn_id = _claim_turn(worker_id)
                 if turn_id:

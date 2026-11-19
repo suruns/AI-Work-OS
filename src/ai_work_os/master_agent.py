@@ -177,26 +177,29 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
         for run in runs:
             if run.status in {"waiting_input", "succeeded", "failed", "cancelled"}:
                 continue
-            stop_reason = (run.checkpoint or {}).get("stop_reason")
-            if stop_reason in {"deadline_exceeded", "step_budget_exceeded"}:
-                continue
-            deadline = run.deadline_at
-            if deadline is not None and deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
-            if deadline is not None and deadline <= now():
-                run.status = "blocked"
-                run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "deadline_exceeded"}
-                run.updated_at = now()
-                changed = True
-                continue
-            if run.step_count >= run.max_steps:
-                run.status = "blocked"
-                run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "step_budget_exceeded"}
-                run.updated_at = now()
-                changed = True
-                continue
+            if run.status != "cancelling":
+                stop_reason = (run.checkpoint or {}).get("stop_reason")
+                if stop_reason in {"deadline_exceeded", "step_budget_exceeded"}:
+                    continue
+                deadline = run.deadline_at
+                if deadline is not None and deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                if deadline is not None and deadline <= now():
+                    run.status = "blocked"
+                    run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "deadline_exceeded"}
+                    run.updated_at = now()
+                    changed = True
+                    continue
+                if run.step_count >= run.max_steps:
+                    run.status = "blocked"
+                    run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "step_budget_exceeded"}
+                    run.updated_at = now()
+                    changed = True
+                    continue
             conversation = db.get(Conversation, run.conversation_id)
-            if conversation is None or conversation.status != "active" or conversation.project_id != run.project_id:
+            if conversation is None or conversation.project_id != run.project_id:
+                continue
+            if run.status != "cancelling" and conversation.status != "active":
                 continue
             pending_turn = db.scalar(select(AgentTurn.id).where(
                 AgentTurn.conversation_id == conversation.id,
@@ -214,6 +217,20 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
                 )
                 .order_by(MasterRunTask.created_at, MasterRunTask.id)
             ).all()
+            if run.status == "cancelling":
+                all_tasks = [task for _, task, _, _ in rows]
+                if all(task.status in terminal_task_states for task in all_tasks):
+                    run.status = "cancelled"
+                    run.active_key = None
+                    run.finished_at = now()
+                    run.updated_at = now()
+                    run.checkpoint = {
+                        **(run.checkpoint or {}),
+                        "cancelled_at": run.finished_at.isoformat(),
+                        "running_tasks_remaining": 0,
+                    }
+                    changed = True
+                continue
             required = []
             for link, task, approval_status, approval_expires_at in rows:
                 if not link.required:

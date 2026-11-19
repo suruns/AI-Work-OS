@@ -528,6 +528,47 @@ def get_conversation(conversation_id: str) -> dict:
         return _conversation_payload(db, conversation)
 
 
+@app.get("/master-runs")
+def list_master_runs(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        runs = list(db.scalars(
+            select(MasterRun)
+            .order_by(MasterRun.updated_at.desc(), MasterRun.id.desc())
+            .limit(limit)
+        ))
+        result = []
+        for run in runs:
+            project = db.get(Project, run.project_id)
+            tasks = goal_service.list_run_tasks(run.id, run.conversation_id, run.project_id)
+            derived = goal_service.reported_run_status(run, tasks)
+            if status and status not in {run.status, derived}:
+                continue
+            result.append({
+                "id": run.id,
+                "conversation_id": run.conversation_id,
+                "project_id": run.project_id,
+                "project_name": project.name if project else "未知项目",
+                "goal": run.goal,
+                "status": run.status,
+                "derived_status": derived,
+                "step_count": run.step_count,
+                "max_steps": run.max_steps,
+                "task_count": len(tasks),
+                "required_task_count": sum(bool(task["required"]) for task in tasks),
+                "completed_task_count": sum(
+                    bool(task["required"]) and task["status"] == "succeeded"
+                    and task.get("verification_status") in {"passed", "not_required"}
+                    for task in tasks
+                ),
+                "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+            })
+        return result
+
+
 @app.get("/projects/{project_id}/master-runs")
 def list_project_master_runs(
     project_id: str,

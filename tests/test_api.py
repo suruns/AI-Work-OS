@@ -3292,6 +3292,8 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert 'latest=true&limit=500' in html
     assert 'id="goal-progress"' in html
     assert "renderGoalProgress" in html
+    assert 'id="cancel-goal"' in html
+    assert '/master-run/cancel' in html
     assert "m.metadata&&m.metadata.internal" in html
     assert "/master-run" in html
     assert 'after_id="+lastMessageId' in html

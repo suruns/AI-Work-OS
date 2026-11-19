@@ -324,6 +324,7 @@ def cancel_run(
         )))
         cancelled_tasks = 0
         cancellation_requested = 0
+        running_tasks_remaining = 0
         for task_id in task_ids:
             task = db.get(Task, task_id)
             if task is None or task.project_id != project_id:
@@ -350,24 +351,29 @@ def cancel_run(
                     "control_surface": "master_run",
                 }))
                 cancelled_tasks += 1
-            elif task.status == "running" and not task.cancel_requested:
-                task.cancel_requested = True
-                db.add(TaskEvent(task_id=task.id, event_type="task.cancel_requested", payload={
-                    "status": "requested", "action": "cancel",
-                    "reason": "master_run_cancelled", "control_surface": "master_run",
-                }))
-                cancellation_requested += 1
+            elif task.status == "running":
+                running_tasks_remaining += 1
+                if not task.cancel_requested:
+                    task.cancel_requested = True
+                    db.add(TaskEvent(task_id=task.id, event_type="task.cancel_requested", payload={
+                        "status": "requested", "action": "cancel",
+                        "reason": "master_run_cancelled", "control_surface": "master_run",
+                    }))
+                    cancellation_requested += 1
 
-        run.status = "cancelled"
-        run.finished_at = timestamp
+        run.status = "cancelling" if running_tasks_remaining else "cancelled"
+        run.finished_at = None if running_tasks_remaining else timestamp
         run.updated_at = timestamp
-        run.active_key = None
+        if not running_tasks_remaining:
+            run.active_key = None
         run.checkpoint = {
             **(run.checkpoint or {}),
-            "cancelled_at": timestamp.isoformat(),
+            "cancel_requested_at": timestamp.isoformat(),
+            "cancelled_at": None if running_tasks_remaining else timestamp.isoformat(),
             "cancel_reason": (reason or "user_requested")[:2000],
             "cancelled_task_count": cancelled_tasks,
             "cancellation_requested_task_count": cancellation_requested,
+            "running_tasks_remaining": running_tasks_remaining,
         }
         if session is None:
             db.commit()
@@ -499,6 +505,8 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
 
 def reported_run_status(run: MasterRun, task_rows: list[dict]) -> str:
     """Do not report goal success until the Master Agent commits the terminal transition."""
+    if run.status == "cancelling":
+        return "cancelling"
     if run.status in TERMINAL_STATUSES:
         return run.status
     derived = derive_run_status(task_rows)

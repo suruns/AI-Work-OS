@@ -88,6 +88,13 @@ def _tools() -> list[dict[str, Any]]:
             }, "required": ["goal"], "additionalProperties": False},
         },
         {
+            "name": "cancel_goal",
+            "description": "取消当前目标，并协调取消所有关联的排队/运行任务；待审批的写入申请会撤销，不会批准任何任务。",
+            "inputSchema": {"type": "object", "properties": {
+                "reason": {"type": "string", "maxLength": 2000},
+            }, "additionalProperties": False},
+        },
+        {
             "name": "get_goal",
             "description": "读取当前对话的活动目标及关联任务状态。",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -305,7 +312,7 @@ def call_tool(
         raise ToolError("受沙箱限制的 MCP 客户端不能直接访问数据库。")
     invocation_turn_id = turn_id or TURN_ID
     bound_project_id = project_id if project_id is not None else PROJECT_ID
-    if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal"} and request_id is not None:
+    if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal", "cancel_goal"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
             raise ToolError("创建类工具调用必须提供字符串或数字类型的 JSON-RPC request id。")
         if isinstance(request_id, float) and not math.isfinite(request_id):
@@ -337,7 +344,7 @@ def call_tool(
                     raise ToolError("该 JSON-RPC request id 已用于不同的工具参数或项目范围。")
                 return previous.result
 
-        if name in {"start_goal", "update_goal"}:
+        if name in {"start_goal", "update_goal", "cancel_goal"}:
             if request_key is None:
                 raise ToolError("目标写入工具必须提供 JSON-RPC request id。")
             from . import master_run as goal_service
@@ -358,21 +365,27 @@ def call_tool(
                     MasterRun.active_key == turn.conversation_id,
                 ))
                 if active is None:
-                    raise ToolError("当前对话没有活动目标，请先调用 start_goal。")
-                if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status")):
-                    raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
-                value = goal_service.get_run(active.id, turn.conversation_id, project.id)
-                if any(key in args for key in ("plan", "checkpoint", "increment_step")):
-                    value = goal_service.update_plan_checkpoint(
+                    raise ToolError("当前对话没有活动目标。")
+                if name == "cancel_goal":
+                    value = goal_service.cancel_run(
                         active.id, turn.conversation_id, project.id,
-                        plan=args.get("plan"), checkpoint=args.get("checkpoint"),
-                        increment_step=args.get("increment_step", False), session=db,
+                        reason=args.get("reason"), session=db,
                     )
-                if args.get("status") is not None:
-                    value = goal_service.transition_run(
-                        active.id, turn.conversation_id, project.id,
-                        args["status"], reason=args.get("reason"), session=db,
-                    )
+                else:
+                    if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status")):
+                        raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
+                    value = goal_service.get_run(active.id, turn.conversation_id, project.id)
+                    if any(key in args for key in ("plan", "checkpoint", "increment_step")):
+                        value = goal_service.update_plan_checkpoint(
+                            active.id, turn.conversation_id, project.id,
+                            plan=args.get("plan"), checkpoint=args.get("checkpoint"),
+                            increment_step=args.get("increment_step", False), session=db,
+                        )
+                    if args.get("status") is not None:
+                        value = goal_service.transition_run(
+                            active.id, turn.conversation_id, project.id,
+                            args["status"], reason=args.get("reason"), session=db,
+                        )
             db.add(MCPToolInvocation(
                 turn_id=invocation_turn_id, project_id=project.id,
                 request_id=request_key, tool_name=name,
@@ -582,7 +595,7 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal"} and request_id is None:
+            if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal", "cancel_goal"} and request_id is None:
                 raise ToolError("会修改数据的 MCP 工具调用必须提供 JSON-RPC request id。")
             value = (
                 _broker_call(name, args, request_id)

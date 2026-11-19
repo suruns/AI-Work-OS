@@ -3364,6 +3364,7 @@ def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     assert 'latest=true&limit=500' in html
     assert 'id="goal-progress"' in html
     assert "renderGoalProgress" in html
+    assert "正在停止关联任务" in html
     assert "goal-task-details" in html
     assert "verificationEvidence" in html
     assert "workspace_changes" in html

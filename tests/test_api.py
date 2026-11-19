@@ -66,6 +66,40 @@ def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_pa
     assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
 
 
+def test_conversation_master_run_endpoint_keeps_latest_completed_goal_visible(tmp_path):
+    project_response = client.post("/projects", json={
+        "name": "Goal history project", "slug": f"goal-history-{uuid4().hex[:8]}",
+        "workspace_path": str(tmp_path),
+    })
+    project_id = project_response.json()["id"]
+    conversation_response = client.post("/conversations", json={
+        "project_id": project_id, "title": "Goal history",
+    })
+    conversation_id = conversation_response.json()["id"]
+    from ai_work_os.master_run import create_or_resume_run, link_task, transition_run
+    run = create_or_resume_run(conversation_id, project_id, "完成并验证")
+    task_response = client.post("/tasks", json={
+        "project_id": project_id, "title": "已验证任务",
+        "prompt": "执行验证", "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest -q"],
+    })
+    task_id = task_response.json()["id"]
+    link_task(run["id"], conversation_id, project_id, task_id)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "succeeded"
+        task.verification_status = "passed"
+        db.commit()
+    transition_run(run["id"], conversation_id, project_id, "running")
+    transition_run(run["id"], conversation_id, project_id, "succeeded")
+
+    response = client.get(f"/conversations/{conversation_id}/master-run")
+    assert response.status_code == 200
+    assert response.json()["id"] == run["id"]
+    assert response.json()["status"] == "succeeded"
+    assert response.json()["derived_status"] == "succeeded"
+
+
 def test_conversation_master_run_cancel_endpoint_cancels_queued_tasks(tmp_path):
     project_response = client.post("/projects", json={
         "name": "Goal cancel project", "slug": f"goal-cancel-{uuid4().hex[:8]}",

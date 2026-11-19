@@ -71,8 +71,9 @@ def _claim_turn(worker_id: str) -> str | None:
     claimed_at = now()
     lease_expires_at = claimed_at + timedelta(seconds=TURN_LEASE_SECONDS)
     with SessionLocal() as db:
-        if db.bind is not None and db.bind.dialect.name == "sqlite":
-            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        # SQLite is the single-process local runtime; avoid BEGIN IMMEDIATE here so
+        # periodic scheduling cannot starve Worker/API task-state writes. Databases
+        # with row locks use the SELECT ... FOR UPDATE below.
         running_turn = aliased(AgentTurn)
         active_conversation_turn = exists(
             select(running_turn.id).where(

@@ -162,6 +162,7 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     scheduled = 0
+    changed = False
     terminal_task_states = {"succeeded", "failed", "cancelled", "blocked"}
     denied_approval_states = {"rejected", "revoked", "expired", "invalidated"}
     with SessionLocal() as db:
@@ -183,8 +184,16 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
             if deadline is not None and deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
             if deadline is not None and deadline <= now():
+                run.status = "blocked"
+                run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "deadline_exceeded"}
+                run.updated_at = now()
+                changed = True
                 continue
             if run.step_count >= run.max_steps:
+                run.status = "blocked"
+                run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "step_budget_exceeded"}
+                run.updated_at = now()
+                changed = True
                 continue
             conversation = db.get(Conversation, run.conversation_id)
             if conversation is None or conversation.status != "active" or conversation.project_id != run.project_id:
@@ -244,6 +253,7 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
                 },
             )
             db.add(message)
+            conversation.updated_at = now()
             db.flush()
             turn = AgentTurn(
                 conversation_id=conversation.id,
@@ -271,7 +281,8 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
             }
             run.updated_at = now()
             scheduled += 1
-        if scheduled:
+            changed = True
+        if changed:
             db.commit()
     return scheduled
 
@@ -934,7 +945,10 @@ async def run_master_agent() -> None:
     try:
         while True:
             active = {job for job in active if not job.done()}
-            enqueue_goal_continuations()
+            try:
+                enqueue_goal_continuations()
+            except Exception as exc:
+                print(f"MasterRun continuation scheduler error: {type(exc).__name__}", flush=True)
             if not active:
                 turn_id = _claim_turn(worker_id)
                 if turn_id:

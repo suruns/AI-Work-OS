@@ -262,7 +262,7 @@ def transition_run(
             raise MasterRunError("当前对话中不存在该目标。")
         if status == "succeeded":
             evidence_rows = db.execute(
-                select(MasterRunTask, Task, ExecutionApproval.status, ExecutionApproval.expires_at)
+                select(MasterRunTask, Task, ExecutionApproval.status)
                 .join(Task, Task.id == MasterRunTask.task_id)
                 .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
                 .where(MasterRunTask.master_run_id == run_id, Task.project_id == project_id)
@@ -433,7 +433,7 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
         rows = db.execute(
-            select(MasterRunTask, Task, ExecutionApproval.status)
+            select(MasterRunTask, Task, ExecutionApproval.status, ExecutionApproval.expires_at)
             .join(Task, Task.id == MasterRunTask.task_id)
             .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
             .where(MasterRunTask.master_run_id == run_id, Task.project_id == project_id)

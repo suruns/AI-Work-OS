@@ -206,8 +206,6 @@ def _create_task(db, project: Project, args: dict) -> dict:
         "status": "queued", "project_id": project.id,
         "created_via": "master_agent_mcp",
     }))
-    db.commit()
-    db.refresh(task)
     return _task_summary(task)
 
 
@@ -287,8 +285,6 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
             "status": "queued", "workflow_id": workflow.id,
             "project_id": project.id, "created_via": "master_agent_mcp",
         }))
-    db.commit()
-    db.refresh(workflow)
     return {
         **_workflow_summary(db, workflow),
         "tasks": [{"key": key, **_task_summary(task)} for key, task in created.items()],

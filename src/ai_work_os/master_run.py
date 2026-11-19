@@ -1,7 +1,8 @@
 """Durable goal-level orchestration services for the Master Agent."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, timezone
+import json
 from typing import Any
 
 from sqlalchemy import select
@@ -9,8 +10,8 @@ from sqlalchemy.exc import IntegrityError
 
 from .db import SessionLocal
 from .models import (
-    Conversation, MasterRun, MasterRunTask, MasterRunWorkflow, Project,
-    Task, Workflow, utcnow,
+    Conversation, ExecutionApproval, MasterRun, MasterRunTask, MasterRunWorkflow,
+    Project, Task, Workflow, utcnow,
 )
 
 ACTIVE_STATUSES = {
@@ -93,6 +94,8 @@ def create_or_resume_run(
         if existing is not None:
             if existing.project_id != project_id:
                 raise MasterRunError("当前活动目标的项目范围不匹配。")
+            if existing.goal.strip() != goal.strip():
+                raise MasterRunError("当前对话已有未完成目标。请先继续或结束该目标，再创建新目标。")
             return _summary(existing)
         run = MasterRun(
             conversation_id=conversation_id,
@@ -136,10 +139,24 @@ def update_plan_checkpoint(
     plan: dict | None = None, checkpoint: dict | None = None,
     increment_step: bool = False,
 ) -> dict:
-    if plan is not None and (not isinstance(plan, dict) or len(str(plan).encode("utf-8")) > 100_000):
-        raise MasterRunError("plan 必须是大小不超过 100 KB 的 JSON 对象。")
-    if checkpoint is not None and (not isinstance(checkpoint, dict) or len(str(checkpoint).encode("utf-8")) > 32_000):
-        raise MasterRunError("checkpoint 必须是大小不超过 32 KB 的 JSON 对象。")
+    if plan is not None:
+        if not isinstance(plan, dict):
+            raise MasterRunError("plan 必须是 JSON 对象。")
+        try:
+            plan_size = len(json.dumps(plan, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise MasterRunError("plan 必须包含可序列化的 JSON 数据。") from exc
+        if plan_size > 100_000:
+            raise MasterRunError("plan 大小不能超过 100 KB。")
+    if checkpoint is not None:
+        if not isinstance(checkpoint, dict):
+            raise MasterRunError("checkpoint 必须是 JSON 对象。")
+        try:
+            checkpoint_size = len(json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise MasterRunError("checkpoint 必须包含可序列化的 JSON 数据。") from exc
+        if checkpoint_size > 32_000:
+            raise MasterRunError("checkpoint 大小不能超过 32 KB。")
     with SessionLocal() as db:
         _assert_scope(db, conversation_id, project_id)
         run = db.get(MasterRun, run_id)
@@ -147,7 +164,10 @@ def update_plan_checkpoint(
             raise MasterRunError("当前对话中不存在该目标。")
         if run.status in TERMINAL_STATUSES:
             raise MasterRunError("已结束的目标不能再修改计划或检查点。")
-        if run.deadline_at and run.deadline_at < utcnow():
+        deadline_at = run.deadline_at
+        if deadline_at is not None and deadline_at.tzinfo is None:
+            deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+        if deadline_at and deadline_at < utcnow():
             run.status = "blocked"
             run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "deadline_exceeded"}
             run.finished_at = None
@@ -240,18 +260,20 @@ def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[d
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
         rows = db.execute(
-            select(MasterRunTask, Task)
+            select(MasterRunTask, Task, ExecutionApproval.status)
             .join(Task, Task.id == MasterRunTask.task_id)
+            .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
             .where(MasterRunTask.master_run_id == run_id, Task.project_id == project_id)
             .order_by(MasterRunTask.created_at, MasterRunTask.id)
         ).all()
         return [{
             "task_id": task.id, "title": task.title, "status": task.status,
             "required": bool(link.required), "verification_status": task.verification_status,
+            "approval_status": approval_status,
             "error_summary": task.error_summary, "workflow_id": task.workflow_id,
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "finished_at": task.finished_at.isoformat() if task.finished_at else None,
-        } for link, task in rows]
+        } for link, task, approval_status in rows]
 
 
 def derive_run_status(task_rows: list[dict]) -> str:
@@ -259,9 +281,13 @@ def derive_run_status(task_rows: list[dict]) -> str:
     required = [row for row in task_rows if row.get("required", True)]
     if not required:
         return "planning"
+    if any(row.get("approval_status") == "pending" for row in required):
+        return "waiting_approval"
     statuses = {row.get("status") for row in required}
-    if "queued" in statuses or "running" in statuses:
-        return "running" if "running" in statuses else "ready"
+    if "running" in statuses:
+        return "running"
+    if "queued" in statuses:
+        return "ready"
     if "blocked" in statuses or "failed" in statuses:
         return "blocked"
     if "cancelled" in statuses:
@@ -269,7 +295,7 @@ def derive_run_status(task_rows: list[dict]) -> str:
     if statuses & {"succeeded"}:
         if any(row.get("verification_status") in {"failed", "error"} for row in required):
             return "blocked"
-        if any(row.get("verification_status") in {"pending", "running"} for row in required):
+        if any(row.get("verification_status") not in {"passed", "not_required"} for row in required):
             return "verifying"
         if all(row.get("status") == "succeeded" for row in required):
             return "succeeded"

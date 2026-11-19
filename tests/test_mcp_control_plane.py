@@ -449,11 +449,13 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
     engine, factory, _ = isolated(monkeypatch, tmp_path)
     try:
         mcp.call_tool("start_goal", {"goal": "取消运行中的任务"}, request_id="running-cancel-start")
-        task = mcp.call_tool("create_task", {
-            "title": "运行中任务", "prompt": "执行只读检查",
-        }, request_id="running-cancel-task")
+        workflow = mcp.call_tool("create_workflow", {
+            "title": "仍在执行的工作流",
+            "tasks": [{"key": "work", "title": "运行中任务", "prompt": "执行只读检查"}],
+        }, request_id="running-cancel-workflow")
+        task_id = workflow["tasks"][0]["id"]
         with factory() as db:
-            row = db.get(Task, task["id"])
+            row = db.get(Task, task_id)
             row.status = "running"
             db.commit()
         result = mcp.call_tool("cancel_goal", {}, request_id="running-cancel-goal")
@@ -463,7 +465,9 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
             row = db.get(Task, task["id"])
             assert row.status == "running"
             assert row.cancel_requested == 1
-            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
+            workflow_row = db.get(Workflow, workflow["id"])
+            assert workflow_row.status not in {"cancelled", "succeeded", "failed"}
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
             assert any(event.event_type == "task.cancel_requested" for event in events)
     finally:
         engine.dispose()

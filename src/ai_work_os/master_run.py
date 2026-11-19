@@ -260,7 +260,9 @@ def transition_run(
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
             raise MasterRunError("当前对话中不存在该目标。")
-        if status == "succeeded":
+        if status == "cancelled":
+            raise MasterRunError("取消目标必须调用 cancel_goal，以协调关联任务和审批的停止流程。")
+        if status in {"succeeded", "failed"}:
             evidence_rows = db.execute(
                 select(MasterRunTask, Task, ExecutionApproval.status)
                 .join(Task, Task.id == MasterRunTask.task_id)
@@ -273,7 +275,11 @@ def transition_run(
                 "verification_status": task.verification_status,
                 "approval_status": approval_status,
             } for link, task, approval_status in evidence_rows]
-            if derive_run_status(task_evidence) != "succeeded":
+            required = [row for row in task_evidence if row["required"]]
+            terminal_tasks = {"succeeded", "failed", "cancelled", "blocked"}
+            if any(row["status"] not in terminal_tasks for row in required):
+                raise MasterRunError("仍有必需任务未进入终态，不能结束目标。")
+            if status == "succeeded" and derive_run_status(task_evidence) != "succeeded":
                 raise MasterRunError("缺少全部必需任务成功及验证通过的持久化证据，不能将目标标记为完成。")
         if status not in _ALLOWED_TRANSITIONS.get(run.status, set()):
             raise MasterRunError(f"不允许目标状态从 {run.status} 转换为 {status}。")

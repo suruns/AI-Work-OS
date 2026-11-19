@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from ai_work_os import mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, MasterRun, MasterRunTask, Project, Task, TaskEvent, Workflow)
+from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, MasterRun, MasterRunTask, MasterRunWorkflow, Project, Task, TaskEvent, Workflow)
 
 
 def isolated(monkeypatch, tmp_path):

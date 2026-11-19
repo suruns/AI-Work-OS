@@ -138,3 +138,37 @@ def test_approved_task_can_trigger_goal_continuation_after_completion(monkeypatc
         assert master_agent.enqueue_goal_continuations() == 1
     finally:
         engine.dispose()
+
+
+def test_expired_goal_deadline_persists_blocked_stop_reason(monkeypatch, tmp_path):
+    engine, factory, (run_id, _, _, _) = _isolated(monkeypatch, tmp_path)
+    try:
+        with factory() as db:
+            run = db.get(MasterRun, run_id)
+            run.deadline_at = utcnow() - timedelta(seconds=1)
+            db.commit()
+        assert master_agent.enqueue_goal_continuations() == 0
+        with factory() as db:
+            run = db.get(MasterRun, run_id)
+            assert run.status == "blocked"
+            assert run.checkpoint["stop_reason"] == "deadline_exceeded"
+            assert run.active_key is not None
+    finally:
+        engine.dispose()
+
+
+def test_step_budget_exhaustion_persists_blocked_stop_reason(monkeypatch, tmp_path):
+    engine, factory, (run_id, _, _, _) = _isolated(monkeypatch, tmp_path)
+    try:
+        with factory() as db:
+            run = db.get(MasterRun, run_id)
+            run.step_count = run.max_steps
+            db.commit()
+        assert master_agent.enqueue_goal_continuations() == 0
+        with factory() as db:
+            run = db.get(MasterRun, run_id)
+            assert run.status == "blocked"
+            assert run.checkpoint["stop_reason"] == "step_budget_exceeded"
+            assert run.active_key is not None
+    finally:
+        engine.dispose()

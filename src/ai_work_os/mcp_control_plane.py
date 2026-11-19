@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
+    from .models import AgentTurn, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
     from .execution_approval import DEFAULT_TTL_HOURS, task_scope_hash
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
@@ -27,6 +27,7 @@ else:
     SessionLocal = None
     Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = ExecutionApproval = utcnow = None
     task_scope_hash = None
+    AgentTurn = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
 TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
@@ -77,6 +78,31 @@ def _workflow_summary(db, workflow: Workflow) -> dict[str, Any]:
 
 def _tools() -> list[dict[str, Any]]:
     return [
+        {
+            "name": "start_goal",
+            "description": "为当前对话创建或恢复一个持久化工作目标。必须先调用此工具，再创建目标任务。",
+            "inputSchema": {"type": "object", "properties": {
+                "goal": {"type": "string", "minLength": 1, "maxLength": 10000},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "deadline_hours": {"type": "integer", "minimum": 1, "maximum": 24, "default": 4},
+            }, "required": ["goal"], "additionalProperties": False},
+        },
+        {
+            "name": "get_goal",
+            "description": "读取当前对话的活动目标及关联任务状态。",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "update_goal",
+            "description": "保存目标计划/检查点，或根据持久化任务证据更新目标状态。不能绕过审批或验证。",
+            "inputSchema": {"type": "object", "properties": {
+                "plan": {"type": "object"},
+                "checkpoint": {"type": "object"},
+                "status": {"type": "string", "enum": ["planning", "ready", "running", "waiting_approval", "waiting_input", "blocked", "verifying", "succeeded", "failed", "cancelled"]},
+                "reason": {"type": "string", "maxLength": 2000},
+                "increment_step": {"type": "boolean", "default": False},
+            }, "additionalProperties": False},
+        },
         {
             "name": "get_project_overview",
             "description": "读取当前对话绑定项目的概览信息。",
@@ -277,7 +303,7 @@ def call_tool(
         raise ToolError("受沙箱限制的 MCP 客户端不能直接访问数据库。")
     invocation_turn_id = turn_id or TURN_ID
     bound_project_id = project_id if project_id is not None else PROJECT_ID
-    if name in {"create_task", "create_workflow", "request_execution"} and request_id is not None:
+    if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
             raise ToolError("创建类工具调用必须提供字符串或数字类型的 JSON-RPC request id。")
         if isinstance(request_id, float) and not math.isfinite(request_id):
@@ -309,7 +335,78 @@ def call_tool(
                     raise ToolError("该 JSON-RPC request id 已用于不同的工具参数或项目范围。")
                 return previous.result
 
+        if name in {"start_goal", "update_goal"}:
+            if request_key is None:
+                raise ToolError("目标写入工具必须提供 JSON-RPC request id。")
+            from .master_run import (
+                MasterRunError, create_or_resume_run, get_run, update_plan_checkpoint,
+                transition_run, list_run_tasks,
+            )
+            turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
+            if turn is None:
+                raise ToolError("目标编排工具必须绑定有效的 Master Agent 轮次。")
+            project = _project(db, project_id)
+            if name == "start_goal":
+                value = create_or_resume_run(
+                    turn.conversation_id, project.id, args.get("goal"),
+                    max_steps=args.get("max_steps", 20),
+                    deadline_hours=args.get("deadline_hours", 4),
+                )
+            else:
+                active = db.scalar(select(__import__(".models", fromlist=["MasterRun"]).MasterRun).where(
+                    __import__(".models", fromlist=["MasterRun"]).MasterRun.conversation_id == turn.conversation_id,
+                    __import__(".models", fromlist=["MasterRun"]).MasterRun.active_key == turn.conversation_id,
+                ))
+                if active is None:
+                    raise ToolError("当前对话没有活动目标，请先调用 start_goal。")
+                if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status")):
+                    raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
+                value = get_run(active.id, turn.conversation_id, project.id)
+                if any(key in args for key in ("plan", "checkpoint", "increment_step")):
+                    value = update_plan_checkpoint(
+                        active.id, turn.conversation_id, project.id,
+                        plan=args.get("plan"), checkpoint=args.get("checkpoint"),
+                        increment_step=args.get("increment_step", False),
+                    )
+                if args.get("status") is not None:
+                    value = transition_run(
+                        active.id, turn.conversation_id, project.id,
+                        args["status"], reason=args.get("reason"),
+                    )
+            db.add(MCPToolInvocation(
+                turn_id=invocation_turn_id, project_id=project.id,
+                request_id=request_key, tool_name=name,
+                arguments_hash=arguments_hash, result=value,
+            ))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                previous = db.scalar(select(MCPToolInvocation).where(
+                    MCPToolInvocation.turn_id == invocation_turn_id,
+                    MCPToolInvocation.request_id == request_key,
+                ))
+                if previous is None or previous.tool_name != name or previous.arguments_hash != arguments_hash:
+                    raise ToolError("目标工具调用幂等性冲突。")
+                return previous.result
+            return value
+
         project = _project(db, project_id)
+        if name == "get_goal":
+            from .master_run import MasterRunError, get_run, list_run_tasks
+            turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
+            if turn is None:
+                raise ToolError("目标查询必须绑定有效的 Master Agent 轮次。")
+            from .models import MasterRun
+            active = db.scalar(select(MasterRun).where(
+                MasterRun.conversation_id == turn.conversation_id,
+                MasterRun.active_key == turn.conversation_id,
+            ))
+            if active is None:
+                return {"status": "no_active_goal", "tasks": []}
+            return {**get_run(active.id, turn.conversation_id, project.id),
+                    "tasks": list_run_tasks(active.id, turn.conversation_id, project.id)}
+
         if name == "get_project_overview":
             counts = {}
             for model, key in ((Task, "tasks"), (Workflow, "workflows")):
@@ -444,7 +541,7 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            if name in {"create_task", "create_workflow", "request_execution"} and request_id is None:
+            if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal"} and request_id is None:
                 raise ToolError("会修改数据的 MCP 工具调用必须提供 JSON-RPC request id。")
             value = (
                 _broker_call(name, args, request_id)

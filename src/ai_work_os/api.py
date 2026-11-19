@@ -580,6 +580,7 @@ def get_project_master_run(project_id: str, run_id: str) -> dict:
                 Workflow.project_id == project_id,
             ).order_by(Workflow.created_at, Workflow.id)
         ))
+        required_tasks = [task for task in tasks if task["required"]]
         return {
             **goal_service._summary(run),
             "derived_status": goal_service.reported_run_status(run, tasks),
@@ -591,11 +592,11 @@ def get_project_master_run(project_id: str, run_id: str) -> dict:
                 "finished_at": workflow.finished_at,
             } for workflow in workflows],
             "evidence_summary": {
-                "verified_tasks": sum(task.get("verification_status") in {"passed", "not_required"} for task in tasks),
-                "unverified_tasks": sum(task.get("verification_status") not in {"passed", "not_required"} for task in tasks),
-                "pending_approvals": sum(task.get("approval_status") == "pending" for task in tasks),
-                "rejected_or_revoked_approvals": sum(task.get("approval_status") in {"rejected", "revoked", "expired"} for task in tasks),
-                "failed_tasks": sum(task.get("status") in {"failed", "blocked"} for task in tasks),
+                "verified_tasks": sum(task.get("verification_status") in {"passed", "not_required"} for task in required_tasks),
+                "unverified_tasks": sum(task.get("verification_status") not in {"passed", "not_required"} for task in required_tasks),
+                "pending_approvals": sum(task.get("approval_status") == "pending" for task in required_tasks),
+                "rejected_or_revoked_approvals": sum(task.get("approval_status") in {"rejected", "revoked", "expired"} for task in required_tasks),
+                "failed_tasks": sum(task.get("status") in {"failed", "blocked"} for task in required_tasks),
             },
         }
 

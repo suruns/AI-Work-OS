@@ -464,3 +464,23 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
             assert any(event.event_type == "task.cancel_requested" for event in events)
     finally:
         engine.dispose()
+
+
+def test_cancel_goal_revokes_pending_execution_approval(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        mcp.call_tool("start_goal", {"goal": "取消待审批写入"}, request_id="approval-cancel-start")
+        task = mcp.call_tool("request_execution", {
+            "title": "受控写入申请", "prompt": "修改指定文件",
+            "verification_commands": ["python -m pytest -q"],
+        }, request_id="approval-cancel-task")
+        assert task["approval_status"] == "pending"
+        mcp.call_tool("cancel_goal", {}, request_id="approval-cancel-goal")
+        with factory() as db:
+            approval = db.scalar(select(ExecutionApproval).where(
+                ExecutionApproval.task_id == task["id"],
+            ))
+            assert approval.status == "revoked"
+            assert approval.decision_source == "task_state"
+    finally:
+        engine.dispose()

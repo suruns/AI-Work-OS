@@ -186,3 +186,12 @@ def test_budget_extension_resumes_a_blocked_goal_only_within_limits(monkeypatch,
             )
     finally:
         engine.dispose()
+
+
+def test_expired_pending_approval_status_handles_naive_sqlite_timestamp():
+    from datetime import timedelta
+    from ai_work_os.master_run import _effective_approval_status
+    from ai_work_os.models import utcnow
+
+    expired = (utcnow() - timedelta(seconds=1)).replace(tzinfo=None)
+    assert _effective_approval_status("pending", expired) == "expired"

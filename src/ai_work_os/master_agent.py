@@ -218,11 +218,11 @@ def enqueue_goal_continuations(limit: int = 20) -> int:
             for link, task, approval_status, approval_expires_at in rows:
                 if not link.required:
                     continue
-                if (
-                    approval_status == "pending" and approval_expires_at is not None
-                    and approval_expires_at <= now()
-                ):
-                    approval_status = "expired"
+                if approval_status == "pending" and approval_expires_at is not None:
+                    if approval_expires_at.tzinfo is None:
+                        approval_expires_at = approval_expires_at.replace(tzinfo=timezone.utc)
+                    if approval_expires_at <= now():
+                        approval_status = "expired"
                 required.append((link, task, approval_status))
             if not required:
                 continue

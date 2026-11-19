@@ -272,7 +272,7 @@ def test_cancel_goal_cancels_queued_tasks_and_is_idempotent(monkeypatch, tmp_pat
             task_row = db.get(Task, task["id"])
             assert run.active_key is None
             assert task_row.status == "cancelled"
-            assert task_row.cancel_requested is True
+            assert task_row.cancel_requested == 1
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
             assert any(event.event_type == "task.cancelled" for event in events)
     finally:
@@ -459,7 +459,7 @@ def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_pat
         with factory() as db:
             row = db.get(Task, task["id"])
             assert row.status == "running"
-            assert row.cancel_requested is True
+            assert row.cancel_requested == 1
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
             assert any(event.event_type == "task.cancel_requested" for event in events)
     finally:

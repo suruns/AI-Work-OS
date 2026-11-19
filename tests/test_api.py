@@ -90,9 +90,6 @@ def test_dashboard_is_served():
     assert "任务执行期间发生变更的工作区文件" in response.text
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
-    assert 'id="goal-progress"' in response.text
-    assert "renderGoalProgress" in response.text
-    assert "/master-run" in response.text
     assert "workflowDetailToken" in response.text
     assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
 
@@ -3293,6 +3290,9 @@ def test_chat_history_latest_pages_and_incremental_event_cursor(tmp_path):
 def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     html = client.get("/").text
     assert 'latest=true&limit=500' in html
+    assert 'id="goal-progress"' in html
+    assert "renderGoalProgress" in html
+    assert "/master-run" in html
     assert 'after_id="+lastMessageId' in html
     assert 'eventCursors.get(t.id)' in html
     assert 'before_id="+messages[0].id' in html

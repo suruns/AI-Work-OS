@@ -171,14 +171,12 @@ def update_plan_checkpoint(
             run.status = "blocked"
             run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "deadline_exceeded"}
             run.finished_at = None
-            run.active_key = None
             db.commit()
             raise MasterRunError("目标已超过时限，已停止推进。")
         if increment_step:
             if run.step_count >= run.max_steps:
                 run.status = "blocked"
                 run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "step_budget_exceeded"}
-                run.active_key = None
                 db.commit()
                 raise MasterRunError("目标已达到推进步骤上限，已停止推进。")
             run.step_count += 1
@@ -298,6 +296,8 @@ def derive_run_status(task_rows: list[dict]) -> str:
         return "planning"
     if any(row.get("approval_status") == "pending" for row in required):
         return "waiting_approval"
+    if any(row.get("approval_status") in {"rejected", "revoked", "expired", "invalidated"} for row in required):
+        return "blocked"
     statuses = {row.get("status") for row in required}
     if "running" in statuses:
         return "running"

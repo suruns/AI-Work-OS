@@ -204,8 +204,8 @@ def test_start_goal_is_persisted_and_idempotent(monkeypatch, tmp_path):
 def test_goal_tools_do_not_leak_session_factory_to_master_run(monkeypatch, tmp_path):
     from ai_work_os import master_run as goal_service
 
-    engine, factory, _ = isolated(monkeypatch, tmp_path)
     original_factory = goal_service.SessionLocal
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
     try:
         started = mcp.call_tool(
             "start_goal", {"goal": "验证会话工厂隔离"},

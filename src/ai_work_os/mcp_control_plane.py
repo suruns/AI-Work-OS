@@ -445,7 +445,6 @@ def call_tool(
                         raise ToolError("当前目标已达到时限或推进预算上限，不能再创建新任务或工作流。")
         if name == "get_goal":
             from . import master_run as goal_service
-            goal_service.SessionLocal = SessionLocal
             turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
             if turn is None:
                 raise ToolError("目标查询必须绑定有效的 Master Agent 轮次。")
@@ -462,7 +461,7 @@ def call_tool(
             tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id, session=db)
             workflows = goal_service.list_run_workflows(active.id, turn.conversation_id, project.id, session=db)
             return {
-                **goal_service.get_run(active.id, turn.conversation_id, project.id),
+                **goal_service.get_run(active.id, turn.conversation_id, project.id, session=db),
                 "derived_status": goal_service.reported_run_status(active, tasks),
                 "tasks": tasks,
                 "workflows": workflows,

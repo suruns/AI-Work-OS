@@ -359,7 +359,6 @@ def call_tool(
             if request_key is None:
                 raise ToolError("目标写入工具必须提供 JSON-RPC request id。")
             from . import master_run as goal_service
-            goal_service.SessionLocal = SessionLocal
             turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
             if turn is None:
                 raise ToolError("目标编排工具必须绑定有效的 Master Agent 轮次。")
@@ -368,7 +367,7 @@ def call_tool(
                 value = goal_service.create_or_resume_run(
                     turn.conversation_id, project.id, args.get("goal"),
                     max_steps=args.get("max_steps", 20),
-                    deadline_hours=args.get("deadline_hours", 4),
+                    deadline_hours=args.get("deadline_hours", 4), session=db,
                 )
             else:
                 active = db.scalar(select(MasterRun).where(
@@ -385,7 +384,7 @@ def call_tool(
                 else:
                     if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status", "max_steps", "deadline_hours")):
                         raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
-                    value = goal_service.get_run(active.id, turn.conversation_id, project.id)
+                    value = goal_service.get_run(active.id, turn.conversation_id, project.id, session=db)
                     if "max_steps" in args or "deadline_hours" in args:
                         value = goal_service.extend_run_budget(
                             active.id, turn.conversation_id, project.id,
@@ -460,8 +459,8 @@ def call_tool(
                 ).order_by(MasterRun.updated_at.desc(), MasterRun.id.desc()).limit(1))
             if active is None:
                 return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
-            tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id)
-            workflows = goal_service.list_run_workflows(active.id, turn.conversation_id, project.id)
+            tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id, session=db)
+            workflows = goal_service.list_run_workflows(active.id, turn.conversation_id, project.id, session=db)
             return {
                 **goal_service.get_run(active.id, turn.conversation_id, project.id),
                 "derived_status": goal_service.reported_run_status(active, tasks),

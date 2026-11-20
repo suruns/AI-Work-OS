@@ -76,7 +76,7 @@ def _summary(run: MasterRun) -> dict[str, Any]:
 def create_or_resume_run(
     conversation_id: str, project_id: str, goal: str, *,
     max_steps: int = DEFAULT_MAX_STEPS,
-    deadline_hours: int = DEFAULT_DEADLINE_HOURS,
+    deadline_hours: int = DEFAULT_DEADLINE_HOURS, session=None,
 ) -> dict:
     if not isinstance(goal, str) or not goal.strip() or len(goal) > MAX_GOAL_CHARS:
         raise MasterRunError("goal 必须是非空字符串，且不超过 10000 个字符。")
@@ -84,7 +84,7 @@ def create_or_resume_run(
         raise MasterRunError(f"max_steps 必须介于 1 和 {MAX_MAX_STEPS} 之间。")
     if not isinstance(deadline_hours, int) or isinstance(deadline_hours, bool) or not 1 <= deadline_hours <= 24:
         raise MasterRunError("deadline_hours 必须介于 1 和 24 之间。")
-    with SessionLocal() as db:
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
         _assert_scope(db, conversation_id, project_id)
         existing = db.scalar(
             select(MasterRun).where(
@@ -112,7 +112,10 @@ def create_or_resume_run(
         )
         db.add(run)
         try:
-            db.commit()
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
         except IntegrityError:
             db.rollback()
             existing = db.scalar(select(MasterRun).where(
@@ -124,12 +127,13 @@ def create_or_resume_run(
             if existing.project_id != project_id or existing.goal.strip() != goal.strip():
                 raise MasterRunError("当前对话已有不同的活动目标；请先继续或结束该目标。")
             return _summary(existing)
-        db.refresh(run)
+        if session is None:
+            db.refresh(run)
         return _summary(run)
 
 
-def get_run(run_id: str, conversation_id: str, project_id: str) -> dict:
-    with SessionLocal() as db:
+def get_run(run_id: str, conversation_id: str, project_id: str, *, session=None) -> dict:
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
         _assert_scope(db, conversation_id, project_id)
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
@@ -434,8 +438,8 @@ def link_workflow(run_id: str, conversation_id: str, project_id: str, workflow_i
             db.commit()
 
 
-def list_run_workflows(run_id: str, conversation_id: str, project_id: str) -> list[dict]:
-    with SessionLocal() as db:
+def list_run_workflows(run_id: str, conversation_id: str, project_id: str, *, session=None) -> list[dict]:
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
         _assert_scope(db, conversation_id, project_id)
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:
@@ -466,8 +470,8 @@ def _effective_approval_status(status: str | None, expires_at) -> str | None:
     return "expired" if expires_at <= utcnow() else status
 
 
-def list_run_tasks(run_id: str, conversation_id: str, project_id: str) -> list[dict]:
-    with SessionLocal() as db:
+def list_run_tasks(run_id: str, conversation_id: str, project_id: str, *, session=None) -> list[dict]:
+    with (nullcontext(session) if session is not None else SessionLocal()) as db:
         _assert_scope(db, conversation_id, project_id)
         run = db.get(MasterRun, run_id)
         if run is None or run.conversation_id != conversation_id or run.project_id != project_id:

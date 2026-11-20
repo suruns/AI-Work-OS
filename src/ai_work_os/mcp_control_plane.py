@@ -429,8 +429,20 @@ def call_tool(
                     MasterRun.conversation_id == turn.conversation_id,
                     MasterRun.active_key == turn.conversation_id,
                 ))
-                if active_run is not None and active_run.status == "cancelling":
-                    raise ToolError("当前目标正在等待关联任务停止，不能再创建新任务或工作流。")
+                if active_run is not None:
+                    if active_run.status == "cancelling":
+                        raise ToolError("当前目标正在等待关联任务停止，不能再创建新任务或工作流。")
+                    checkpoint = active_run.checkpoint if isinstance(active_run.checkpoint, dict) else {}
+                    deadline = active_run.deadline_at
+                    if deadline is not None and deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=timezone.utc)
+                    if (
+                        active_run.status == "blocked"
+                        or checkpoint.get("stop_reason") in {"deadline_exceeded", "step_budget_exceeded"}
+                        or (deadline is not None and deadline <= utcnow())
+                        or active_run.step_count >= active_run.max_steps
+                    ):
+                        raise ToolError("当前目标已达到时限或推进预算上限，不能再创建新任务或工作流。")
         if name == "get_goal":
             from . import master_run as goal_service
             goal_service.SessionLocal = SessionLocal

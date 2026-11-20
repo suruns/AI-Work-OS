@@ -22,12 +22,12 @@ unset AI_WORK_OS_RUN_BUBBLEWRAP_MCP_ACCEPTANCE
 unset AI_WORK_OS_RUN_CONTROLLED_EXECUTION_ACCEPTANCE
 unset AI_WORK_OS_RUN_MASTER_GOAL_ACCEPTANCE
 
-echo "[1/2] MasterRun 数据模型、状态、预算与自动续跑"
+echo "[1/3] MasterRun 数据模型、状态、预算与自动续跑"
 "$PYTHON_BIN" -m pytest -q \
   tests/test_master_run.py \
   tests/test_master_run_continuation.py
 
-echo "[2/2] Master Agent MCP、审批/取消、Chat API 与项目证据"
+echo "[2/3] Master Agent MCP、审批/取消、Chat API 与项目证据"
 "$PYTHON_BIN" -m pytest -q \
   tests/test_mcp_control_plane.py \
   tests/test_api.py

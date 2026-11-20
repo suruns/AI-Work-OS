@@ -82,7 +82,7 @@
 - 目标支持显式取消：取消排队任务、请求停止运行任务、撤销未开始执行的审批；Chat 提供二次确认的取消入口。
 - 支持用户明确授权后扩展目标步骤/时限预算；系统不会自行放大预算。
 - DAG 子任务支持配置验证命令；目标成功必须经过 MasterRun 终态转换，并有全部必需任务的验证通过证据。
-- 已新增目标状态、MCP 生命周期、幂等 checkpoint、自动续跑/审批门禁/预算停止、取消流程、Chat 恢复与 API 端点测试。GitHub Actions Run #1254：非 E2E 217 passed、3 skipped、9 deselected；Dashboard E2E 9 passed，连续运行 3 轮。CI 已通过，但本阶段整体仍未验收通过，真实 Claude CLI + Bubblewrap 环境验收和故障注入尚待执行。
+- 已新增目标状态、MCP 生命周期、幂等 checkpoint、自动续跑/审批门禁/预算停止、取消流程、Chat 恢复与 API 端点测试。MCP 创建任务/工作流入口会再次校验目标取消状态、截止时间和步骤预算，防止已停止目标在正在运行的 AgentTurn 中继续产生新工作。GitHub Actions Run #1259（提交 `18a5932609d80cce71de7dfe76b32eabcdded180`）：非 E2E 218 passed、3 skipped、9 deselected；Dashboard E2E 9 passed，连续运行 3 轮。CI 已通过，但本阶段整体仍未验收通过，真实 Claude CLI + Bubblewrap 集成验收和完整故障注入尚待执行。
 - 本机专项验收入口：`bash scripts/acceptance/phase-11-6.sh`；真实 Claude CLI/Bubblewrap 集成仍需与 Phase 11.5 的运行环境预检结合执行。
 
 ## 验收矩阵

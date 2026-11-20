@@ -255,27 +255,38 @@ def test_tasks_created_during_active_goal_are_linked_automatically(monkeypatch, 
 
 
 
-def test_blocked_goal_cannot_create_more_tasks_or_workflows(monkeypatch, tmp_path):
+def test_goal_budget_guards_block_task_and_workflow_creation(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
     engine, factory, _ = isolated(monkeypatch, tmp_path)
     try:
         started = mcp.call_tool("start_goal", {"goal": "预算受限目标"}, request_id="blocked-goal-start")
-        with factory() as db:
-            run = db.get(MasterRun, started["id"])
-            run.status = "blocked"
-            run.checkpoint = {"stop_reason": "step_budget_exceeded"}
-            db.commit()
-        for name, args in (
-            ("create_task", {"title": "禁止任务", "prompt": "预算已耗尽"}),
-            ("create_workflow", {"title": "禁止工作流", "tasks": [
-                {"key": "a", "title": "A", "prompt": "预算已耗尽"},
-            ]}),
-        ):
-            try:
-                mcp.call_tool(name, args)
-            except mcp.ToolError as exc:
-                assert "预算上限" in str(exc)
-            else:
-                raise AssertionError(f"{name} was allowed after goal budget exhaustion")
+        cases = (
+            ("blocked", {"stop_reason": "step_budget_exceeded"}, 0, None),
+            ("running", {}, 20, None),
+            ("running", {}, 0, datetime.now(timezone.utc) - timedelta(seconds=1)),
+        )
+        for index, (status, checkpoint, step_count, deadline) in enumerate(cases):
+            with factory() as db:
+                run = db.get(MasterRun, started["id"])
+                run.status = status
+                run.checkpoint = checkpoint
+                run.step_count = step_count
+                run.max_steps = 20
+                run.deadline_at = deadline
+                db.commit()
+            for name, args in (
+                ("create_task", {"title": f"禁止任务 {index}", "prompt": "预算已耗尽"}),
+                ("create_workflow", {"title": f"禁止工作流 {index}", "tasks": [
+                    {"key": "a", "title": "A", "prompt": "预算已耗尽"},
+                ]}),
+            ):
+                try:
+                    mcp.call_tool(name, args, request_id=f"budget-guard-{index}-{name}")
+                except mcp.ToolError as exc:
+                    assert "预算上限" in str(exc)
+                else:
+                    raise AssertionError(f"{name} was allowed after goal budget exhaustion")
         with factory() as db:
             assert db.scalar(select(Task)) is None
             assert db.scalar(select(Workflow)) is None

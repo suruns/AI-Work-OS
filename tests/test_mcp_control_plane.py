@@ -253,6 +253,35 @@ def test_tasks_created_during_active_goal_are_linked_automatically(monkeypatch, 
         engine.dispose()
 
 
+
+
+def test_blocked_goal_cannot_create_more_tasks_or_workflows(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool("start_goal", {"goal": "预算受限目标"}, request_id="blocked-goal-start")
+        with factory() as db:
+            run = db.get(MasterRun, started["id"])
+            run.status = "blocked"
+            run.checkpoint = {"stop_reason": "step_budget_exceeded"}
+            db.commit()
+        for name, args in (
+            ("create_task", {"title": "禁止任务", "prompt": "预算已耗尽"}),
+            ("create_workflow", {"title": "禁止工作流", "tasks": [
+                {"key": "a", "title": "A", "prompt": "预算已耗尽"},
+            ]}),
+        ):
+            try:
+                mcp.call_tool(name, args)
+            except mcp.ToolError as exc:
+                assert "预算上限" in str(exc)
+            else:
+                raise AssertionError(f"{name} was allowed after goal budget exhaustion")
+        with factory() as db:
+            assert db.scalar(select(Task)) is None
+            assert db.scalar(select(Workflow)) is None
+    finally:
+        engine.dispose()
+
 def test_cancel_goal_cancels_queued_tasks_and_is_idempotent(monkeypatch, tmp_path):
     engine, factory, _ = isolated(monkeypatch, tmp_path)
     try:

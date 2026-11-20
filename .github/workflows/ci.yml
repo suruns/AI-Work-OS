@@ -24,6 +24,8 @@ jobs:
           AI_WORK_OS_DB: sqlite:///./test-ai-work-os.db
           AI_WORK_OS_STORAGE: ./test-storage
         run: pytest -q -m "not e2e"
+      - name: Run Phase 11.6 goal orchestration acceptance
+        run: bash scripts/acceptance/phase-11-6.sh
       - name: Run Dashboard E2E tests three times
         env:
           AI_WORK_OS_E2E_ARTIFACTS: artifacts/e2e

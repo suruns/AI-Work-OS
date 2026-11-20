@@ -32,5 +32,8 @@ echo "[2/2] Master Agent MCP、审批/取消、Chat API 与项目证据"
   tests/test_mcp_control_plane.py \
   tests/test_api.py
 
+echo "[3/3] Master Agent turn 队列、租约、恢复与 MCP broker"
+"$PYTHON_BIN" -m pytest -q tests/test_master_agent.py
+
 echo "PASS：Phase 11.6 目标编排专项验收通过。"
 echo "注意：真实 Claude CLI + Bubblewrap + 端到端工作场景仍需结合 phase-11-5.sh 的环境预检与验收流程执行。"

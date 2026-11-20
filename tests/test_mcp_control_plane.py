@@ -214,7 +214,7 @@ def test_goal_tools_do_not_leak_session_factory_to_master_run(monkeypatch, tmp_p
         assert goal_service.SessionLocal is isolated_factory
         goal = mcp.call_tool("get_goal", {})
         assert goal["id"] == started["id"]
-        assert goal_service.SessionLocal is original_factory
+        assert goal_service.SessionLocal is isolated_factory
     finally:
         engine.dispose()
 

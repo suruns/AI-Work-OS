@@ -32,6 +32,10 @@ def chat_home():
 def dashboard():
     return FileResponse(WEB_DIR / "index.html")
 
+@app.get("/project-management", include_in_schema=False)
+def project_management():
+    return FileResponse(WEB_DIR / "projects.html")
+
 
 @app.get("/stats")
 def task_stats() -> dict:

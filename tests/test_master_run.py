@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from ai_work_os import master_run as run_service
 from ai_work_os.db import Base
-from ai_work_os.models import Conversation, MasterRun, MasterRunTask, Project, Task, TaskEvent, utcnow
+from ai_work_os.models import Conversation, ExecutionApproval, MasterRun, MasterRunTask, Project, Task, TaskEvent, utcnow
 
 
 def _task(status, *, verification="passed", approval=None, required=True):
@@ -263,5 +263,108 @@ def test_goal_task_evidence_is_summarized_without_raw_command_output(monkeypatch
         }
         assert evidence["workspace_changes"]["changed_file_count"] == 2
         assert "stdout" not in str(evidence)
+    finally:
+        engine.dispose()
+
+
+
+@pytest.mark.parametrize("next_status", ["verifying", "succeeded"])
+def test_waiting_approval_goal_can_transition_after_approved_task_evidence(
+    monkeypatch, tmp_path, next_status,
+):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(run_service, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(
+                name="Approved evidence project", slug="approved-evidence-project",
+                workspace_path=str(tmp_path), status="active",
+            )
+            db.add(project)
+            db.flush()
+            conversation = Conversation(project_id=project.id, title="Approved evidence")
+            db.add(conversation)
+            db.flush()
+            run = MasterRun(
+                conversation_id=conversation.id, project_id=project.id,
+                goal="完成已审批任务", status="waiting_approval", active_key=conversation.id,
+                plan={}, checkpoint={}, step_count=2, max_steps=20,
+            )
+            task = Task(
+                project_id=project.id, title="实现", prompt="实现功能",
+                workspace_path=str(tmp_path), permission_mode="configured",
+                requires_approval=True, status="succeeded", verification_status="passed",
+                verification_commands=["python -m unittest"],
+            )
+            db.add_all([run, task])
+            db.flush()
+            db.add(MasterRunTask(master_run_id=run.id, task_id=task.id, required=True))
+            db.add(ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(tmp_path),
+                scope_hash="d" * 64, status="approved", expires_at=utcnow(),
+                decided_at=utcnow(), decision_source="user",
+            ))
+            db.commit()
+            run_id, conversation_id, project_id = run.id, conversation.id, project.id
+
+        result = run_service.transition_run(
+            run_id, conversation_id, project_id, next_status,
+        )
+        assert result["status"] == next_status
+        if next_status == "succeeded":
+            with factory() as db:
+                assert db.get(MasterRun, run_id).active_key is None
+    finally:
+        engine.dispose()
+
+
+def test_waiting_approval_goal_cannot_succeed_without_verification_evidence(
+    monkeypatch, tmp_path,
+):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(run_service, "SessionLocal", factory)
+    try:
+        with factory() as db:
+            project = Project(
+                name="Missing evidence project", slug="missing-evidence-project",
+                workspace_path=str(tmp_path), status="active",
+            )
+            db.add(project)
+            db.flush()
+            conversation = Conversation(project_id=project.id, title="Missing evidence")
+            db.add(conversation)
+            db.flush()
+            run = MasterRun(
+                conversation_id=conversation.id, project_id=project.id,
+                goal="缺少验证证据", status="waiting_approval", active_key=conversation.id,
+                plan={}, checkpoint={}, step_count=1, max_steps=20,
+            )
+            task = Task(
+                project_id=project.id, title="实现", prompt="实现功能",
+                workspace_path=str(tmp_path), permission_mode="configured",
+                requires_approval=True, status="succeeded", verification_status="pending",
+            )
+            db.add_all([run, task])
+            db.flush()
+            db.add(MasterRunTask(master_run_id=run.id, task_id=task.id, required=True))
+            db.add(ExecutionApproval(
+                task_id=task.id, project_id=project.id, workspace_path=str(tmp_path),
+                scope_hash="e" * 64, status="approved", expires_at=utcnow(),
+                decided_at=utcnow(), decision_source="user",
+            ))
+            db.commit()
+            run_id, conversation_id, project_id = run.id, conversation.id, project.id
+        with pytest.raises(run_service.MasterRunError, match="验证通过"):
+            run_service.transition_run(
+                run_id, conversation_id, project_id, "succeeded",
+            )
     finally:
         engine.dispose()

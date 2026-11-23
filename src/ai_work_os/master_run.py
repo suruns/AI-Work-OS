@@ -30,7 +30,7 @@ _ALLOWED_TRANSITIONS = {
     "planning": {"planning", "ready", "running", "waiting_input", "blocked", "cancelled"},
     "ready": {"ready", "running", "waiting_approval", "waiting_input", "blocked", "cancelled"},
     "running": {"running", "waiting_approval", "waiting_input", "blocked", "verifying", "succeeded", "failed", "cancelled"},
-    "waiting_approval": {"waiting_approval", "running", "blocked", "waiting_input", "cancelled"},
+    "waiting_approval": {"waiting_approval", "running", "verifying", "succeeded", "blocked", "waiting_input", "cancelled"},
     "waiting_input": {"waiting_input", "planning", "ready", "running", "cancelled"},
     "blocked": {"blocked", "planning", "ready", "running", "failed", "cancelled"},
     "verifying": {"verifying", "running", "succeeded", "blocked", "failed", "cancelled"},

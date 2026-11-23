@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -16,7 +17,8 @@ from sqlalchemy.orm import aliased
 
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
 from .models import (
-    AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, Project, utcnow,
+    AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval,
+    MasterRun, MasterRunTask, Project, Task, utcnow,
 )
 from .sandbox import build_sandbox_invocation, sandbox_mode
 
@@ -40,9 +42,9 @@ SYSTEM_PROMPT = """你是 AI Work OS 的 Master Agent。
 默认始终使用简体中文（zh-CN）与用户交流、解释、规划和汇报；只有用户明确要求其他语言时才切换语言。
 帮助用户理解、规划并协调当前所选项目中的工作。
 使用 ai-work-os MCP 工具检查当前项目的任务和工作流。
-当用户要求分析或拆解工作时，先用中文说明目标、假设、执行步骤、风险和验收方式，再使用 MCP 工具创建 plan 模式任务或工作流。创建任务只代表进入队列，不代表已经开始或完成；只有持久化任务状态确认后才能这样描述。
+当用户提出需要跨多个任务推进的实质性工作目标时，先用中文说明目标、假设、执行步骤、风险和验收方式，再调用 start_goal 建立持久化目标；随后保存结构化计划和检查点。开始处理已有目标前，先调用 get_goal 恢复目标状态和关联任务。目标内通过 create_task、create_workflow 或 request_execution 创建的任务会自动关联到该目标。每完成一个有意义的推进步骤，调用 update_goal 保存 checkpoint 并增加 step 计数；等待审批、等待用户输入、阻塞或验证时，应准确更新目标状态和原因。必需任务全部进入终态且没有待审批事项后，系统会自动排入一个隐藏的继续轮次；该轮次必须先读取 get_goal，再基于最新证据推进，不得重复创建已有工作。审批待处理、审批被拒绝/撤销/过期、等待用户输入或预算耗尽时不会自动继续。只有用户明确要求继续并同意增加预算时，才可通过 update_goal 显式提高 max_steps 或重设 deadline_hours；不得自行扩大预算。不要为简单问答或一次性小任务创建目标。创建任务只代表进入队列，不代表已经开始或完成；只有持久化任务状态确认后才能这样描述。目标只能在所有必需任务成功且验证证据通过后标记 succeeded；get_goal 返回的 derived_status 是按持久化任务状态计算的保守状态。目标最终成功时，最终报告必须列出已完成任务、验证命令通过/失败数量、工作区变更文件数量（若有报告）、审批状态和仍存在的风险；明确区分已验证、未验证、未知和未完成，不得根据模型自己的文字推断成功，也不得复述原始命令输出中的敏感内容。
 当用户明确要求修改代码或执行写操作时，可以调用 request_execution 提交一个 configured 模式的受控执行申请。该工具只会创建待审批任务，不会批准或启动执行。申请时应写清变更范围、验收标准；只有确实知道且安全时才提供最多五条验证命令，不得编造测试命令。必须明确告知用户需要在本机审批控制台查看完整任务说明、工作区、验收标准和验证命令后批准；绝不能声称已获批准、已开始或已完成。
-绝不调用或暗示存在自动批准能力。你不能批准、拒绝或撤销自己的执行申请。普通 create_task 和 create_workflow 始终是 plan-only。
+绝不调用或暗示存在自动批准能力。你不能批准、拒绝或撤销自己的执行申请。只有用户明确要求停止当前目标时才调用 cancel_goal；该工具会取消排队任务、向运行任务发送取消请求并撤销尚未开始的审批，不得把它用于普通暂停。普通 create_task 和 create_workflow 始终是 plan-only。
 MCP 服务绑定当前对话所属项目。不得要求其访问其他项目，也不得编造项目、任务或工作流标识。
 内置文件工具为只读。不要使用 Shell 命令或直接编辑文件。
 任务标题、任务提示词、验收标准、计划、摘要和最终报告默认使用简体中文；代码符号、API 字段、命令和原始错误可保留英文，并附中文解释。
@@ -69,8 +71,9 @@ def _claim_turn(worker_id: str) -> str | None:
     claimed_at = now()
     lease_expires_at = claimed_at + timedelta(seconds=TURN_LEASE_SECONDS)
     with SessionLocal() as db:
-        if db.bind is not None and db.bind.dialect.name == "sqlite":
-            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        # SQLite is the single-process local runtime; avoid BEGIN IMMEDIATE here so
+        # periodic scheduling cannot starve Worker/API task-state writes. Databases
+        # with row locks use the SELECT ... FOR UPDATE below.
         running_turn = aliased(AgentTurn)
         active_conversation_turn = exists(
             select(running_turn.id).where(
@@ -153,6 +156,175 @@ def recover_orphaned_turns() -> int:
             recovered += 1
         db.commit()
     return recovered
+
+
+def enqueue_goal_continuations(limit: int = 20) -> int:
+    """Queue one hidden Master Agent turn after every required goal task reaches a terminal state."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    scheduled = 0
+    changed = False
+    terminal_task_states = {"succeeded", "failed", "cancelled", "blocked"}
+    denied_approval_states = {"rejected", "revoked", "expired", "invalidated"}
+    with SessionLocal() as db:
+        if db.bind is not None and db.bind.dialect.name == "sqlite":
+            db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        runs = list(db.scalars(
+            select(MasterRun)
+            .where(MasterRun.active_key.is_not(None))
+            .order_by(MasterRun.updated_at, MasterRun.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ))
+        for run in runs:
+            if run.status in {"waiting_input", "succeeded", "failed", "cancelled"}:
+                continue
+            if run.status != "cancelling":
+                stop_reason = (run.checkpoint or {}).get("stop_reason")
+                if stop_reason in {"deadline_exceeded", "step_budget_exceeded"}:
+                    continue
+                deadline = run.deadline_at
+                if deadline is not None and deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                if deadline is not None and deadline <= now():
+                    run.status = "blocked"
+                    run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "deadline_exceeded"}
+                    run.updated_at = now()
+                    changed = True
+                    continue
+                if run.step_count >= run.max_steps:
+                    run.status = "blocked"
+                    run.checkpoint = {**(run.checkpoint or {}), "stop_reason": "step_budget_exceeded"}
+                    run.updated_at = now()
+                    changed = True
+                    continue
+            conversation = db.get(Conversation, run.conversation_id)
+            if conversation is None or conversation.project_id != run.project_id:
+                continue
+            if run.status != "cancelling" and conversation.status != "active":
+                continue
+            pending_turn = db.scalar(select(AgentTurn.id).where(
+                AgentTurn.conversation_id == conversation.id,
+                AgentTurn.status.in_(["queued", "running"]),
+            ).limit(1))
+            if pending_turn is not None:
+                continue
+            rows = db.execute(
+                select(MasterRunTask, Task, ExecutionApproval.status, ExecutionApproval.expires_at)
+                .join(Task, Task.id == MasterRunTask.task_id)
+                .outerjoin(ExecutionApproval, ExecutionApproval.task_id == Task.id)
+                .where(
+                    MasterRunTask.master_run_id == run.id,
+                    Task.project_id == run.project_id,
+                )
+                .order_by(MasterRunTask.created_at, MasterRunTask.id)
+            ).all()
+            if run.status == "cancelling":
+                all_tasks = [task for _, task, _, _ in rows]
+                if all(task.status in terminal_task_states for task in all_tasks):
+                    run.status = "cancelled"
+                    run.active_key = None
+                    run.finished_at = now()
+                    run.updated_at = now()
+                    run.checkpoint = {
+                        **(run.checkpoint or {}),
+                        "cancelled_at": run.finished_at.isoformat(),
+                        "running_tasks_remaining": 0,
+                    }
+                    # Finalize linked workflows only after every linked task has
+                    # reached a terminal state, so workflow status never lies
+                    # about a worker still executing.
+                    from .models import MasterRunWorkflow, Workflow
+                    workflow_ids = list(db.scalars(select(MasterRunWorkflow.workflow_id).where(
+                        MasterRunWorkflow.master_run_id == run.id,
+                    )))
+                    for workflow_id in workflow_ids:
+                        workflow = db.get(Workflow, workflow_id)
+                        if workflow is not None and workflow.status not in terminal_task_states:
+                            workflow.status = "cancelled"
+                            workflow.finished_at = run.finished_at
+                    changed = True
+                continue
+            required = []
+            for link, task, approval_status, approval_expires_at in rows:
+                if not link.required:
+                    continue
+                if approval_status == "pending" and approval_expires_at is not None:
+                    if approval_expires_at.tzinfo is None:
+                        approval_expires_at = approval_expires_at.replace(tzinfo=timezone.utc)
+                    if approval_expires_at <= now():
+                        approval_status = "expired"
+                required.append((link, task, approval_status))
+            if not required:
+                continue
+            if any(approval_status == "pending" for _, _, approval_status in required):
+                continue
+            if any(approval_status in denied_approval_states for _, _, approval_status in required):
+                continue
+            if not all(task.status in terminal_task_states for _, task, _ in required):
+                continue
+            state = [{
+                "task_id": task.id,
+                "status": task.status,
+                "verification_status": task.verification_status,
+                "approval_status": approval_status,
+                "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+            } for _, task, approval_status in required]
+            signature = hashlib.sha256(
+                json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            checkpoint = run.checkpoint if isinstance(run.checkpoint, dict) else {}
+            if checkpoint.get("continuation_signature") == signature:
+                continue
+            message = ConversationMessage(
+                conversation_id=conversation.id,
+                role="user",
+                content=(
+                    "系统继续通知：目标关联任务的持久化状态已发生变化。请先调用 get_goal 检查当前目标、任务和验证证据，"
+                    "然后继续推进尚未完成的工作。不要重复创建已经存在的任务；不要绕过审批；"
+                    "只有所有必需任务的验证证据通过后才能将目标标记为成功。"
+                    "如果需要用户审批或补充信息，请停止并明确说明。"
+                ),
+                message_metadata={
+                    "internal": True,
+                    "kind": "master_run_continuation",
+                    "master_run_id": run.id,
+                    "task_state_signature": signature,
+                },
+            )
+            db.add(message)
+            conversation.updated_at = now()
+            db.flush()
+            turn = AgentTurn(
+                conversation_id=conversation.id,
+                user_message_id=message.id,
+                status="queued",
+                adapter="claude-code",
+                cli_session_id=conversation.cli_session_id,
+            )
+            db.add(turn)
+            db.flush()
+            db.add(AgentTurnEvent(
+                turn_id=turn.id,
+                event_type="turn.queued",
+                payload={
+                    "source": "master_run_continuation",
+                    "master_run_id": run.id,
+                    "task_state_signature": signature,
+                },
+            ))
+            run.checkpoint = {
+                **checkpoint,
+                "continuation_signature": signature,
+                "continuation_turn_id": turn.id,
+                "continuation_scheduled_at": now().isoformat(),
+            }
+            run.updated_at = now()
+            scheduled += 1
+            changed = True
+        if changed:
+            db.commit()
+    return scheduled
 
 
 def _workspace_for_turn(conversation: Conversation, project: Project | None) -> Path:
@@ -257,7 +429,7 @@ async def _handle_mcp_broker(
         request_id = request.get("request_id")
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ToolError("invalid MCP broker request")
-        if name in {"create_task", "create_workflow"} and request_id is None:
+        if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal", "cancel_goal"} and request_id is None:
             raise ToolError("mutating MCP broker calls require a JSON-RPC request id")
         value = await asyncio.to_thread(
             call_tool, name, arguments, request_id,
@@ -810,9 +982,18 @@ async def run_master_agent() -> None:
         flush=True,
     )
     active: set[asyncio.Task] = set()
+    goal_check_interval = max(POLL_SECONDS, 2.0)
+    next_goal_check = 0.0
+    loop = asyncio.get_running_loop()
     try:
         while True:
             active = {job for job in active if not job.done()}
+            if loop.time() >= next_goal_check:
+                try:
+                    enqueue_goal_continuations()
+                except Exception as exc:
+                    print(f"MasterRun continuation scheduler error: {type(exc).__name__}", flush=True)
+                next_goal_check = loop.time() + goal_check_interval
             if not active:
                 turn_id = _claim_turn(worker_id)
                 if turn_id:

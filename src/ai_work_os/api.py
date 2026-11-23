@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
+from .models import AgentTurn, AgentTurnEvent, Conversation, ConversationMessage, ExecutionApproval, MasterRun, MasterRunWorkflow, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, Worker, utcnow
 from .execution_approval import router as execution_approval_router
 from .schemas import AgentTurnEventRead, AgentTurnRead, ConversationCreate, ConversationMessageCreate, ConversationMessageRead, ConversationUpdate, ProjectCreate, ProjectUpdate, TaskCreate, TaskRead, TaskEventRead, WorkflowCreate
 
@@ -526,6 +526,198 @@ def get_conversation(conversation_id: str) -> dict:
         if conversation is None:
             raise HTTPException(status_code=404, detail="对话不存在。")
         return _conversation_payload(db, conversation)
+
+
+@app.get("/master-runs")
+def list_master_runs(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        runs = list(db.scalars(
+            select(MasterRun)
+            .order_by(MasterRun.updated_at.desc(), MasterRun.id.desc())
+            .limit(limit)
+        ))
+        result = []
+        for run in runs:
+            project = db.get(Project, run.project_id)
+            tasks = goal_service.list_run_tasks(run.id, run.conversation_id, run.project_id)
+            derived = goal_service.reported_run_status(run, tasks)
+            if status and status not in {run.status, derived}:
+                continue
+            result.append({
+                "id": run.id,
+                "conversation_id": run.conversation_id,
+                "project_id": run.project_id,
+                "project_name": project.name if project else "未知项目",
+                "goal": run.goal,
+                "status": run.status,
+                "derived_status": derived,
+                "step_count": run.step_count,
+                "max_steps": run.max_steps,
+                "task_count": len(tasks),
+                "required_task_count": sum(bool(task["required"]) for task in tasks),
+                "completed_task_count": sum(
+                    bool(task["required"]) and task["status"] == "succeeded"
+                    and task.get("verification_status") in {"passed", "not_required"}
+                    for task in tasks
+                ),
+                "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+            })
+        return result
+
+
+@app.get("/projects/{project_id}/master-runs")
+def list_project_master_runs(
+    project_id: str,
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        runs = list(db.scalars(
+            select(MasterRun).where(MasterRun.project_id == project_id)
+            .order_by(MasterRun.updated_at.desc(), MasterRun.id.desc()).limit(limit)
+        ))
+        result = []
+        for run in runs:
+            tasks = goal_service.list_run_tasks(run.id, run.conversation_id, project_id)
+            derived = goal_service.reported_run_status(run, tasks)
+            if status and status not in {run.status, derived}:
+                continue
+            result.append({
+                "id": run.id,
+                "conversation_id": run.conversation_id,
+                "project_id": run.project_id,
+                "goal": run.goal,
+                "status": run.status,
+                "derived_status": derived,
+                "step_count": run.step_count,
+                "max_steps": run.max_steps,
+                "deadline_at": run.deadline_at.isoformat() if run.deadline_at else None,
+                "created_at": run.created_at.isoformat() if run.created_at else None,
+                "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "task_count": len(tasks),
+                "required_task_count": sum(bool(task["required"]) for task in tasks),
+                "completed_task_count": sum(
+                    bool(task["required"]) and task["status"] == "succeeded"
+                    and task.get("verification_status") in {"passed", "not_required"}
+                    for task in tasks
+                ),
+            })
+        return result
+
+
+@app.get("/projects/{project_id}/master-runs/{run_id}")
+def get_project_master_run(project_id: str, run_id: str) -> dict:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        if db.get(Project, project_id) is None:
+            raise HTTPException(status_code=404, detail="项目不存在。")
+        run = db.get(MasterRun, run_id)
+        if run is None or run.project_id != project_id:
+            raise HTTPException(status_code=404, detail="项目中不存在该目标。")
+        tasks = goal_service.list_run_tasks(run.id, run.conversation_id, project_id)
+        workflows = list(db.scalars(
+            select(Workflow)
+            .join(MasterRunWorkflow, MasterRunWorkflow.workflow_id == Workflow.id)
+            .where(
+                MasterRunWorkflow.master_run_id == run.id,
+                Workflow.project_id == project_id,
+            ).order_by(Workflow.created_at, Workflow.id)
+        ))
+        required_tasks = [task for task in tasks if task["required"]]
+        return {
+            **goal_service._summary(run),
+            "derived_status": goal_service.reported_run_status(run, tasks),
+            "tasks": tasks,
+            "workflows": [{
+                "id": workflow.id, "title": workflow.title, "status": workflow.status,
+                "counts": _workflow_counts(db, workflow.id),
+                "created_at": workflow.created_at,
+                "finished_at": workflow.finished_at,
+            } for workflow in workflows],
+            "evidence_summary": {
+                "verified_tasks": sum(task.get("verification_status") in {"passed", "not_required"} for task in required_tasks),
+                "unverified_tasks": sum(task.get("verification_status") not in {"passed", "not_required"} for task in required_tasks),
+                "pending_approvals": sum(task.get("approval_status") == "pending" for task in required_tasks),
+                "rejected_or_revoked_approvals": sum(task.get("approval_status") in {"rejected", "revoked", "expired"} for task in required_tasks),
+                "failed_tasks": sum(task.get("status") in {"failed", "blocked"} for task in required_tasks),
+            },
+        }
+
+
+@app.get("/conversations/{conversation_id}/master-run")
+def get_conversation_master_run(conversation_id: str) -> dict:
+    """Return the durable goal and its task evidence for Chat refresh/recovery."""
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="对话不存在。")
+        if not conversation.project_id:
+            return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
+        run = db.scalar(select(MasterRun).where(
+            MasterRun.conversation_id == conversation.id,
+            MasterRun.active_key == conversation.id,
+        ))
+        if run is None:
+            run = db.scalar(select(MasterRun).where(
+                MasterRun.conversation_id == conversation.id,
+            ).order_by(MasterRun.updated_at.desc(), MasterRun.id.desc()).limit(1))
+        if run is None:
+            return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
+        tasks = goal_service.list_run_tasks(run.id, conversation.id, conversation.project_id)
+        workflows = goal_service.list_run_workflows(run.id, conversation.id, conversation.project_id)
+        return {
+            **goal_service.get_run(run.id, conversation.id, conversation.project_id),
+            "derived_status": goal_service.reported_run_status(run, tasks),
+            "tasks": tasks,
+            "workflows": workflows,
+            "progress": {
+                "required": sum(bool(item["required"]) for item in tasks),
+                "completed": sum(
+                    bool(item["required"]) and item["status"] == "succeeded"
+                    and item.get("verification_status") in {"passed", "not_required"}
+                    for item in tasks
+                ),
+                "running": sum(bool(item["required"]) and item["status"] == "running" for item in tasks),
+                "queued": sum(bool(item["required"]) and item["status"] == "queued" for item in tasks),
+                "waiting_approval": sum(bool(item["required"]) and item.get("approval_status") == "pending" for item in tasks),
+                "blocked": sum(bool(item["required"]) and (
+                    item["status"] in {"blocked", "failed"}
+                    or item.get("approval_status") in {"rejected", "revoked", "expired", "invalidated"}
+                ) for item in tasks),
+            },
+        }
+
+
+@app.post("/conversations/{conversation_id}/master-run/cancel")
+def cancel_conversation_master_run(conversation_id: str, body: dict | None = None) -> dict:
+    from . import master_run as goal_service
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="对话不存在。")
+        if not conversation.project_id:
+            raise HTTPException(status_code=404, detail="当前对话没有绑定项目目标。")
+        run = db.scalar(select(MasterRun).where(
+            MasterRun.conversation_id == conversation.id,
+            MasterRun.active_key == conversation.id,
+        ))
+        if run is None:
+            raise HTTPException(status_code=404, detail="当前对话没有活动目标。")
+        reason = (body or {}).get("reason")
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 2000):
+            raise HTTPException(status_code=422, detail="reason 必须是长度不超过 2000 个字符的字符串。")
+        return goal_service.cancel_run(
+            run.id, conversation.id, conversation.project_id, reason=reason,
+        )
 
 
 @app.patch("/conversations/{conversation_id}")

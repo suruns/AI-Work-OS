@@ -14,7 +14,7 @@ from ai_work_os.api import app
 from ai_work_os import api as api_module
 from ai_work_os import worker
 from ai_work_os.db import SessionLocal
-from ai_work_os.models import AgentTurnEvent, Task, TaskEvent, Workflow, utcnow
+from ai_work_os.models import AgentTurnEvent, Conversation, MasterRun, Project, Task, TaskEvent, Workflow, utcnow
 
 client = TestClient(app)
 
@@ -30,6 +30,116 @@ def test_health():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_conversation_master_run_endpoint_returns_persisted_goal_progress(tmp_path):
+    project_response = client.post("/projects", json={
+        "name": "Goal API project", "slug": f"goal-api-{uuid4().hex[:8]}",
+        "workspace_path": str(tmp_path),
+    })
+    assert project_response.status_code == 201
+    project_id = project_response.json()["id"]
+    conversation_response = client.post("/conversations", json={
+        "project_id": project_id, "title": "Goal recovery",
+    })
+    assert conversation_response.status_code == 201
+    conversation_id = conversation_response.json()["id"]
+
+    from ai_work_os.master_run import create_or_resume_run, link_task
+    run = create_or_resume_run(conversation_id, project_id, "交付并验证一个功能")
+    task_response = client.post("/tasks", json={
+        "project_id": project_id, "title": "验证功能",
+        "prompt": "执行只读验证", "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest -q"],
+    })
+    assert task_response.status_code == 201
+    link_task(run["id"], conversation_id, project_id, task_response.json()["id"])
+
+    response = client.get(f"/conversations/{conversation_id}/master-run")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == run["id"]
+    assert payload["goal"] == "交付并验证一个功能"
+    assert payload["derived_status"] == "ready"
+    assert payload["progress"]["required"] == 1
+    assert payload["progress"]["queued"] == 1
+    assert payload["tasks"][0]["task_id"] == task_response.json()["id"]
+
+    global_listing = client.get("/master-runs?limit=10")
+    assert global_listing.status_code == 200
+    assert any(item["id"] == run["id"] for item in global_listing.json())
+
+    listing = client.get(f"/projects/{project_id}/master-runs")
+    assert listing.status_code == 200
+    assert listing.json()[0]["id"] == run["id"]
+    detail = client.get(f"/projects/{project_id}/master-runs/{run['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["tasks"][0]["verification_commands"] == ["python -m pytest -q"]
+    assert detail.json()["evidence_summary"]["unverified_tasks"] == 1
+
+
+def test_conversation_master_run_endpoint_keeps_latest_completed_goal_visible(tmp_path):
+    project_response = client.post("/projects", json={
+        "name": "Goal history project", "slug": f"goal-history-{uuid4().hex[:8]}",
+        "workspace_path": str(tmp_path),
+    })
+    project_id = project_response.json()["id"]
+    conversation_response = client.post("/conversations", json={
+        "project_id": project_id, "title": "Goal history",
+    })
+    conversation_id = conversation_response.json()["id"]
+    from ai_work_os.master_run import create_or_resume_run, link_task, transition_run
+    run = create_or_resume_run(conversation_id, project_id, "完成并验证")
+    task_response = client.post("/tasks", json={
+        "project_id": project_id, "title": "已验证任务",
+        "prompt": "执行验证", "workspace_path": str(tmp_path),
+        "verification_commands": ["python -m pytest -q"],
+    })
+    task_id = task_response.json()["id"]
+    link_task(run["id"], conversation_id, project_id, task_id)
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        task.status = "succeeded"
+        task.verification_status = "passed"
+        db.commit()
+    transition_run(run["id"], conversation_id, project_id, "running")
+    transition_run(run["id"], conversation_id, project_id, "succeeded")
+
+    response = client.get(f"/conversations/{conversation_id}/master-run")
+    assert response.status_code == 200
+    assert response.json()["id"] == run["id"]
+    assert response.json()["status"] == "succeeded"
+    assert response.json()["derived_status"] == "succeeded"
+
+
+def test_conversation_master_run_cancel_endpoint_cancels_queued_tasks(tmp_path):
+    project_response = client.post("/projects", json={
+        "name": "Goal cancel project", "slug": f"goal-cancel-{uuid4().hex[:8]}",
+        "workspace_path": str(tmp_path),
+    })
+    project_id = project_response.json()["id"]
+    conversation_response = client.post("/conversations", json={
+        "project_id": project_id, "title": "Goal cancellation",
+    })
+    conversation_id = conversation_response.json()["id"]
+    from ai_work_os.master_run import create_or_resume_run, link_task
+    run = create_or_resume_run(conversation_id, project_id, "取消关联任务")
+    task_response = client.post("/tasks", json={
+        "project_id": project_id, "title": "待取消任务",
+        "prompt": "只读检查", "workspace_path": str(tmp_path),
+    })
+    task_id = task_response.json()["id"]
+    link_task(run["id"], conversation_id, project_id, task_id)
+
+    response = client.post(
+        f"/conversations/{conversation_id}/master-run/cancel",
+        json={"reason": "用户主动取消"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["cancelled_tasks"] == 1
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "cancelled"
 
 
 def test_dashboard_task_selection_is_scoped_to_task_rows():
@@ -57,6 +167,9 @@ def test_dashboard_is_served():
     assert '$("tasks").querySelectorAll(".task[data-id]")' in response.text
     assert "selectedWorkflow" in response.text
     assert "workflowDetailToken" in response.text
+    assert 'id="master-runs"' in response.text
+    assert "renderMasterRuns" in response.text
+    assert '/master-runs?limit=10' in response.text
     assert "if(selectedWorkflow)await loadWorkflowDetail(selectedWorkflow)" in response.text
 
 
@@ -3256,6 +3369,18 @@ def test_chat_history_latest_pages_and_incremental_event_cursor(tmp_path):
 def test_chat_frontend_uses_latest_pages_and_incremental_event_cursors():
     html = client.get("/").text
     assert 'latest=true&limit=500' in html
+    assert 'id="goal-progress"' in html
+    assert "renderGoalProgress" in html
+    assert "正在停止关联任务" in html
+    assert "已请求停止" in html
+    assert "goal-task-details" in html
+    assert "workflowDetails" in html
+    assert "verificationEvidence" in html
+    assert "workspace_changes" in html
+    assert 'id="cancel-goal"' in html
+    assert '/master-run/cancel' in html
+    assert "m.metadata&&m.metadata.internal" in html
+    assert "/master-run" in html
     assert 'after_id="+lastMessageId' in html
     assert 'eventCursors.get(t.id)' in html
     assert 'before_id="+messages[0].id' in html

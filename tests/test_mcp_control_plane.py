@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from ai_work_os import mcp_control_plane as mcp
 from ai_work_os.db import Base
-from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, Project, Task, TaskEvent, Workflow)
+from ai_work_os.models import (AgentTurn, Conversation, ConversationMessage, ExecutionApproval, MCPToolInvocation, MasterRun, MasterRunTask, MasterRunWorkflow, Project, Task, TaskEvent, Workflow)
 
 
 def isolated(monkeypatch, tmp_path):
@@ -69,6 +69,7 @@ def test_task_creation_is_project_bound_plan_only_and_only_queues(monkeypatch, t
     try:
         result = mcp.call_tool("create_task", {
             "title": "Inspect API", "prompt": "Review API behavior",
+            "verification_commands": ["python -m pytest -q tests/test_api.py"],
         })
         with factory() as db:
             task = db.get(Task, result["id"])
@@ -76,6 +77,8 @@ def test_task_creation_is_project_bound_plan_only_and_only_queues(monkeypatch, t
             assert task.workspace_path == str(tmp_path)
             assert task.permission_mode == "plan"
             assert task.status == "queued"
+            assert task.verification_commands == ["python -m pytest -q tests/test_api.py"]
+            assert task.verification_status == "pending"
             assert not task.auto_repair
             events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task.id)))
             assert [event.event_type for event in events] == ["task.queued"]
@@ -115,7 +118,7 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
         result = mcp.call_tool("create_workflow", {
             "title": "Build and test",
             "tasks": [
-                {"key": "build", "title": "Build", "prompt": "Build the app"},
+                {"key": "build", "title": "Build", "prompt": "Build the app", "verification_commands": ["python -m pytest -q"]},
                 {"key": "test", "title": "Test", "prompt": "Test the app", "depends_on": ["build"]},
             ],
         })
@@ -127,6 +130,9 @@ def test_workflow_creation_is_atomic_and_validates_dag(monkeypatch, tmp_path):
             assert len(tasks) == 2
             assert all(task.permission_mode == "plan" for task in tasks)
             assert all(task.status == "queued" for task in tasks)
+            build_task = next(task for task in tasks if task.title == "Build")
+            assert build_task.verification_commands == ["python -m pytest -q"]
+            assert build_task.verification_status == "pending"
             assert len(list(db.scalars(select(TaskEvent)))) == 2
         try:
             mcp.call_tool("create_workflow", {
@@ -161,7 +167,190 @@ def test_mcp_json_rpc_initialize_and_tool_listing():
     assert names == {
         "get_project_overview", "list_tasks", "get_task", "list_workflows",
         "get_workflow", "create_task", "create_workflow", "request_execution",
+        "start_goal", "get_goal", "update_goal", "cancel_goal",
     }
+
+
+
+def test_start_goal_is_persisted_and_idempotent(monkeypatch, tmp_path):
+    engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
+    try:
+        request = {
+            "jsonrpc": "2.0", "id": "goal-start-1", "method": "tools/call",
+            "params": {"name": "start_goal", "arguments": {
+                "goal": "完成一个功能并验证",
+                "max_steps": 12,
+                "deadline_hours": 3,
+            }},
+        }
+        first = mcp._reply(request)
+        retry = mcp._reply(request)
+        assert first["result"]["isError"] is False
+        first_value = __import__("json").loads(first["result"]["content"][0]["text"])
+        retry_value = __import__("json").loads(retry["result"]["content"][0]["text"])
+        assert first_value["id"] == retry_value["id"]
+        assert first_value["status"] == "planning"
+        with factory() as db:
+            runs = list(db.scalars(select(MasterRun)))
+            assert len(runs) == 1
+            assert runs[0].conversation_id
+            assert runs[0].project_id == project_id
+            assert runs[0].max_steps == 12
+            assert len(list(db.scalars(select(MCPToolInvocation)))) == 1
+    finally:
+        engine.dispose()
+
+
+def test_goal_tools_do_not_leak_session_factory_to_master_run(monkeypatch, tmp_path):
+    from ai_work_os import master_run as goal_service
+
+    original_factory = goal_service.SessionLocal
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "验证会话工厂隔离"},
+            request_id="session-isolation-start",
+        )
+        assert goal_service.SessionLocal is original_factory
+        goal = mcp.call_tool("get_goal", {})
+        assert goal["id"] == started["id"]
+        assert goal_service.SessionLocal is original_factory
+    finally:
+        engine.dispose()
+
+
+def test_goal_checkpoint_update_is_idempotent_across_retries(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "跨轮次持续推进"},
+            request_id="goal-create-once",
+        )
+        args = {
+            "plan": {"steps": [{"id": "inspect", "status": "pending"}]},
+            "checkpoint": {"last_completed_step": "none"},
+            "increment_step": True,
+        }
+        first = mcp.call_tool("update_goal", args, request_id="goal-checkpoint-once")
+        retry = mcp.call_tool("update_goal", args, request_id="goal-checkpoint-once")
+        assert first["id"] == started["id"] == retry["id"]
+        with factory() as db:
+            run = db.get(MasterRun, started["id"])
+            assert run.step_count == 1
+            assert run.checkpoint == {"last_completed_step": "none"}
+            assert run.plan["steps"][0]["id"] == "inspect"
+            assert len(list(db.scalars(select(MCPToolInvocation)))) == 2
+    finally:
+        engine.dispose()
+
+
+def test_tasks_created_during_active_goal_are_linked_automatically(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp._reply({
+            "jsonrpc": "2.0", "id": "goal-start", "method": "tools/call",
+            "params": {"name": "start_goal", "arguments": {"goal": "修复并验证"}},
+        })
+        assert started["result"]["isError"] is False
+        created = mcp._reply({
+            "jsonrpc": "2.0", "id": "goal-task", "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {
+                "title": "检查代码", "prompt": "检查项目代码并给出发现",
+            }},
+        })
+        assert created["result"]["isError"] is False
+        task_value = __import__("json").loads(created["result"]["content"][0]["text"])
+        with factory() as db:
+            run = db.scalar(select(MasterRun))
+            link = db.scalar(select(MasterRunTask).where(
+                MasterRunTask.master_run_id == run.id,
+                MasterRunTask.task_id == task_value["id"],
+            ))
+            assert link is not None and link.required
+    finally:
+        engine.dispose()
+
+
+
+
+def test_goal_budget_guards_block_task_and_workflow_creation(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool("start_goal", {"goal": "预算受限目标"}, request_id="blocked-goal-start")
+        cases = (
+            ("blocked", {"stop_reason": "step_budget_exceeded"}, 0, None),
+            ("running", {}, 20, None),
+            ("running", {}, 0, datetime.now(timezone.utc) - timedelta(seconds=1)),
+        )
+        for index, (status, checkpoint, step_count, deadline) in enumerate(cases):
+            with factory() as db:
+                run = db.get(MasterRun, started["id"])
+                run.status = status
+                run.checkpoint = checkpoint
+                run.step_count = step_count
+                run.max_steps = 20
+                run.deadline_at = deadline
+                db.commit()
+            for name, args in (
+                ("create_task", {"title": f"禁止任务 {index}", "prompt": "预算已耗尽"}),
+                ("create_workflow", {"title": f"禁止工作流 {index}", "tasks": [
+                    {"key": "a", "title": "A", "prompt": "预算已耗尽"},
+                ]}),
+            ):
+                try:
+                    mcp.call_tool(name, args, request_id=f"budget-guard-{index}-{name}")
+                except mcp.ToolError as exc:
+                    assert "预算上限" in str(exc)
+                else:
+                    raise AssertionError(f"{name} was allowed after goal budget exhaustion")
+        with factory() as db:
+            assert db.scalar(select(Task)) is None
+            assert db.scalar(select(Workflow)) is None
+    finally:
+        engine.dispose()
+
+def test_cancel_goal_cancels_queued_tasks_and_is_idempotent(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "需要可取消的目标"},
+            request_id="cancel-goal-start",
+        )
+        task = mcp.call_tool("create_task", {
+            "title": "待执行任务", "prompt": "执行只读检查",
+        }, request_id="cancel-goal-task")
+        args = {"reason": "用户要求停止"}
+        cancelled = mcp.call_tool("cancel_goal", args, request_id="cancel-goal-once")
+        retry = mcp.call_tool("cancel_goal", args, request_id="cancel-goal-once")
+        assert cancelled == retry
+        assert cancelled["id"] == started["id"]
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["cancelled_tasks"] == 1
+        with factory() as db:
+            run = db.get(MasterRun, started["id"])
+            task_row = db.get(Task, task["id"])
+            assert run.active_key is None
+            assert task_row.status == "cancelled"
+            assert task_row.cancel_requested == 1
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task["id"])))
+            assert any(event.event_type == "task.cancelled" for event in events)
+    finally:
+        engine.dispose()
+
+
+def test_goal_tools_require_request_ids(monkeypatch, tmp_path):
+    engine, _, _ = isolated(monkeypatch, tmp_path)
+    try:
+        response = mcp._reply({
+            "jsonrpc": "2.0", "method": "tools/call",
+            "params": {"name": "start_goal", "arguments": {"goal": "No request id"}},
+        })
+        assert response["result"]["isError"] is True
+        assert "request id" in response["result"]["content"][0]["text"]
+    finally:
+        engine.dispose()
 
 
 def test_create_task_json_rpc_retry_returns_original_result(monkeypatch, tmp_path):
@@ -282,6 +471,7 @@ def test_broker_client_import_does_not_initialize_host_database(tmp_path):
 def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatch, tmp_path):
     engine, factory, (project_id, _) = isolated(monkeypatch, tmp_path)
     try:
+        mcp.call_tool("start_goal", {"goal": "修复登录页面并验证"}, request_id="goal-before-write")
         args = {
             "title": "修复登录页面", "prompt": "修复项目中的登录页面并运行验证",
             "acceptance_criteria": "登录流程测试通过", "verification_commands": ["pytest -q tests/test_login.py"],
@@ -301,8 +491,105 @@ def test_request_execution_creates_pending_approval_and_is_idempotent(monkeypatc
             assert approval.status == "pending"
             assert approval.project_id == project_id
             assert approval.scope_hash
+            run = db.scalar(select(MasterRun))
+            assert db.scalar(select(MasterRunTask.id).where(
+                MasterRunTask.master_run_id == run.id,
+                MasterRunTask.task_id == task.id,
+            )) is not None
             assert db.scalar(select(MCPToolInvocation).where(
                 MCPToolInvocation.request_id == "s:write-request-1"
             )) is not None
+    finally:
+        engine.dispose()
+
+
+def test_cancel_goal_requests_cancellation_of_running_tasks(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        mcp.call_tool("start_goal", {"goal": "取消运行中的任务"}, request_id="running-cancel-start")
+        workflow = mcp.call_tool("create_workflow", {
+            "title": "仍在执行的工作流",
+            "tasks": [{"key": "work", "title": "运行中任务", "prompt": "执行只读检查"}],
+        }, request_id="running-cancel-workflow")
+        task_id = workflow["tasks"][0]["id"]
+        with factory() as db:
+            row = db.get(Task, task_id)
+            row.status = "running"
+            db.commit()
+        result = mcp.call_tool("cancel_goal", {}, request_id="running-cancel-goal")
+        assert result["status"] == "cancelling"
+        assert result["cancellation_requested_tasks"] == 1
+        try:
+            mcp.call_tool("create_task", {
+                "title": "取消后不应创建", "prompt": "测试取消状态保护",
+            }, request_id="running-cancel-create-task")
+        except mcp.ToolError as exc:
+            assert "正在等待关联任务停止" in str(exc)
+        else:
+            raise AssertionError("cancelling goal must reject new tasks")
+        with factory() as db:
+            row = db.get(Task, task_id)
+            assert row.status == "running"
+            assert row.cancel_requested == 1
+            workflow_row = db.get(Workflow, workflow["id"])
+            assert workflow_row.status not in {"cancelled", "succeeded", "failed"}
+            events = list(db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id)))
+            assert any(event.event_type == "task.cancel_requested" for event in events)
+    finally:
+        engine.dispose()
+
+
+def test_cancel_goal_revokes_pending_execution_approval(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        mcp.call_tool("start_goal", {"goal": "取消待审批写入"}, request_id="approval-cancel-start")
+        task = mcp.call_tool("request_execution", {
+            "title": "受控写入申请", "prompt": "修改指定文件",
+            "verification_commands": ["python -m pytest -q"],
+        }, request_id="approval-cancel-task")
+        assert task["approval_status"] == "pending"
+        mcp.call_tool("cancel_goal", {}, request_id="approval-cancel-goal")
+        with factory() as db:
+            approval = db.scalar(select(ExecutionApproval).where(
+                ExecutionApproval.task_id == task["id"],
+            ))
+            assert approval.status == "revoked"
+            assert approval.decision_source == "task_state"
+    finally:
+        engine.dispose()
+
+
+def test_workflow_and_dag_tasks_are_linked_to_active_goal(monkeypatch, tmp_path):
+    engine, factory, _ = isolated(monkeypatch, tmp_path)
+    try:
+        started = mcp.call_tool(
+            "start_goal", {"goal": "交付一个完整功能"},
+            request_id="goal-dag-start",
+        )
+        workflow = mcp.call_tool("create_workflow", {
+            "title": "功能交付 DAG",
+            "tasks": [
+                {"key": "inspect", "title": "检查", "prompt": "检查现状"},
+                {"key": "build", "title": "实现", "prompt": "实现功能", "depends_on": ["inspect"]},
+                {"key": "verify", "title": "验证", "prompt": "验证功能",
+                 "depends_on": ["build"], "verification_commands": ["python -m pytest -q"]},
+            ],
+        }, request_id="goal-dag-create")
+        goal = mcp.call_tool("get_goal", {})
+        assert goal["workflows"][0]["workflow_id"] == workflow["id"]
+        with factory() as db:
+            assert db.scalar(select(MasterRunWorkflow).where(
+                MasterRunWorkflow.master_run_id == started["id"],
+                MasterRunWorkflow.workflow_id == workflow["id"],
+            )) is not None
+            links = list(db.scalars(select(MasterRunTask).where(
+                MasterRunTask.master_run_id == started["id"],
+            )))
+            assert len(links) == 3
+            verify = db.get(Task, next(
+                link.task_id for link in links
+                if db.get(Task, link.task_id).title == "验证"
+            ))
+            assert verify.verification_commands == ["python -m pytest -q"]
     finally:
         engine.dispose()

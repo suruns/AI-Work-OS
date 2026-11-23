@@ -11,6 +11,7 @@ import json
 import math
 import os
 import sys
+from datetime import timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -18,7 +19,7 @@ from sqlalchemy import func, select
 BROKER_SOCKET = os.getenv("AI_WORK_OS_MCP_BROKER_SOCKET", "").strip()
 if not BROKER_SOCKET:
     from .db import Base, SessionLocal, engine, ensure_schema_compatibility
-    from .models import Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
+    from .models import AgentTurn, MasterRun, MasterRunTask, MasterRunWorkflow, Project, Task, TaskEvent, Workflow, WorkflowTaskDependency, MCPToolInvocation, ExecutionApproval, utcnow
     from .execution_approval import DEFAULT_TTL_HOURS, task_scope_hash
     Base.metadata.create_all(bind=engine)
     ensure_schema_compatibility()
@@ -27,6 +28,7 @@ else:
     SessionLocal = None
     Project = Task = TaskEvent = Workflow = WorkflowTaskDependency = ExecutionApproval = utcnow = None
     task_scope_hash = None
+    AgentTurn = MasterRun = MasterRunTask = MasterRunWorkflow = None
 
 PROJECT_ID = os.getenv("AI_WORK_OS_MCP_PROJECT_ID", "").strip()
 TURN_ID = os.getenv("AI_WORK_OS_MCP_TURN_ID", "").strip()
@@ -77,6 +79,40 @@ def _workflow_summary(db, workflow: Workflow) -> dict[str, Any]:
 
 def _tools() -> list[dict[str, Any]]:
     return [
+        {
+            "name": "start_goal",
+            "description": "为当前对话创建或恢复一个持久化工作目标。必须先调用此工具，再创建目标任务。",
+            "inputSchema": {"type": "object", "properties": {
+                "goal": {"type": "string", "minLength": 1, "maxLength": 10000},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "deadline_hours": {"type": "integer", "minimum": 1, "maximum": 24, "default": 4},
+            }, "required": ["goal"], "additionalProperties": False},
+        },
+        {
+            "name": "cancel_goal",
+            "description": "取消当前目标，并协调取消所有关联的排队/运行任务；待审批的写入申请会撤销，不会批准任何任务。",
+            "inputSchema": {"type": "object", "properties": {
+                "reason": {"type": "string", "maxLength": 2000},
+            }, "additionalProperties": False},
+        },
+        {
+            "name": "get_goal",
+            "description": "读取当前对话的活动目标及关联任务状态。",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "update_goal",
+            "description": "保存目标计划/检查点，或根据持久化任务证据更新目标状态。不能绕过审批或验证。",
+            "inputSchema": {"type": "object", "properties": {
+                "plan": {"type": "object"},
+                "checkpoint": {"type": "object"},
+                "status": {"type": "string", "enum": ["planning", "ready", "running", "waiting_approval", "waiting_input", "blocked", "verifying", "succeeded", "failed"]},
+                "reason": {"type": "string", "maxLength": 2000},
+                "increment_step": {"type": "boolean", "default": False},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 100},
+                "deadline_hours": {"type": "integer", "minimum": 1, "maximum": 24},
+            }, "additionalProperties": False},
+        },
         {
             "name": "get_project_overview",
             "description": "读取当前对话绑定项目的概览信息。",
@@ -142,6 +178,7 @@ def _tools() -> list[dict[str, Any]]:
                         "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
                         "depends_on": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
                         "acceptance_criteria": {"type": "string", "maxLength": 10000},
+                        "verification_commands": {"type": "array", "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
                     }, "required": ["key", "title", "prompt"], "additionalProperties": False,
                 }},
             }, "required": ["title", "tasks"], "additionalProperties": False},
@@ -161,12 +198,18 @@ def _create_task(db, project: Project, args: dict) -> dict:
     if criteria is not None and (not isinstance(criteria, str) or len(criteria) > 10_000):
         raise ToolError("acceptance_criteria 必须是字符串，且长度不能超过 10000 个字符。")
     workspace = project.workspace_path
+    commands = args.get("verification_commands", [])
+    if not isinstance(commands, list) or len(commands) > 5 or any(
+        not isinstance(command, str) or not command.strip() or len(command) > 2000
+        for command in commands
+    ):
+        raise ToolError("verification_commands 最多包含 5 条命令；每条必须非空且不超过 2000 个字符。")
     task = Task(
         project_id=project.id, title=title.strip(), prompt=prompt,
         workspace_path=workspace, permission_mode="plan", priority=0,
         max_attempts=1, acceptance_criteria=criteria,
-        verification_commands=[], auto_repair=False, max_repair_attempts=0,
-        verification_status="not_configured",
+        verification_commands=commands, auto_repair=False, max_repair_attempts=0,
+        verification_status="pending" if commands else "not_configured",
     )
     db.add(task)
     db.flush()
@@ -174,8 +217,6 @@ def _create_task(db, project: Project, args: dict) -> dict:
         "status": "queued", "project_id": project.id,
         "created_via": "master_agent_mcp",
     }))
-    db.commit()
-    db.refresh(task)
     return _task_summary(task)
 
 
@@ -211,6 +252,12 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
                 raise ToolError(f"任务 {key!r} 缺少必需字段 {field}。")
             if value is not None and (not isinstance(value, str) or len(value) > maximum):
                 raise ToolError(f"任务 {key!r} 的字段 {field} 无效。")
+        commands = spec.get("verification_commands", [])
+        if not isinstance(commands, list) or len(commands) > 5 or any(
+            not isinstance(command, str) or not command.strip() or len(command) > 2000
+            for command in commands
+        ):
+            raise ToolError(f"任务 {key!r} 的 verification_commands 最多包含 5 条有效命令。")
     visiting: set[str] = set()
     visited: set[str] = set()
     def visit(key: str) -> None:
@@ -237,8 +284,9 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
             workspace_path=project.workspace_path, permission_mode="plan",
             priority=0, max_attempts=1,
             acceptance_criteria=spec.get("acceptance_criteria"),
-            verification_commands=[], auto_repair=False, max_repair_attempts=0,
-            verification_status="not_configured",
+            verification_commands=spec.get("verification_commands", []),
+            auto_repair=False, max_repair_attempts=0,
+            verification_status="pending" if spec.get("verification_commands") else "not_configured",
         )
         db.add(task)
         created[key] = task
@@ -255,8 +303,6 @@ def _create_workflow(db, project: Project, args: dict) -> dict:
             "status": "queued", "workflow_id": workflow.id,
             "project_id": project.id, "created_via": "master_agent_mcp",
         }))
-    db.commit()
-    db.refresh(workflow)
     return {
         **_workflow_summary(db, workflow),
         "tasks": [{"key": key, **_task_summary(task)} for key, task in created.items()],
@@ -277,7 +323,7 @@ def call_tool(
         raise ToolError("受沙箱限制的 MCP 客户端不能直接访问数据库。")
     invocation_turn_id = turn_id or TURN_ID
     bound_project_id = project_id if project_id is not None else PROJECT_ID
-    if name in {"create_task", "create_workflow", "request_execution"} and request_id is not None:
+    if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal", "cancel_goal"} and request_id is not None:
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
             raise ToolError("创建类工具调用必须提供字符串或数字类型的 JSON-RPC request id。")
         if isinstance(request_id, float) and not math.isfinite(request_id):
@@ -309,7 +355,118 @@ def call_tool(
                     raise ToolError("该 JSON-RPC request id 已用于不同的工具参数或项目范围。")
                 return previous.result
 
+        if name in {"start_goal", "update_goal", "cancel_goal"}:
+            if request_key is None:
+                raise ToolError("目标写入工具必须提供 JSON-RPC request id。")
+            from . import master_run as goal_service
+            turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
+            if turn is None:
+                raise ToolError("目标编排工具必须绑定有效的 Master Agent 轮次。")
+            project = _project(db, project_id)
+            if name == "start_goal":
+                value = goal_service.create_or_resume_run(
+                    turn.conversation_id, project.id, args.get("goal"),
+                    max_steps=args.get("max_steps", 20),
+                    deadline_hours=args.get("deadline_hours", 4), session=db,
+                )
+            else:
+                active = db.scalar(select(MasterRun).where(
+                    MasterRun.conversation_id == turn.conversation_id,
+                    MasterRun.active_key == turn.conversation_id,
+                ))
+                if active is None:
+                    raise ToolError("当前对话没有活动目标。")
+                if name == "cancel_goal":
+                    value = goal_service.cancel_run(
+                        active.id, turn.conversation_id, project.id,
+                        reason=args.get("reason"), session=db,
+                    )
+                else:
+                    if not any(key in args for key in ("plan", "checkpoint", "increment_step", "status", "max_steps", "deadline_hours")):
+                        raise ToolError("update_goal 至少需要提供 plan、checkpoint、increment_step 或 status。")
+                    value = goal_service.get_run(active.id, turn.conversation_id, project.id, session=db)
+                    if "max_steps" in args or "deadline_hours" in args:
+                        value = goal_service.extend_run_budget(
+                            active.id, turn.conversation_id, project.id,
+                            max_steps=args.get("max_steps"),
+                            deadline_hours=args.get("deadline_hours"),
+                            session=db,
+                        )
+                    if any(key in args for key in ("plan", "checkpoint", "increment_step")):
+                        value = goal_service.update_plan_checkpoint(
+                            active.id, turn.conversation_id, project.id,
+                            plan=args.get("plan"), checkpoint=args.get("checkpoint"),
+                            increment_step=args.get("increment_step", False), session=db,
+                        )
+                    if args.get("status") is not None:
+                        value = goal_service.transition_run(
+                            active.id, turn.conversation_id, project.id,
+                            args["status"], reason=args.get("reason"), session=db,
+                        )
+            db.add(MCPToolInvocation(
+                turn_id=invocation_turn_id, project_id=project.id,
+                request_id=request_key, tool_name=name,
+                arguments_hash=arguments_hash, result=value,
+            ))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                previous = db.scalar(select(MCPToolInvocation).where(
+                    MCPToolInvocation.turn_id == invocation_turn_id,
+                    MCPToolInvocation.request_id == request_key,
+                ))
+                if previous is None or previous.tool_name != name or previous.arguments_hash != arguments_hash:
+                    raise ToolError("目标工具调用幂等性冲突。")
+                return previous.result
+            return value
+
         project = _project(db, project_id)
+        if name in {"create_task", "create_workflow", "request_execution"} and invocation_turn_id:
+            turn = db.get(AgentTurn, invocation_turn_id)
+            if turn is not None:
+                active_run = db.scalar(select(MasterRun).where(
+                    MasterRun.conversation_id == turn.conversation_id,
+                    MasterRun.active_key == turn.conversation_id,
+                ))
+                if active_run is not None:
+                    if active_run.status == "cancelling":
+                        raise ToolError("当前目标正在等待关联任务停止，不能再创建新任务或工作流。")
+                    checkpoint = active_run.checkpoint if isinstance(active_run.checkpoint, dict) else {}
+                    deadline = active_run.deadline_at
+                    if deadline is not None and deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=timezone.utc)
+                    if (
+                        active_run.status == "blocked"
+                        or checkpoint.get("stop_reason") in {"deadline_exceeded", "step_budget_exceeded"}
+                        or (deadline is not None and deadline <= utcnow())
+                        or active_run.step_count >= active_run.max_steps
+                    ):
+                        raise ToolError("当前目标已达到时限或推进预算上限，不能再创建新任务或工作流。")
+        if name == "get_goal":
+            from . import master_run as goal_service
+            turn = db.get(AgentTurn, invocation_turn_id) if invocation_turn_id else None
+            if turn is None:
+                raise ToolError("目标查询必须绑定有效的 Master Agent 轮次。")
+            active = db.scalar(select(MasterRun).where(
+                MasterRun.conversation_id == turn.conversation_id,
+                MasterRun.active_key == turn.conversation_id,
+            ))
+            if active is None:
+                active = db.scalar(select(MasterRun).where(
+                    MasterRun.conversation_id == turn.conversation_id,
+                ).order_by(MasterRun.updated_at.desc(), MasterRun.id.desc()).limit(1))
+            if active is None:
+                return {"status": "no_active_goal", "derived_status": "no_active_goal", "tasks": []}
+            tasks = goal_service.list_run_tasks(active.id, turn.conversation_id, project.id, session=db)
+            workflows = goal_service.list_run_workflows(active.id, turn.conversation_id, project.id, session=db)
+            return {
+                **goal_service.get_run(active.id, turn.conversation_id, project.id, session=db),
+                "derived_status": goal_service.reported_run_status(active, tasks),
+                "tasks": tasks,
+                "workflows": workflows,
+            }
+
         if name == "get_project_overview":
             counts = {}
             for model, key in ((Task, "tasks"), (Workflow, "workflows")):
@@ -401,6 +558,39 @@ def call_tool(
                 value = {**_task_summary(task), "approval_id": approval.id, "approval_status": "pending"}
             else:
                 value = _create_task(db, project, args) if name == "create_task" else _create_workflow(db, project, args)
+            if invocation_turn_id:
+                turn = db.get(AgentTurn, invocation_turn_id)
+                if turn is not None:
+                    active_run = db.scalar(select(MasterRun).where(
+                        MasterRun.conversation_id == turn.conversation_id,
+                        MasterRun.active_key == turn.conversation_id,
+                    ))
+                    if active_run is not None:
+                        if name in {"create_task", "request_execution"}:
+                            if db.scalar(select(MasterRunTask.id).where(
+                                MasterRunTask.master_run_id == active_run.id,
+                                MasterRunTask.task_id == value["id"],
+                            )) is None:
+                                db.add(MasterRunTask(
+                                    master_run_id=active_run.id, task_id=value["id"], required=True,
+                                ))
+                        elif name == "create_workflow":
+                            if db.scalar(select(MasterRunWorkflow.id).where(
+                                MasterRunWorkflow.master_run_id == active_run.id,
+                                MasterRunWorkflow.workflow_id == value["id"],
+                            )) is None:
+                                db.add(MasterRunWorkflow(
+                                    master_run_id=active_run.id, workflow_id=value["id"],
+                                ))
+                            for created_task in value.get("tasks", []):
+                                if db.scalar(select(MasterRunTask.id).where(
+                                    MasterRunTask.master_run_id == active_run.id,
+                                    MasterRunTask.task_id == created_task["id"],
+                                )) is None:
+                                    db.add(MasterRunTask(
+                                        master_run_id=active_run.id,
+                                        task_id=created_task["id"], required=True,
+                                    ))
             if request_key is None:
                 db.commit()
                 return value
@@ -444,7 +634,7 @@ def _reply(message: dict) -> dict | None:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            if name in {"create_task", "create_workflow", "request_execution"} and request_id is None:
+            if name in {"create_task", "create_workflow", "request_execution", "start_goal", "update_goal", "cancel_goal"} and request_id is None:
                 raise ToolError("会修改数据的 MCP 工具调用必须提供 JSON-RPC request id。")
             value = (
                 _broker_call(name, args, request_id)

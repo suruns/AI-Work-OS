@@ -1,87 +1,62 @@
-# Project Management UI — Design and Implementation Plan
+# 项目管理 UI：设计与当前实现
 
-## Goal
+## 目标
 
-Make Projects a first-class workspace in the Chinese Chat-first AI Work OS UI. Users can create/select projects, inspect project status and associated tasks/workflows/goals, and start a Master Agent conversation with project context.
+在中文 Chat-first AI Work OS 中提供独立的项目工作区。用户可以查看项目、管理项目生命周期、检查项目关联的任务/工作流/Master Agent 目标与对话，并从项目上下文启动 Master Agent。
 
-## Navigation
+## 导航
 
-- Master Agent: global conversation, no project selected by default.
-- 项目管理: project list and project detail workspace.
-- 任务管理: global task inventory, filterable by project.
-- 工作流: global workflow inventory.
-- 执行审批: pending approvals.
+- **Master Agent**：主对话入口；可选择项目上下文，也可进行普通对话。
+- **项目管理**：项目列表与项目详情，路由为 `/project-management`。
+- **任务控制台**：保留现有 Dashboard，作为任务执行与诊断视图。
 
-The existing Dashboard remains available as an execution/diagnostics view; this phase does not replace or remove it.
+项目管理页面通过 Chat 侧栏入口访问；页面提供返回 Master Agent 和任务控制台的链接。
 
-## Project list
+## 当前已实现
 
-Each project card/row displays:
-- Name and description
-- Workspace root
-- Active/archived status
-- Last activity (derived from available timestamps; do not fabricate)
-- Task counts by status (queued, running, succeeded, failed, cancelled)
-- Workflow counts
-- Active goal count when supported by API
+### 项目列表与详情
 
-Actions:
-- Create project
-- Open project
-- Archive/reactivate project
-- Start project-scoped Master Agent conversation
+- 项目列表显示名称、工作区路径，以及任务状态计数和工作流总数。
+- 项目详情显示描述、工作区路径、任务总数/已完成/执行中/待审批或阻塞计数。
+- 详情页分为任务、工作流、Master Agent 目标、对话四个数据视图。
+- Master Agent 目标优先展示 API 提供的派生状态，并显示已验证任务进度、关联任务数和步骤进度。
+- 任务可显示验证状态；对话显示消息数和进行中的轮次；工作流显示关联任务计数。
 
-## Project detail
+### 项目生命周期
 
-Tabs/sections:
-1. Overview: metadata, workspace root, status, aggregate task/workflow counts.
-2. Tasks: project-filtered tasks; status, title, created/updated, worker, result summary.
-3. Workflows: project-filtered workflows; status and dependency progress.
-4. Goals: project-linked Master Agent goals and evidence/report where APIs support project filtering.
-5. Activity: chronological view from existing task/workflow/goal timestamps and events; only show data that APIs provide.
+- 使用现有 `POST /projects` 创建项目，输入名称、服务器上已存在的工作区路径和可选描述。
+- 使用现有 `PATCH /projects/{id}` 归档或恢复项目。
+- 不提供破坏性删除操作。
+- 归档项目不提供项目上下文 Chat 启动入口。
 
-Primary action: “在此项目中与 Master Agent 对话”, navigating to Chat and selecting this project context.
+### 项目上下文对话
 
-## Create project
+- 活跃项目详情页提供“在此项目中与 Master Agent 对话”入口。
+- 入口通过 `/?project_id={id}` 进入 Chat。
+- Chat 校验项目存在且处于活跃状态后，选择项目上下文并创建新对话；随后清理 URL 查询参数。
+- Chat 侧栏也允许用户显式切换活跃项目或选择普通对话。
 
-Fields:
-- 项目名称 (required)
-- 描述 (optional)
-- 工作目录 (required; backend validates canonical existing directory)
+## 当前验收
 
-Use existing POST /projects API. Slug generation remains server-side. On success, open the project detail page and refresh project inventory.
+- 项目创建、详情、Master Agent 目标视图、归档、恢复及项目 Chat 上下文流程由 E2E 覆盖。
+- 最新 PR CI 已通过：API/单元测试、Phase 11.6 goal orchestration acceptance，以及 Dashboard E2E 三轮。
+- 本阶段复用既有 API 和数据模型，不新增数据库结构。
+- PR 尚未合并；部署及本机运行环境验收需在合并/部署流程中单独执行。
 
-## API integration
+## 暂未纳入本阶段
 
-Use existing project endpoints first:
-- GET /projects
-- POST /projects
-- GET /projects/{id}
-- PATCH /projects/{id}
-- GET /projects/{id}/tasks
-- GET /projects/{id}/workflows
-- Existing global task/workflow endpoints with project_id filters
+以下内容属于后续增强，不应视为当前页面已有能力：
 
-Inspect goal APIs before implementing project goals; avoid adding duplicate backend concepts. Add API endpoints only if current endpoints cannot support the UI.
+- 项目列表中的最近活动时间线。
+- 独立的项目概览与活动时间线视图。
+- 全局任务/工作流/审批页面增加项目筛选器。
+- 项目详情中的 Worker、结果摘要、完整依赖图和证据浏览器。
+- 项目级批量操作或删除。
 
-## UI architecture
+## 实现约束
 
-- Chinese (zh-CN) labels and messages.
-- Keep existing Chat-first experience intact.
-- Add a project workspace route/view within current frontend rather than a second app.
-- Reuse current design tokens, cards, badges, responsive layout.
-- Project selection is explicit; global chat must not silently inherit a stale project.
-- Handle loading, empty, error, archived, and partial-data states.
-- No destructive project deletion. Archive is reversible.
-
-## Acceptance
-
-- Project list loads and displays real backend data.
-- Create project validation and successful creation.
-- Project detail metadata and counts match API.
-- Task/workflow lists are correctly scoped to project.
-- Archive/reactivate behavior is reflected in UI.
-- Project-scoped chat selects correct project context and persists through conversation switching.
-- Existing Chat, Dashboard, task, workflow, approval, and goal functionality remains regression-free.
-- Responsive layout at desktop and narrow widths.
-- E2E tests cover list, create, detail, project filtering, and chat-context navigation.
+- 所有用户可见文案使用简体中文；产品名称 Master Agent 保留。
+- 保持 Chat-first 主体验，不以项目管理页面替代主对话。
+- 仅显示 API 实际提供的数据，不推断或伪造活动时间与执行结果。
+- 项目选择必须显式；普通对话不能静默继承旧项目上下文。
+- 保留现有 Dashboard 与任务执行流程。

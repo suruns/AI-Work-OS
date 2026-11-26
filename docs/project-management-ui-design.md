@@ -41,7 +41,8 @@
 - 项目创建、详情、Master Agent 目标视图、归档、恢复及项目 Chat 上下文流程由 E2E 覆盖。
 - 最新 PR CI 已通过：API/单元测试、Phase 11.6 goal orchestration acceptance，以及 Dashboard E2E 三轮。
 - 本阶段复用既有 API 和数据模型，不新增数据库结构。
-- PR 尚未合并；部署及本机运行环境验收需在合并/部署流程中单独执行。
+- PR #30 已合并至 `main`（合并提交：`d2ac62ba946a5575c64e19deac63c7ae9037e6f2`）。
+- GitHub CI 已通过；部署及本机运行环境验收仍需在本机同步后单独执行。
 
 ## 暂未纳入本阶段
 
